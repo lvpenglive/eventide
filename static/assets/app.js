@@ -3,6 +3,7 @@
   const TOKEN_KEY = "eventide_token";
   const USER_KEY = "eventide_user";
   const SIDEBAR_KEY = "eventide_sidebar_collapsed";
+  const ALERT_VIEW_KEY = "eventide_alert_view"; // cards | table
 
   const state = {
     page: "overview",
@@ -15,7 +16,7 @@
     datasources: ["数据源", "Prometheus / VictoriaMetrics"],
     rules: ["告警规则", "阈值评估与通知绑定"],
     channels: ["通知渠道", "Webhook · 钉钉 · 企微 · 飞书"],
-    ingress: ["Ingress 接入", "外部告警接入 · 试推送 · 通知绑定"],
+    ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
     alerts: ["告警事件", "按状态浏览 · 点开看详情"],
     silences: ["静默策略", "按规则或标签临时抑制通知"],
     settings: ["系统设置", "运行配置与账号信息（只读）"],
@@ -243,7 +244,7 @@
           <div class="stat accent"><div class="n">${d.enabled_rules}/${d.rules}</div><div class="l">启用规则</div></div>
           <div class="stat"><div class="n">${d.datasources}</div><div class="l">数据源</div></div>
           <div class="stat"><div class="n">${d.channels}</div><div class="l">通知渠道</div></div>
-          <div class="stat"><div class="n">${d.ingress_routes}</div><div class="l">Ingress</div></div>
+          <div class="stat"><div class="n">${d.ingress_routes}</div><div class="l">告警接入</div></div>
           <div class="stat"><div class="n">${d.active_silences}</div><div class="l">生效静默</div></div>
         </div>
         <div class="panel">
@@ -381,7 +382,7 @@
     },
 
     async ingress(root) {
-      setActions(`<button class="primary" id="btn-add">新建 Ingress</button>`);
+      setActions(`<button class="primary" id="btn-add">新建接入</button>`);
       document.getElementById("btn-add").onclick = () => editIngress();
       const [rows, chs] = await Promise.all([api("/api/ingress"), api("/api/channels")]);
       state.cache.channels = chs;
@@ -391,14 +392,14 @@
       if (!rows.length) {
         root.innerHTML = `
           <div class="panel guide">
-            <h3>从 Ingress 接入告警</h3>
+            <h3>配置告警接入</h3>
             <ol class="steps">
               <li>先在「通知渠道」配置至少一个机器人 / Webhook（可选，也可稍后绑定）</li>
-              <li>创建 Ingress：选择 Alertmanager / Generic（含拨测） / Kafka</li>
+              <li>创建接入：选择 Alertmanager / Generic（含拨测） / Kafka</li>
               <li>把外部平台 Webhook 指到下方生成的地址，或使用「试推送」验证</li>
               <li>在「告警事件」查看 firing / resolved 与通知结果</li>
             </ol>
-            <button class="primary" id="btn-guide-add">新建第一个 Ingress</button>
+            <button class="primary" id="btn-guide-add">新建第一个接入</button>
           </div>`;
         document.getElementById("btn-guide-add").onclick = () => editIngress();
         return;
@@ -481,7 +482,7 @@
       });
       root.querySelectorAll("[data-del]").forEach((b) => {
         b.onclick = async () => {
-          if (!confirm("确认删除该 Ingress？")) return;
+          if (!confirm("确认删除该接入？")) return;
           await api(`/api/ingress/${b.dataset.del}`, { method: "DELETE" });
           toast("已删除");
           renderPage();
@@ -525,6 +526,7 @@
         const nPend = allRows.filter((a) => a.status === "pending").length;
         const nRes = allRows.filter((a) => a.status === "resolved").length;
 
+        const view = getAlertView();
         root.innerHTML = `
           <div class="alert-toolbar">
             <div class="alert-tabs" role="tablist">
@@ -534,7 +536,11 @@
               <button type="button" class="alert-tab ok ${status === "resolved" ? "on" : ""}" data-st="resolved">已恢复 <em>${nRes}</em></button>
             </div>
             <div class="alert-filters">
-              <input id="alert-q" placeholder="搜索名称、摘要…" value="${esc(q)}" />
+              <div class="view-switch" role="group" aria-label="列表样式">
+                <button type="button" class="view-btn ${view === "cards" ? "on" : ""}" data-view="cards" title="卡片列表">卡片</button>
+                <button type="button" class="view-btn ${view === "table" ? "on" : ""}" data-view="table" title="表格列表">表格</button>
+              </div>
+              <input id="alert-q" placeholder="搜索名称、描述…" value="${esc(q)}" />
               <select id="alert-sev">
                 <option value="">级别</option>
                 <option value="critical" ${severity === "critical" ? "selected" : ""}>critical</option>
@@ -543,17 +549,19 @@
               </select>
               <select id="alert-source">
                 <option value="">来源</option>
-                <option value="ingress" ${source === "ingress" ? "selected" : ""}>Ingress</option>
+                <option value="ingress" ${source === "ingress" ? "selected" : ""}>告警接入</option>
                 <option value="rule" ${source === "rule" ? "selected" : ""}>规则</option>
               </select>
             </div>
           </div>
           ${
             rows.length
-              ? alertCards(rows, ingressMap)
+              ? view === "table"
+                ? `<div class="panel">${alertTableGrid(rows, ingressMap)}</div>`
+                : alertCards(rows, ingressMap)
               : `<div class="panel empty">
-                  暂无告警。去 Ingress「试推送」或等待规则触发。
-                  <div style="margin-top:12px"><button class="primary" id="go-ingress">去 Ingress</button></div>
+                  暂无告警。去「告警接入」试推送，或等待规则触发。
+                  <div style="margin-top:12px"><button class="primary" id="go-ingress">去告警接入</button></div>
                 </div>`
           }`;
 
@@ -566,7 +574,14 @@
             load();
           };
         });
-        bindAlertCards(root, rows, ingressMap);
+        root.querySelectorAll(".view-btn").forEach((btn) => {
+          btn.onclick = () => {
+            setAlertView(btn.dataset.view);
+            load();
+          };
+        });
+        if (view === "table") bindAlertTableGrid(root, rows, ingressMap);
+        else bindAlertCards(root, rows, ingressMap);
         const go = document.getElementById("go-ingress");
         if (go) go.onclick = () => navigate("ingress");
         let t;
@@ -646,6 +661,20 @@
     },
   };
 
+  function getAlertView() {
+    const v = localStorage.getItem(ALERT_VIEW_KEY);
+    return v === "table" ? "table" : "cards";
+  }
+
+  function setAlertView(v) {
+    localStorage.setItem(ALERT_VIEW_KEY, v === "table" ? "table" : "cards");
+  }
+
+  function alertTargetIp(a) {
+    const l = a.labels || {};
+    return l.alertIp || l.ipaddr || l.instance || l.host || l.hostname || "";
+  }
+
   function alertCards(rows, ingressMap) {
     return `<div class="alert-feed">${rows
       .map((a, i) => {
@@ -654,7 +683,12 @@
         const dur = alertDuration(a);
         const src = alertSourceLabel(a, ingressMap);
         const val = fmtValue(a.value);
-        const chips = labelChips(a.labels, ["alertname", "severity", "source"], 3);
+        const ip = alertTargetIp(a);
+        const chips = labelChips(
+          a.labels,
+          ["alertname", "severity", "source", "alertIp", "ipaddr", "instance", "host", "hostname"],
+          3
+        );
         return `<article class="alert-card status-${esc(a.status)} sev-${esc(
           a.severity
         )}" data-alert-idx="${i}" tabindex="0" role="button">
@@ -668,9 +702,14 @@
               </div>
               <button type="button" class="ghost ac-detail" data-alert-detail="${i}">详情</button>
             </div>
-            <p class="ac-summary">${esc(summary || "无摘要")}</p>
+            <p class="ac-summary">${esc(summary || "无描述")}</p>
             <div class="ac-meta">
               <span>${esc(src)}</span>
+              ${
+                ip
+                  ? `<span class="dot">·</span><span class="ac-ip" title="告警 IP">IP ${esc(ip)}</span>`
+                  : ""
+              }
               <span class="dot">·</span>
               <span>持续 ${esc(dur)}</span>
               ${val !== "—" ? `<span class="dot">·</span><span class="mono">值 ${esc(val)}</span>` : ""}
@@ -707,14 +746,59 @@
     });
   }
 
+  function alertTableGrid(rows, ingressMap) {
+    return `<table class="data alert-table"><thead><tr>
+      <th>状态</th><th>级别</th><th>告警名称</th><th>告警描述</th><th>告警 IP</th><th>当前值</th>
+      <th>来源</th><th>开始时间</th><th>持续</th><th>最后更新</th><th></th>
+    </tr></thead><tbody>${rows
+      .map((a, i) => {
+        const name = alertDisplayName(a);
+        const summary = alertSummary(a);
+        const dur = alertDuration(a);
+        const src = alertSourceLabel(a, ingressMap);
+        const ip = alertTargetIp(a);
+        return `<tr data-alert-idx="${i}">
+      <td><span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span></td>
+      <td><span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
+      <td>
+        <div class="alert-name">${esc(name)}</div>
+        <div class="alert-labels">${labelChips(
+          a.labels,
+          ["alertname", "severity", "source", "alertIp", "ipaddr", "instance", "host", "hostname"],
+          3
+        )}</div>
+      </td>
+      <td class="alert-summary" title="${esc(summary)}">${esc(summary || "—")}</td>
+      <td class="mono">${esc(ip || "—")}</td>
+      <td class="mono">${fmtValue(a.value)}</td>
+      <td><span class="source-tag">${esc(src)}</span></td>
+      <td>${esc(fmtTime(a.starts_at))}</td>
+      <td>${esc(dur)}</td>
+      <td>${esc(fmtTime(a.last_evaluated_at))}</td>
+      <td class="actions"><button type="button" data-alert-detail="${i}">详情</button></td>
+    </tr>`;
+      })
+      .join("")}</tbody></table>`;
+  }
+
+  function bindAlertTableGrid(container, rows, ingressMap) {
+    if (!container || !rows?.length) return;
+    container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
+      btn.onclick = () =>
+        showAlertDetail(rows[Number(btn.dataset.alertDetail)], ingressMap || {});
+    });
+  }
+
   function alertTable(rows, opts = {}) {
     if (!rows.length) return `<div class="empty">暂无告警事件</div>`;
     const compact = !!opts.compact;
     const ingressMap = opts.ingressMap || {};
     if (!compact) {
-      return alertCards(rows, ingressMap);
+      return getAlertView() === "table"
+        ? alertTableGrid(rows, ingressMap)
+        : alertCards(rows, ingressMap);
     }
-    // Overview: compact rows
+    // Overview: always compact cards
     return `<div class="alert-feed compact">${rows
       .slice(0, 8)
       .map((a, i) => {
@@ -765,8 +849,8 @@
     if (s.startsWith("ingress:") || route) {
       const kind = s.startsWith("ingress:") ? s.slice("ingress:".length) : route?.kind || "";
       const name = route?.name;
-      if (name) return `Ingress · ${name}`;
-      return kind === "alertmanager" ? "AM 接入" : kind === "kafka" ? "Kafka 接入" : "Ingress";
+      if (name) return `接入 · ${name}`;
+      return kind === "alertmanager" ? "AM 接入" : kind === "kafka" ? "Kafka 接入" : "告警接入";
     }
     return "规则评估";
   }
@@ -779,8 +863,8 @@
   function alertSummary(a) {
     const an = a.annotations || {};
     return (
-      an.summary ||
       an.description ||
+      an.summary ||
       an.message ||
       an.retMessage ||
       an.title ||
@@ -833,6 +917,7 @@
     if (!a) return;
     const name = alertDisplayName(a);
     const srcLabel = alertSourceLabel(a, ingressMap);
+    const ip = alertTargetIp(a);
     let notifies = [];
     try {
       notifies = await api(`/api/alerts/${a.id}/notifies`);
@@ -868,10 +953,12 @@
           <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
           <span class="sev sev-${esc(a.severity)}" style="margin-left:8px">${esc(a.severity)}</span>
           <span class="source-tag" style="margin-left:8px">${esc(srcLabel)}</span>
+          ${ip ? `<span class="ac-ip" style="margin-left:8px">IP ${esc(ip)}</span>` : ""}
         </p>
       </div>
       <div class="modal-body alert-detail">
         <div class="detail-grid">
+          <div><label>告警 IP</label><div class="mono">${esc(ip || "—")}</div></div>
           <div><label>当前值</label><div class="mono">${fmtValue(a.value)}</div></div>
           <div><label>持续时长</label><div>${esc(alertDuration(a))}</div></div>
           <div><label>开始时间</label><div>${esc(fmtTime(a.starts_at))}</div></div>
@@ -884,7 +971,7 @@
           <div><label>已通知恢复</label><div>${a.notified_resolved ? "是" : "否"}</div></div>
         </div>
         <div class="field">
-          <label>摘要 / 注解</label>
+          <label>告警描述</label>
           <div class="summary-box">${esc(alertSummary(a) || "—")}</div>
           ${kvTable(a.annotations)}
         </div>
@@ -950,7 +1037,7 @@
             }
           </div>
         </div>
-        <div class="hint">试推送使用控制台登录态，不经过 Ingress Token 校验。</div>
+        <div class="hint">试推送使用控制台登录态，不经过接入 Token 校验。</div>
       </div>
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
@@ -1364,13 +1451,23 @@
     const opt = row?.options || {};
     const types = [
       { id: "alertmanager", name: "Alertmanager", desc: "Prometheus 告警 Webhook" },
-      { id: "generic", name: "Generic", desc: "通用 JSON / 拨测 probe-alert" },
-      { id: "kafka", name: "Kafka", desc: "从 Topic 消费告警（含拨测 JSON）" },
+      { id: "generic", name: "Generic", desc: "通用 JSON / 拨测 / 自定义字段映射" },
+      { id: "kafka", name: "Kafka", desc: "Topic 消费；可配字段映射" },
     ];
+    const mapOn = !!(
+      opt.map_status ||
+      opt.map_name ||
+      opt.map_description ||
+      opt.map_ip ||
+      opt.map_value ||
+      opt.map_fingerprint ||
+      opt.map_list ||
+      opt.map_enabled === "1"
+    );
     openModal(`
       <div class="modal-head">
-        <h3>${row ? "编辑 Ingress" : "新建 Ingress"}</h3>
-        <p class="desc">接入外部已判定的告警，复用去重与通知能力。</p>
+        <h3>${row ? "编辑告警接入" : "新建告警接入"}</h3>
+        <p class="desc">接入外部已判定的告警。非标准格式可配置字段映射。</p>
       </div>
       <form id="f" class="modal-body">
         <div class="field">
@@ -1434,6 +1531,93 @@
           </div>
         </div>
 
+        <div class="kind-panel" data-kinds="generic,kafka" id="ing-mapping" hidden>
+          <div class="seg">
+            <div class="seg-title">字段映射（可选）</div>
+            <div class="hint" style="margin-bottom:12px">
+              填写对方 JSON 的点分路径（如 <code>data.title</code>）。任一路径非空即启用映射，并优先于内置 Generic/拨测解析。
+            </div>
+            <div class="field">
+              <label class="check-row">
+                <input type="checkbox" name="map_enabled" ${mapOn ? "checked" : ""} />
+                <span>启用自定义字段映射</span>
+              </label>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>告警列表路径 map_list</label>
+                <input name="map_list" placeholder="空=整条；或 data.items" value="${esc(opt.map_list || "")}" />
+              </div>
+              <div class="field">
+                <label>状态字段 map_status</label>
+                <input name="map_status" placeholder="state / status / eventType" value="${esc(
+                  opt.map_status || ""
+                )}" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>触发取值 map_fire</label>
+                <input name="map_fire" placeholder="默认 fire,firing,ALARM…" value="${esc(opt.map_fire || "")}" />
+              </div>
+              <div class="field">
+                <label>恢复取值 map_resolve</label>
+                <input name="map_resolve" placeholder="默认 recover,resolved,OK…" value="${esc(
+                  opt.map_resolve || ""
+                )}" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>告警名称 map_name</label>
+                <input name="map_name" placeholder="title / alertName" value="${esc(opt.map_name || "")}" />
+              </div>
+              <div class="field">
+                <label>告警描述 map_description</label>
+                <input name="map_description" placeholder="msg / content" value="${esc(
+                  opt.map_description || ""
+                )}" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>告警 IP map_ip</label>
+                <input name="map_ip" placeholder="host / target.ip" value="${esc(opt.map_ip || "")}" />
+              </div>
+              <div class="field">
+                <label>当前值 map_value</label>
+                <input name="map_value" placeholder="metric / value" value="${esc(opt.map_value || "")}" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>告警标识 map_fingerprint</label>
+                <input name="map_fingerprint" placeholder="id / alertId" value="${esc(
+                  opt.map_fingerprint || ""
+                )}" />
+              </div>
+              <div class="field">
+                <label>级别 map_severity</label>
+                <input name="map_severity" placeholder="level / severity" value="${esc(
+                  opt.map_severity || ""
+                )}" />
+              </div>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>critical 取值</label>
+                <input name="map_critical" placeholder="P1,critical" value="${esc(opt.map_critical || "")}" />
+              </div>
+              <div class="field">
+                <label>额外标签 map_labels</label>
+                <input name="map_labels" placeholder="region:zone,app:appName" value="${esc(
+                  opt.map_labels || ""
+                )}" />
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="field">
           <label>通知渠道</label>
           ${multiSelect(
@@ -1463,7 +1647,7 @@
           "载荷示例：Alertmanager <code>{\"alerts\":[{\"status\":\"firing\",\"labels\":{...}}]}</code>";
       } else if (k === "generic") {
         hint.innerHTML =
-          "支持 Generic 批量告警，或拨测 JSON：<code>{\"eventType\":\"fire\",\"messageId\":\"...\",\"resultFlag\":\"BAD\",...}</code>";
+          "默认支持 Generic / 拨测 JSON；其他格式请展开下方「字段映射」配置路径。";
       } else {
         hint.textContent = "";
       }
@@ -1495,6 +1679,35 @@
         const parts = String(fd.get("partitions") || "").trim();
         if (parts) options.partitions = parts;
         token = "";
+      }
+      if (k === "generic" || k === "kafka") {
+        const mapKeys = [
+          "map_list",
+          "map_status",
+          "map_fire",
+          "map_resolve",
+          "map_name",
+          "map_description",
+          "map_ip",
+          "map_value",
+          "map_fingerprint",
+          "map_severity",
+          "map_critical",
+          "map_labels",
+        ];
+        let anyMap = false;
+        for (const key of mapKeys) {
+          const v = String(fd.get(key) || "").trim();
+          if (v) {
+            options[key] = v;
+            anyMap = true;
+          }
+        }
+        if (anyMap) {
+          options.map_enabled = form.querySelector('[name="map_enabled"]')?.checked
+            ? "1"
+            : "0";
+        }
       }
       const body = {
         name: fd.get("name"),
@@ -1535,7 +1748,7 @@
       : "# 未配置 Token，可直接推送";
     openModal(`
       <div class="modal-head">
-        <h3>Ingress 已保存</h3>
+        <h3>告警接入已保存</h3>
         <p class="desc">${esc(route.name)} · ${esc(route.kind)}。复制地址或试推送验证。</p>
       </div>
       <div class="modal-body">

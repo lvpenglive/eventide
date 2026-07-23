@@ -1,6 +1,6 @@
 # Eventide
 
-Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，产品思路对齐 [WatchAlert](https://github.com/opsre/WatchAlert)，实现上走**单进程、SQLite、可嵌入控制台**的精简路线。
+Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实现上走**单进程、SQLite、可嵌入控制台**的精简路线。
 
 它同时支持两种告警来源：
 
@@ -401,7 +401,7 @@ cargo run -p eventide-server -- /path/to/eventide.toml
 | 数据源 | Prometheus / VM / Kafka / Log |
 | 告警规则 | CRUD、试跑 |
 | 通知渠道 | Webhook / 钉钉 / 企微 / 飞书 |
-| Ingress 接入 | Alertmanager / Generic / Kafka |
+| 告警接入 | Alertmanager / Generic / Kafka |
 | 告警事件 | 按状态筛选 |
 | 静默策略 | 时间窗 + 标签匹配 |
 | 系统设置 | 只读运行信息（改密码改 toml 后重启） |
@@ -540,6 +540,25 @@ count_over_time({app="api"} |= "ERROR" [5m])
 | `alertCategory=infra` / `retCode=10001` | severity critical |
 
 推送：`POST /api/ingress/{id}/generic` 或 `/push`；Kafka Ingress Topic 消息体同样可识别。
+
+**自定义字段映射（Generic / Kafka）**
+
+在 Ingress 表单「字段映射」中填写对方 JSON 点分路径，例如：
+
+| 配置项 | 示例路径 | 含义 |
+|--------|----------|------|
+| `map_list` | `data.items` | 告警数组（空=整条对象） |
+| `map_status` | `state` | 状态字段 |
+| `map_fire` / `map_resolve` | `ALARM` / `OK` | 触发/恢复取值 |
+| `map_name` | `title` | 告警名称 |
+| `map_description` | `msg` | 告警描述 |
+| `map_ip` | `host` | 告警 IP |
+| `map_value` | `metric` | 当前值 |
+| `map_fingerprint` | `id` | 告警标识 |
+| `map_severity` | `level` | 级别 |
+| `map_labels` | `region:zone` | 额外标签 `名:路径` |
+
+启用映射后优先于内置 Generic/拨测解析。
 
 **Kafka Ingress（告警总线）**
 

@@ -8,8 +8,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use eventide_core::{
-    apply_ingress, parse_alertmanager, parse_ingress_payload, AlertmanagerWebhook, IngressKind,
-    IngressRoute,
+    apply_ingress, parse_alertmanager, parse_ingress_payload_with_options, AlertmanagerWebhook,
+    IngressKind, IngressRoute,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -38,7 +38,7 @@ pub async fn receive_generic(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     match process_ingress(&state, &id, &headers, IngressKind::Generic, |route| {
-        let alerts = parse_ingress_payload(&body)?;
+        let alerts = parse_ingress_payload_with_options(&body, &route.options)?;
         Ok((route, alerts))
     })
     .await
@@ -101,11 +101,11 @@ pub async fn receive_auto(
                 Err(e) => Err(e.to_string()),
             }
         }
-        IngressKind::Generic => match parse_ingress_payload(&body) {
+        IngressKind::Generic => match parse_ingress_payload_with_options(&body, &route.options) {
             Ok(alerts) => ingest_list(&state, &route, alerts).await,
             Err(e) => Err(e),
         },
-        IngressKind::Kafka => match parse_ingress_payload(&body) {
+        IngressKind::Kafka => match parse_ingress_payload_with_options(&body, &route.options) {
             // Allow manual push test against a Kafka-configured route.
             Ok(alerts) => ingest_list(&state, &route, alerts).await,
             Err(e) => Err(e),

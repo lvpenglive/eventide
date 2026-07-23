@@ -592,7 +592,7 @@ async fn test_ingress(
     }
 
     let payload = sample_ingress_payload(&route, &input.scenario);
-    let alerts = eventide_core::parse_ingress_payload(payload.as_bytes())
+    let alerts = eventide_core::parse_ingress_payload_with_options(payload.as_bytes(), &route.options)
         .map_err(ApiError::bad)?;
     if alerts.is_empty() {
         return Err(ApiError::bad("sample produced no alerts"));

@@ -379,12 +379,306 @@ pub fn extract_json_payload(text: &str) -> &str {
     trimmed
 }
 
+/// Field mapping from Ingress `options` (JSON dotted paths).
+///
+/// Enable by filling any `map_*` path, or set `map_enabled=1`.
+#[derive(Debug, Clone, Default)]
+pub struct FieldMapping {
+    pub enabled: bool,
+    /// Path to array of alert objects (e.g. `alerts` / `data.items`). Empty = root object or root array.
+    pub list: String,
+    pub status: String,
+    pub fire_values: Vec<String>,
+    pub resolve_values: Vec<String>,
+    pub name: String,
+    pub description: String,
+    pub ip: String,
+    pub value: String,
+    pub fingerprint: String,
+    pub severity: String,
+    pub critical_values: Vec<String>,
+    pub warning_values: Vec<String>,
+    /// Extra labels: `key:path,key2:path2`
+    pub labels: Vec<(String, String)>,
+}
+
+impl FieldMapping {
+    pub fn from_options(options: &BTreeMap<String, String>) -> Self {
+        let get = |k: &str| options.get(k).map(|s| s.trim().to_string()).unwrap_or_default();
+        let list = get("map_list");
+        let status = get("map_status");
+        let name = get("map_name");
+        let description = get("map_description");
+        let ip = get("map_ip");
+        let value = get("map_value");
+        let fingerprint = get("map_fingerprint");
+        let severity = get("map_severity");
+        let labels_raw = get("map_labels");
+        let enabled_flag = get("map_enabled").to_ascii_lowercase();
+        let has_paths = !status.is_empty()
+            || !name.is_empty()
+            || !description.is_empty()
+            || !ip.is_empty()
+            || !value.is_empty()
+            || !fingerprint.is_empty()
+            || !severity.is_empty()
+            || !list.is_empty()
+            || !labels_raw.is_empty();
+        let enabled = match enabled_flag.as_str() {
+            "0" | "false" | "no" | "off" => false,
+            "1" | "true" | "yes" | "on" => true,
+            _ => has_paths,
+        };
+        let fire_values = split_csv(
+            &get("map_fire"),
+            &["fire", "firing", "open", "bad", "fail", "error", "1", "true", "critical"],
+        );
+        let resolve_values = split_csv(
+            &get("map_resolve"),
+            &[
+                "recover", "resolved", "ok", "closed", "good", "success", "0", "false",
+            ],
+        );
+        let critical_values = split_csv(&get("map_critical"), &["critical", "crit", "p1", "fatal"]);
+        let warning_values = split_csv(&get("map_warning"), &["warning", "warn", "p2", "p3"]);
+
+        let labels = labels_raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|pair| {
+                let (k, p) = pair.split_once(':')?;
+                let k = k.trim();
+                let p = p.trim();
+                if k.is_empty() || p.is_empty() {
+                    None
+                } else {
+                    Some((k.to_string(), p.to_string()))
+                }
+            })
+            .collect();
+
+        Self {
+            enabled,
+            list,
+            status,
+            fire_values,
+            resolve_values,
+            name,
+            description,
+            ip,
+            value,
+            fingerprint,
+            severity,
+            critical_values,
+            warning_values,
+            labels,
+        }
+    }
+}
+
+fn split_csv(raw: &str, defaults: &[&str]) -> Vec<String> {
+    let parts: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        defaults.iter().map(|s| (*s).to_string()).collect()
+    } else {
+        parts
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    path.trim()
+        .trim_start_matches("$.")
+        .trim_start_matches('$')
+        .trim_start_matches('.')
+        .to_string()
+}
+
+fn json_path_value<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let path = normalize_path(path);
+    if path.is_empty() {
+        return Some(root);
+    }
+    let mut cur = root;
+    for part in path.split('.').filter(|p| !p.is_empty()) {
+        // support simple array index: items[0]
+        if let Some((name, idx_s)) = part.split_once('[') {
+            if !name.is_empty() {
+                cur = cur.get(name)?;
+            }
+            let idx: usize = idx_s.trim_end_matches(']').parse().ok()?;
+            cur = cur.get(idx)?;
+        } else {
+            cur = cur.get(part)?;
+        }
+    }
+    Some(cur)
+}
+
+fn path_as_string(root: &serde_json::Value, path: &str) -> Option<String> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let v = json_path_value(root, path)?;
+    match v {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => None,
+        other => {
+            let s = other.to_string();
+            if s == "null" || s.is_empty() {
+                None
+            } else {
+                Some(s.trim_matches('"').to_string())
+            }
+        }
+    }
+}
+
+fn path_as_f64(root: &serde_json::Value, path: &str) -> Option<f64> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    let v = json_path_value(root, path)?;
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        serde_json::Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn value_in_list(val: &str, list: &[String]) -> bool {
+    let v = val.trim().to_ascii_lowercase();
+    list.iter().any(|x| x == &v)
+}
+
+/// Map one JSON object using [`FieldMapping`].
+pub fn parse_mapped_alert(v: &serde_json::Value, m: &FieldMapping) -> Option<IngressAlert> {
+    if !v.is_object() && !v.is_array() {
+        // allow primitives? no
+    }
+    if !v.is_object() {
+        return None;
+    }
+
+    let status_raw = if m.status.is_empty() {
+        String::new()
+    } else {
+        path_as_string(v, &m.status).unwrap_or_default()
+    };
+    let status = if !status_raw.is_empty() {
+        if value_in_list(&status_raw, &m.fire_values) {
+            AlertStatus::Firing
+        } else if value_in_list(&status_raw, &m.resolve_values) {
+            AlertStatus::Resolved
+        } else {
+            // unknown status string — treat non-empty non-resolve as firing if looks bad
+            return None;
+        }
+    } else {
+        // no status path: default firing (push implies alert)
+        AlertStatus::Firing
+    };
+
+    let name = path_as_string(v, &m.name).unwrap_or_else(|| "mapped-alert".into());
+    let description = path_as_string(v, &m.description).unwrap_or_default();
+    let ip = path_as_string(v, &m.ip).unwrap_or_default();
+    let fingerprint = path_as_string(v, &m.fingerprint);
+    let value = path_as_f64(v, &m.value);
+
+    let sev_raw = path_as_string(v, &m.severity).unwrap_or_default();
+    let severity = if !sev_raw.is_empty() {
+        if value_in_list(&sev_raw, &m.critical_values) {
+            Severity::Critical
+        } else if value_in_list(&sev_raw, &m.warning_values) {
+            Severity::Warning
+        } else {
+            Severity::parse(&sev_raw).unwrap_or(Severity::Warning)
+        }
+    } else {
+        Severity::Warning
+    };
+
+    let mut labels: Labels = BTreeMap::new();
+    labels.insert("alertname".into(), name);
+    if !ip.is_empty() {
+        labels.insert("alertIp".into(), ip.clone());
+        labels.insert("instance".into(), ip);
+    }
+    if !sev_raw.is_empty() {
+        labels.insert("severity".into(), sev_raw);
+    }
+    for (k, path) in &m.labels {
+        if let Some(val) = path_as_string(v, path) {
+            labels.insert(k.clone(), val);
+        }
+    }
+
+    let mut annotations: Labels = BTreeMap::new();
+    if !description.is_empty() {
+        annotations.insert("description".into(), truncate(&description, 2000));
+        annotations.insert("summary".into(), truncate(&description, 500));
+    }
+
+    Some(IngressAlert {
+        status,
+        fingerprint,
+        labels,
+        annotations,
+        severity,
+        value,
+        starts_at: None,
+        ends_at: None,
+    })
+}
+
+fn parse_with_field_mapping(
+    v: &serde_json::Value,
+    m: &FieldMapping,
+) -> Result<Vec<IngressAlert>, String> {
+    let items: Vec<&serde_json::Value> = if !m.list.is_empty() {
+        json_path_value(v, &m.list)
+            .and_then(|x| x.as_array())
+            .map(|arr| arr.iter().collect())
+            .ok_or_else(|| format!("map_list `{}` is not an array", m.list))?
+    } else if let Some(arr) = v.as_array() {
+        arr.iter().collect()
+    } else {
+        vec![v]
+    };
+
+    let alerts: Vec<_> = items.into_iter().filter_map(|item| parse_mapped_alert(item, m)).collect();
+    if alerts.is_empty() {
+        Err("field mapping produced no alerts (check map_status fire/resolve values)".into())
+    } else {
+        Ok(alerts)
+    }
+}
+
 /// Auto-detect Alertmanager / Generic / Probe payloads (raw bytes or log lines).
 pub fn parse_ingress_payload(raw: &[u8]) -> Result<Vec<IngressAlert>, String> {
+    parse_ingress_payload_with_options(raw, &BTreeMap::new())
+}
+
+/// Parse ingress payload; when `options` contain field mapping (`map_*`), use that first.
+pub fn parse_ingress_payload_with_options(
+    raw: &[u8],
+    options: &BTreeMap<String, String>,
+) -> Result<Vec<IngressAlert>, String> {
     let text = std::str::from_utf8(raw).map_err(|e| e.to_string())?;
     let json_text = extract_json_payload(text);
+    let mapping = FieldMapping::from_options(options);
 
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_text) {
+        if mapping.enabled {
+            return parse_with_field_mapping(&v, &mapping);
+        }
         if looks_like_probe_alert(&v) {
             return parse_probe_alert(&v)
                 .map(|a| vec![a])
@@ -425,7 +719,7 @@ pub fn parse_ingress_payload(raw: &[u8]) -> Result<Vec<IngressAlert>, String> {
         return Ok(parse_generic(&GenericWebhook { alerts: vec![one] }));
     }
 
-    Err("payload is not alertmanager/generic/probe JSON".into())
+    Err("payload is not alertmanager/generic/probe JSON (or configure map_* field mapping)".into())
 }
 
 fn json_str(v: &serde_json::Value, key: &str) -> Option<String> {
@@ -571,6 +865,49 @@ mod tests {
         let raw = r#"{"eventType":"fire","resultFlag":"BAD","retCode":"10001","retMessage":"代理失败","alertCategory":"infra","messageId":"m1","bizchainName":"链"}"#;
         let a = parse_probe_alert(&serde_json::from_str(raw).unwrap()).unwrap();
         assert_eq!(a.severity, Severity::Critical);
+    }
+
+    #[test]
+    fn parse_custom_field_mapping() {
+        let raw = r#"{
+            "data": {
+                "items": [{
+                    "state": "ALARM",
+                    "title": "磁盘满",
+                    "msg": "disk > 90%",
+                    "host": "10.0.0.8",
+                    "metric": 93.5,
+                    "id": "evt-1",
+                    "level": "P1"
+                }]
+            }
+        }"#;
+        let mut opts = BTreeMap::new();
+        opts.insert("map_list".into(), "data.items".into());
+        opts.insert("map_status".into(), "state".into());
+        opts.insert("map_fire".into(), "ALARM,firing".into());
+        opts.insert("map_resolve".into(), "OK,resolved".into());
+        opts.insert("map_name".into(), "title".into());
+        opts.insert("map_description".into(), "msg".into());
+        opts.insert("map_ip".into(), "host".into());
+        opts.insert("map_value".into(), "metric".into());
+        opts.insert("map_fingerprint".into(), "id".into());
+        opts.insert("map_severity".into(), "level".into());
+        opts.insert("map_critical".into(), "P1,critical".into());
+
+        let alerts = parse_ingress_payload_with_options(raw.as_bytes(), &opts).unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].status, AlertStatus::Firing);
+        assert_eq!(alerts[0].severity, Severity::Critical);
+        assert_eq!(alerts[0].labels.get("alertname").map(|s| s.as_str()), Some("磁盘满"));
+        assert_eq!(alerts[0].labels.get("alertIp").map(|s| s.as_str()), Some("10.0.0.8"));
+        assert_eq!(alerts[0].value, Some(93.5));
+        assert_eq!(alerts[0].fingerprint.as_deref(), Some("evt-1"));
+        assert!(alerts[0]
+            .annotations
+            .get("description")
+            .unwrap()
+            .contains("disk"));
     }
 
     #[test]

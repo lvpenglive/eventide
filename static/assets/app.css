@@ -595,6 +595,35 @@ code, .mono {
   flex-wrap: wrap;
   align-items: center;
 }
+.view-switch {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.2);
+}
+.view-btn {
+  height: 30px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.view-btn + .view-btn {
+  border-left: 1px solid var(--line);
+}
+.view-btn:hover {
+  color: var(--text);
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.04);
+}
+.view-btn.on {
+  background: rgba(47, 158, 143, 0.2);
+  color: #fff;
+}
 .alert-filters input,
 .alert-filters select {
   width: auto;
@@ -682,6 +711,11 @@ code, .mono {
   color: var(--muted);
 }
 .ac-meta .dot { opacity: 0.5; margin: 0 4px; }
+.ac-ip {
+  font-family: var(--font-mono);
+  color: var(--primary-hover);
+  font-size: 12px;
+}
 .ac-detail {
   flex-shrink: 0;
   height: 28px;

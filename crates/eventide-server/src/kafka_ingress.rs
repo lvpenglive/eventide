@@ -112,7 +112,8 @@ async fn ingest_payload(
     route: &IngressRoute,
     raw: &[u8],
 ) -> anyhow::Result<()> {
-    let alerts = eventide_core::parse_ingress_payload(raw).map_err(anyhow::Error::msg)?;
+    let alerts = eventide_core::parse_ingress_payload_with_options(raw, &route.options)
+        .map_err(anyhow::Error::msg)?;
 
     let now = Utc::now();
     for incoming in alerts {
