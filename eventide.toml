@@ -1,0 +1,10 @@
+listen = "0.0.0.0:8080"
+database_path = "data/eventide.db"
+static_dir = "static"
+scheduler_tick_seconds = 5
+
+[auth]
+username = "admin"
+password = "admin123"
+jwt_secret = "eventide-dev-secret-change-me"
+token_ttl_hours = 24

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Eventide</title>
+  <link rel="stylesheet" href="/assets/app.css?v=4" />
+</head>
+<body>
+  <!-- Login -->
+  <div id="view-login">
+    <div class="login-stage">
+      <div class="login-brand">
+        <div class="mark">Eventide</div>
+        <p>多数据源告警引擎 · 评估 · 去重 · 通知</p>
+      </div>
+      <form class="login-panel" id="login-form">
+        <h2>登录控制台</h2>
+        <div class="field">
+          <label for="username">用户名</label>
+          <input id="username" name="username" autocomplete="username" required value="admin" />
+        </div>
+        <div class="field">
+          <label for="password">密码</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+        </div>
+        <div class="login-error" id="login-error"></div>
+        <button class="primary" type="submit" style="width:100%">进入系统</button>
+        <div class="login-hint">默认账号见 eventide.toml 的 [auth] 段</div>
+      </form>
+    </div>
+  </div>
+
+  <!-- App -->
+  <div id="view-app">
+    <aside class="sidebar">
+      <div class="brand">Event<span>ide</span></div>
+      <button class="nav-item active" data-page="overview"><span class="ico">◈</span>总览</button>
+      <button class="nav-item" data-page="datasources"><span class="ico">◎</span>数据源</button>
+      <button class="nav-item" data-page="rules"><span class="ico">▣</span>告警规则</button>
+      <button class="nav-item" data-page="channels"><span class="ico">☍</span>通知渠道</button>
+      <button class="nav-item" data-page="ingress"><span class="ico">⇢</span>Ingress 接入</button>
+      <button class="nav-item" data-page="alerts"><span class="ico">⚠</span>告警事件</button>
+      <button class="nav-item" data-page="silences"><span class="ico">◐</span>静默策略</button>
+      <button class="nav-item" data-page="settings"><span class="ico">⚙</span>系统设置</button>
+      <div class="spacer"></div>
+      <div class="user-box">
+        <strong id="user-name">—</strong>
+        <button class="ghost" id="btn-logout" style="width:100%">退出登录</button>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1 id="page-title">总览</h1>
+          <p class="sub" id="page-sub">系统运行状态与近期告警</p>
+        </div>
+        <div class="toolbar" id="page-actions"></div>
+      </div>
+      <div id="page-root"></div>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modal">
+    <div class="modal" id="modal-body"></div>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <script src="/assets/app.js?v=4"></script>
+</body>
+</html>

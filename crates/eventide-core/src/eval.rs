@@ -1,0 +1,330 @@
+//! Threshold comparison and alert state machine.
+
+use crate::fingerprint::alert_fingerprint;
+use crate::models::{
+    AlertEvent, AlertStatus, AlertTransition, Comparator, Labels, Rule,
+};
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use uuid::Uuid;
+
+/// One metric sample from a datasource query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricSample {
+    pub labels: Labels,
+    pub value: f64,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Result of evaluating one sample against a rule (pre state-machine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluateResult {
+    /// Threshold condition is true.
+    Matching,
+    /// Threshold condition is false.
+    NotMatching,
+}
+
+/// Compare `value` against `threshold` using `op`.
+pub fn compare(op: Comparator, value: f64, threshold: f64) -> bool {
+    match op {
+        Comparator::Gt => value > threshold,
+        Comparator::Gte => value >= threshold,
+        Comparator::Lt => value < threshold,
+        Comparator::Lte => value <= threshold,
+        Comparator::Eq => (value - threshold).abs() < f64::EPSILON,
+        Comparator::Neq => (value - threshold).abs() >= f64::EPSILON,
+    }
+}
+
+pub fn evaluate_sample(rule: &Rule, sample: &MetricSample) -> EvaluateResult {
+    if compare(rule.comparator, sample.value, rule.threshold) {
+        EvaluateResult::Matching
+    } else {
+        EvaluateResult::NotMatching
+    }
+}
+
+/// Merge rule labels with sample labels (sample wins on key conflict).
+pub fn merge_labels(rule: &Rule, sample: &MetricSample) -> Labels {
+    let mut labels = rule.labels.clone();
+    for (k, v) in &sample.labels {
+        labels.insert(k.clone(), v.clone());
+    }
+    labels
+}
+
+/// Apply evaluation result to an existing (or new) alert event.
+///
+/// Returns the updated event and whether a notify edge occurred.
+pub fn apply_evaluation(
+    rule: &Rule,
+    sample: &MetricSample,
+    existing: Option<AlertEvent>,
+    now: DateTime<Utc>,
+) -> (AlertEvent, AlertTransition) {
+    let labels = merge_labels(rule, sample);
+    let fingerprint = alert_fingerprint(rule.id, &labels);
+    let matching = evaluate_sample(rule, sample) == EvaluateResult::Matching;
+    let for_dur = Duration::seconds(rule.for_seconds as i64);
+
+    match existing {
+        None => {
+            if !matching {
+                // No prior event and not matching — synthesize a resolved placeholder
+                // that callers typically skip persisting.
+                let event = AlertEvent {
+                    id: Uuid::new_v4(),
+                    rule_id: rule.id,
+                    fingerprint,
+                    status: AlertStatus::Resolved,
+                    severity: rule.severity,
+                    labels,
+                    annotations: rule.annotations.clone(),
+                    value: Some(sample.value),
+                    starts_at: now,
+                    ends_at: Some(now),
+                    pending_since: None,
+                    last_evaluated_at: now,
+                    notified_firing: false,
+                    notified_resolved: false,
+                };
+                (event, AlertTransition::Unchanged)
+            } else if rule.for_seconds == 0 {
+                let event = AlertEvent {
+                    id: Uuid::new_v4(),
+                    rule_id: rule.id,
+                    fingerprint,
+                    status: AlertStatus::Firing,
+                    severity: rule.severity,
+                    labels,
+                    annotations: rule.annotations.clone(),
+                    value: Some(sample.value),
+                    starts_at: now,
+                    ends_at: None,
+                    pending_since: None,
+                    last_evaluated_at: now,
+                    notified_firing: false,
+                    notified_resolved: false,
+                };
+                (event, AlertTransition::BecameFiring)
+            } else {
+                let event = AlertEvent {
+                    id: Uuid::new_v4(),
+                    rule_id: rule.id,
+                    fingerprint,
+                    status: AlertStatus::Pending,
+                    severity: rule.severity,
+                    labels,
+                    annotations: rule.annotations.clone(),
+                    value: Some(sample.value),
+                    starts_at: now,
+                    ends_at: None,
+                    pending_since: Some(now),
+                    last_evaluated_at: now,
+                    notified_firing: false,
+                    notified_resolved: false,
+                };
+                (event, AlertTransition::Unchanged)
+            }
+        }
+        Some(mut event) => {
+            event.value = Some(sample.value);
+            event.last_evaluated_at = now;
+            event.labels = labels;
+            event.annotations = rule.annotations.clone();
+            event.severity = rule.severity;
+
+            let transition = match (event.status, matching) {
+                (AlertStatus::Pending, true) => {
+                    let since = event.pending_since.unwrap_or(event.starts_at);
+                    if now - since >= for_dur {
+                        event.status = AlertStatus::Firing;
+                        event.pending_since = None;
+                        event.starts_at = now;
+                        event.ends_at = None;
+                        AlertTransition::BecameFiring
+                    } else {
+                        AlertTransition::Unchanged
+                    }
+                }
+                (AlertStatus::Pending, false) => {
+                    event.status = AlertStatus::Resolved;
+                    event.ends_at = Some(now);
+                    event.pending_since = None;
+                    AlertTransition::Unchanged
+                }
+                (AlertStatus::Firing, true) => AlertTransition::Unchanged,
+                (AlertStatus::Firing, false) => {
+                    event.status = AlertStatus::Resolved;
+                    event.ends_at = Some(now);
+                    AlertTransition::BecameResolved
+                }
+                (AlertStatus::Resolved, true) => {
+                    if rule.for_seconds == 0 {
+                        event.status = AlertStatus::Firing;
+                        event.starts_at = now;
+                        event.ends_at = None;
+                        event.pending_since = None;
+                        event.notified_firing = false;
+                        event.notified_resolved = false;
+                        AlertTransition::BecameFiring
+                    } else {
+                        event.status = AlertStatus::Pending;
+                        event.starts_at = now;
+                        event.ends_at = None;
+                        event.pending_since = Some(now);
+                        event.notified_firing = false;
+                        event.notified_resolved = false;
+                        AlertTransition::Unchanged
+                    }
+                }
+                (AlertStatus::Resolved, false) => AlertTransition::Unchanged,
+            };
+
+            // Keep fingerprint stable for the event identity.
+            event.fingerprint = fingerprint;
+            (event, transition)
+        }
+    }
+}
+
+/// Convenience: evaluate all samples for a rule against a map of existing events by fingerprint.
+pub fn evaluate_rule(
+    rule: &Rule,
+    samples: &[MetricSample],
+    existing_by_fp: &BTreeMap<String, AlertEvent>,
+    now: DateTime<Utc>,
+) -> Vec<(AlertEvent, AlertTransition)> {
+    let mut results = Vec::with_capacity(samples.len());
+    let mut seen = std::collections::HashSet::new();
+
+    for sample in samples {
+        let labels = merge_labels(rule, sample);
+        let fp = alert_fingerprint(rule.id, &labels);
+        seen.insert(fp.clone());
+        let existing = existing_by_fp.get(&fp).cloned();
+        results.push(apply_evaluation(rule, sample, existing, now));
+    }
+
+    // Samples that disappeared: resolve any still-firing/pending events.
+    for (fp, event) in existing_by_fp {
+        if seen.contains(fp) {
+            continue;
+        }
+        if matches!(event.status, AlertStatus::Firing | AlertStatus::Pending) {
+            results.push(resolve_missing(event.clone(), now));
+        }
+    }
+
+    results
+}
+
+fn resolve_missing(mut event: AlertEvent, now: DateTime<Utc>) -> (AlertEvent, AlertTransition) {
+    event.last_evaluated_at = now;
+    match event.status {
+        AlertStatus::Firing => {
+            event.status = AlertStatus::Resolved;
+            event.ends_at = Some(now);
+            (event, AlertTransition::BecameResolved)
+        }
+        AlertStatus::Pending => {
+            event.status = AlertStatus::Resolved;
+            event.ends_at = Some(now);
+            event.pending_since = None;
+            (event, AlertTransition::Unchanged)
+        }
+        AlertStatus::Resolved => (event, AlertTransition::Unchanged),
+    }
+}
+
+/// Build a human-readable alert title.
+pub fn alert_title(rule: &Rule, event: &AlertEvent) -> String {
+    format!(
+        "[{}] {} {} {} (value={:?})",
+        event.severity.as_str(),
+        rule.name,
+        rule.comparator.as_str(),
+        rule.threshold,
+        event.value
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Comparator, Severity};
+
+    fn sample_rule(for_seconds: u64) -> Rule {
+        Rule {
+            id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+            name: "high_cpu".into(),
+            datasource_id: Uuid::nil(),
+            expr: "cpu".into(),
+            comparator: Comparator::Gt,
+            threshold: 80.0,
+            for_seconds,
+            interval_seconds: 30,
+            severity: Severity::Critical,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            channel_ids: vec![],
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn sample(value: f64) -> MetricSample {
+        let mut labels = BTreeMap::new();
+        labels.insert("instance".into(), "a".into());
+        MetricSample {
+            labels,
+            value,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn compare_ops() {
+        assert!(compare(Comparator::Gt, 81.0, 80.0));
+        assert!(!compare(Comparator::Gt, 80.0, 80.0));
+        assert!(compare(Comparator::Gte, 80.0, 80.0));
+        assert!(compare(Comparator::Lt, 1.0, 2.0));
+        assert!(compare(Comparator::Neq, 1.0, 2.0));
+    }
+
+    #[test]
+    fn immediate_firing_when_for_zero() {
+        let rule = sample_rule(0);
+        let now = Utc::now();
+        let (event, t) = apply_evaluation(&rule, &sample(90.0), None, now);
+        assert_eq!(event.status, AlertStatus::Firing);
+        assert_eq!(t, AlertTransition::BecameFiring);
+    }
+
+    #[test]
+    fn pending_then_firing_after_for() {
+        let rule = sample_rule(60);
+        let t0 = Utc::now();
+        let (pending, t1) = apply_evaluation(&rule, &sample(90.0), None, t0);
+        assert_eq!(pending.status, AlertStatus::Pending);
+        assert_eq!(t1, AlertTransition::Unchanged);
+
+        let t1_time = t0 + Duration::seconds(61);
+        let (firing, t2) = apply_evaluation(&rule, &sample(91.0), Some(pending), t1_time);
+        assert_eq!(firing.status, AlertStatus::Firing);
+        assert_eq!(t2, AlertTransition::BecameFiring);
+    }
+
+    #[test]
+    fn firing_to_resolved() {
+        let rule = sample_rule(0);
+        let now = Utc::now();
+        let (firing, _) = apply_evaluation(&rule, &sample(90.0), None, now);
+        let (resolved, t) = apply_evaluation(&rule, &sample(10.0), Some(firing), now);
+        assert_eq!(resolved.status, AlertStatus::Resolved);
+        assert_eq!(t, AlertTransition::BecameResolved);
+    }
+}
