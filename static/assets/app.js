@@ -16,7 +16,7 @@
     rules: ["告警规则", "阈值评估与通知绑定"],
     channels: ["通知渠道", "Webhook · 钉钉 · 企微 · 飞书"],
     ingress: ["Ingress 接入", "外部告警接入 · 试推送 · 通知绑定"],
-    alerts: ["告警事件", "接入与规则产生的告警 · 筛选 · 详情 · 静默"],
+    alerts: ["告警事件", "按状态浏览 · 点开看详情"],
     silences: ["静默策略", "按规则或标签临时抑制通知"],
     settings: ["系统设置", "运行配置与账号信息（只读）"],
   };
@@ -500,74 +500,97 @@
 
     async alerts(root) {
       const f = state.alertFilters || { status: "", severity: "", source: "", q: "" };
-      setActions(`
-        <input id="alert-q" placeholder="搜索名称 / 摘要 / 标签" value="${esc(f.q || "")}" style="width:200px" />
-        <select id="alert-filter">
-          <option value="">全部状态</option>
-          <option value="firing" ${f.status === "firing" ? "selected" : ""}>告警中</option>
-          <option value="pending" ${f.status === "pending" ? "selected" : ""}>等待中</option>
-          <option value="resolved" ${f.status === "resolved" ? "selected" : ""}>已恢复</option>
-        </select>
-        <select id="alert-sev">
-          <option value="">全部级别</option>
-          <option value="critical" ${f.severity === "critical" ? "selected" : ""}>critical</option>
-          <option value="warning" ${f.severity === "warning" ? "selected" : ""}>warning</option>
-          <option value="info" ${f.severity === "info" ? "selected" : ""}>info</option>
-        </select>
-        <select id="alert-source">
-          <option value="">全部来源</option>
-          <option value="ingress" ${f.source === "ingress" ? "selected" : ""}>Ingress 接入</option>
-          <option value="rule" ${f.source === "rule" ? "selected" : ""}>规则评估</option>
-        </select>
-        <button class="ghost" id="btn-refresh">刷新</button>`);
+      setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
+
       const load = async () => {
-        const status = document.getElementById("alert-filter").value;
-        const severity = document.getElementById("alert-sev").value;
-        const source = document.getElementById("alert-source").value;
-        const q = document.getElementById("alert-q").value.trim();
+        const status = state.alertFilters?.status || "";
+        const severity = root.querySelector("#alert-sev")?.value ?? state.alertFilters?.severity ?? "";
+        const source = root.querySelector("#alert-source")?.value ?? state.alertFilters?.source ?? "";
+        const q = (root.querySelector("#alert-q")?.value ?? state.alertFilters?.q ?? "").trim();
         state.alertFilters = { status, severity, source, q };
+
         const params = new URLSearchParams();
         if (status) params.set("status", status);
         if (severity) params.set("severity", severity);
         if (source) params.set("source", source);
         if (q) params.set("q", q);
-        const qs = params.toString();
-        const [rows, ingressRows] = await Promise.all([
-          api("/api/alerts" + (qs ? `?${qs}` : "")),
+
+        const [rows, allRows, ingressRows] = await Promise.all([
+          api("/api/alerts" + (params.toString() ? `?${params}` : "")),
+          api("/api/alerts").catch(() => []),
           api("/api/ingress").catch(() => []),
         ]);
         const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
-        const firing = rows.filter((a) => a.status === "firing").length;
-        const pending = rows.filter((a) => a.status === "pending").length;
-        const resolved = rows.filter((a) => a.status === "resolved").length;
+        const nFire = allRows.filter((a) => a.status === "firing").length;
+        const nPend = allRows.filter((a) => a.status === "pending").length;
+        const nRes = allRows.filter((a) => a.status === "resolved").length;
+
         root.innerHTML = `
-          <div class="stats alert-stats">
-            <div class="stat firing"><div class="n">${firing}</div><div class="l">告警中</div></div>
-            <div class="stat"><div class="n">${pending}</div><div class="l">等待中</div></div>
-            <div class="stat ok"><div class="n">${resolved}</div><div class="l">已恢复</div></div>
-            <div class="stat accent"><div class="n">${rows.length}</div><div class="l">当前结果</div></div>
+          <div class="alert-toolbar">
+            <div class="alert-tabs" role="tablist">
+              <button type="button" class="alert-tab ${!status ? "on" : ""}" data-st="">全部</button>
+              <button type="button" class="alert-tab firing ${status === "firing" ? "on" : ""}" data-st="firing">告警中 <em>${nFire}</em></button>
+              <button type="button" class="alert-tab ${status === "pending" ? "on" : ""}" data-st="pending">等待 <em>${nPend}</em></button>
+              <button type="button" class="alert-tab ok ${status === "resolved" ? "on" : ""}" data-st="resolved">已恢复 <em>${nRes}</em></button>
+            </div>
+            <div class="alert-filters">
+              <input id="alert-q" placeholder="搜索名称、摘要…" value="${esc(q)}" />
+              <select id="alert-sev">
+                <option value="">级别</option>
+                <option value="critical" ${severity === "critical" ? "selected" : ""}>critical</option>
+                <option value="warning" ${severity === "warning" ? "selected" : ""}>warning</option>
+                <option value="info" ${severity === "info" ? "selected" : ""}>info</option>
+              </select>
+              <select id="alert-source">
+                <option value="">来源</option>
+                <option value="ingress" ${source === "ingress" ? "selected" : ""}>Ingress</option>
+                <option value="rule" ${source === "rule" ? "selected" : ""}>规则</option>
+              </select>
+            </div>
           </div>
-          <div class="panel">${
+          ${
             rows.length
-              ? alertTable(rows, { ingressMap })
-              : `<div class="empty">
-                  暂无告警事件。可先在「Ingress 接入」创建路由并「试推送」，或配置规则评估。
+              ? alertCards(rows, ingressMap)
+              : `<div class="panel empty">
+                  暂无告警。去 Ingress「试推送」或等待规则触发。
                   <div style="margin-top:12px"><button class="primary" id="go-ingress">去 Ingress</button></div>
                 </div>`
-          }</div>`;
-        bindAlertTable(root, rows, ingressMap);
+          }`;
+
+        root.querySelectorAll(".alert-tab").forEach((tab) => {
+          tab.onclick = () => {
+            state.alertFilters = {
+              ...(state.alertFilters || {}),
+              status: tab.dataset.st || "",
+            };
+            load();
+          };
+        });
+        bindAlertCards(root, rows, ingressMap);
         const go = document.getElementById("go-ingress");
         if (go) go.onclick = () => navigate("ingress");
+        let t;
+        const qEl = root.querySelector("#alert-q");
+        qEl.oninput = () => {
+          clearTimeout(t);
+          t = setTimeout(() => {
+            state.alertFilters = { ...(state.alertFilters || {}), q: qEl.value.trim() };
+            load();
+          }, 280);
+        };
+        root.querySelector("#alert-sev").onchange = (e) => {
+          state.alertFilters = { ...(state.alertFilters || {}), severity: e.target.value };
+          load();
+        };
+        root.querySelector("#alert-source").onchange = (e) => {
+          state.alertFilters = { ...(state.alertFilters || {}), source: e.target.value };
+          load();
+        };
       };
-      let t;
-      document.getElementById("alert-q").oninput = () => {
-        clearTimeout(t);
-        t = setTimeout(load, 280);
-      };
-      document.getElementById("alert-filter").onchange = load;
-      document.getElementById("alert-sev").onchange = load;
-      document.getElementById("alert-source").onchange = load;
-      document.getElementById("btn-refresh").onclick = load;
+
+      document.getElementById("btn-refresh").onclick = () => load();
+      // seed filters from initial f
+      state.alertFilters = { ...f };
       await load();
     },
 
@@ -623,44 +646,117 @@
     },
   };
 
-  function alertTable(rows, opts = {}) {
-    if (!rows.length) return `<div class="empty">暂无告警事件</div>`;
-    const compact = !!opts.compact;
-    const ingressMap = opts.ingressMap || {};
-    return `<table class="data alert-table"><thead><tr>
-      <th>状态</th><th>级别</th><th>告警名称</th><th>摘要</th><th>当前值</th>
-      <th>来源</th><th>开始时间</th>${compact ? "" : "<th>持续</th>"}<th>最后更新</th><th></th>
-    </tr></thead><tbody>${rows
+  function alertCards(rows, ingressMap) {
+    return `<div class="alert-feed">${rows
       .map((a, i) => {
         const name = alertDisplayName(a);
         const summary = alertSummary(a);
         const dur = alertDuration(a);
         const src = alertSourceLabel(a, ingressMap);
-        return `<tr data-alert-idx="${i}">
-      <td><span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span></td>
-      <td><span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
-      <td>
-        <div class="alert-name">${esc(name)}</div>
-        <div class="alert-labels">${labelChips(a.labels, ["alertname", "severity", "source"])}</div>
-      </td>
-      <td class="alert-summary" title="${esc(summary)}">${esc(summary || "—")}</td>
-      <td class="mono">${fmtValue(a.value)}</td>
-      <td><span class="source-tag">${esc(src)}</span></td>
-      <td>${esc(fmtTime(a.starts_at))}</td>
-      ${compact ? "" : `<td>${esc(dur)}</td>`}
-      <td>${esc(fmtTime(a.last_evaluated_at))}</td>
-      <td class="actions"><button type="button" data-alert-detail="${i}">详情</button></td>
-    </tr>`;
+        const val = fmtValue(a.value);
+        const chips = labelChips(a.labels, ["alertname", "severity", "source"], 3);
+        return `<article class="alert-card status-${esc(a.status)} sev-${esc(
+          a.severity
+        )}" data-alert-idx="${i}" tabindex="0" role="button">
+          <div class="ac-rail" aria-hidden="true"></div>
+          <div class="ac-body">
+            <div class="ac-top">
+              <div class="ac-title-row">
+                <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
+                <span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span>
+                <h3 class="ac-name">${esc(name)}</h3>
+              </div>
+              <button type="button" class="ghost ac-detail" data-alert-detail="${i}">详情</button>
+            </div>
+            <p class="ac-summary">${esc(summary || "无摘要")}</p>
+            <div class="ac-meta">
+              <span>${esc(src)}</span>
+              <span class="dot">·</span>
+              <span>持续 ${esc(dur)}</span>
+              ${val !== "—" ? `<span class="dot">·</span><span class="mono">值 ${esc(val)}</span>` : ""}
+              <span class="dot">·</span>
+              <span>更新于 ${esc(fmtTime(a.last_evaluated_at))}</span>
+            </div>
+            <div class="alert-labels">${chips}</div>
+          </div>
+        </article>`;
       })
-      .join("")}</tbody></table>`;
+      .join("")}</div>`;
+  }
+
+  function bindAlertCards(container, rows, ingressMap) {
+    if (!container || !rows?.length) return;
+    const open = (i) => showAlertDetail(rows[i], ingressMap || {});
+    container.querySelectorAll(".alert-card").forEach((card) => {
+      card.addEventListener("click", (e) => {
+        if (e.target.closest("[data-alert-detail]")) return;
+        open(Number(card.dataset.alertIdx));
+      });
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open(Number(card.dataset.alertIdx));
+        }
+      });
+    });
+    container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        open(Number(btn.dataset.alertDetail));
+      });
+    });
+  }
+
+  function alertTable(rows, opts = {}) {
+    if (!rows.length) return `<div class="empty">暂无告警事件</div>`;
+    const compact = !!opts.compact;
+    const ingressMap = opts.ingressMap || {};
+    if (!compact) {
+      return alertCards(rows, ingressMap);
+    }
+    // Overview: compact rows
+    return `<div class="alert-feed compact">${rows
+      .slice(0, 8)
+      .map((a, i) => {
+        const name = alertDisplayName(a);
+        const summary = alertSummary(a);
+        const src = alertSourceLabel(a, ingressMap);
+        return `<article class="alert-card compact status-${esc(a.status)}" data-alert-idx="${i}" tabindex="0" role="button">
+          <div class="ac-rail"></div>
+          <div class="ac-body">
+            <div class="ac-top">
+              <div class="ac-title-row">
+                <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
+                <h3 class="ac-name">${esc(name)}</h3>
+              </div>
+              <span class="ac-when">${esc(fmtTime(a.last_evaluated_at))}</span>
+            </div>
+            <p class="ac-summary">${esc(summary || src)}</p>
+          </div>
+        </article>`;
+      })
+      .join("")}</div>`;
   }
 
   function bindAlertTable(container, rows, ingressMap) {
-    if (!container || !rows?.length) return;
-    container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
-      btn.onclick = () =>
-        showAlertDetail(rows[Number(btn.dataset.alertDetail)], ingressMap || {});
-    });
+    bindAlertCards(container, rows, ingressMap);
+  }
+
+  function labelChips(labels, hide = [], max = 6) {
+    const entries = Object.entries(labels || {}).filter(([k]) => !hide.includes(k));
+    if (!entries.length) return "";
+    const shown = entries.slice(0, max);
+    const more = entries.length - shown.length;
+    return (
+      shown
+        .map(
+          ([k, v]) =>
+            `<span class="chip" title="${esc(k)}=${esc(v)}"><b>${esc(k)}</b>${esc(
+              String(v).length > 24 ? String(v).slice(0, 24) + "…" : v
+            )}</span>`
+        )
+        .join("") + (more > 0 ? `<span class="chip more">+${more}</span>` : "")
+    );
   }
 
   function alertSourceLabel(a, ingressMap) {
@@ -720,23 +816,6 @@
     const m = Math.floor((sec % 3600) / 60);
     if (h < 48) return `${h}h ${m}m`;
     return `${Math.floor(h / 24)}d ${h % 24}h`;
-  }
-
-  function labelChips(labels, hide = []) {
-    const entries = Object.entries(labels || {}).filter(([k]) => !hide.includes(k));
-    if (!entries.length) return `<span class="muted">—</span>`;
-    const shown = entries.slice(0, 6);
-    const more = entries.length - shown.length;
-    return (
-      shown
-        .map(
-          ([k, v]) =>
-            `<span class="chip" title="${esc(k)}=${esc(v)}"><b>${esc(k)}</b>${esc(
-              String(v).length > 24 ? String(v).slice(0, 24) + "…" : v
-            )}</span>`
-        )
-        .join("") + (more > 0 ? `<span class="chip more">+${more}</span>` : "")
-    );
   }
 
   function kvTable(obj) {
