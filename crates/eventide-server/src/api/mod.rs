@@ -58,6 +58,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/rules/{id}/evaluate", post(evaluate_rule_now))
         .route("/api/alerts", get(list_alerts))
+        .route("/api/alerts/{id}", get(get_alert))
+        .route("/api/alerts/{id}/notifies", get(list_alert_notifies))
         .route("/api/silences", get(list_silences).post(create_silence))
         .route("/api/silences/{id}", delete(delete_silence))
         .route("/api/ingress", get(list_ingress).post(create_ingress))
@@ -65,6 +67,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/ingress/{id}",
             get(get_ingress).put(update_ingress).delete(delete_ingress),
         )
+        .route("/api/ingress/{id}/test", post(test_ingress))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state);
 
@@ -459,17 +462,221 @@ async fn evaluate_rule_now(
 #[derive(Deserialize)]
 struct AlertQuery {
     status: Option<String>,
+    severity: Option<String>,
+    /// Free-text search over alertname / summary / labels / fingerprint.
+    q: Option<String>,
+    /// `ingress` | `rule` — filter by source label prefix or absence.
+    source: Option<String>,
 }
 
 async fn list_alerts(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AlertQuery>,
 ) -> ApiResult<Json<Vec<AlertEvent>>> {
-    state
+    let mut alerts = state
         .db
         .list_alerts(q.status.as_deref())
+        .map_err(ApiError::internal)?;
+
+    if let Some(sev) = q.severity.as_deref().filter(|s| !s.is_empty()) {
+        alerts.retain(|a| a.severity.as_str() == sev);
+    }
+    if let Some(src) = q.source.as_deref().filter(|s| !s.is_empty()) {
+        match src {
+            "ingress" => alerts.retain(|a| {
+                a.labels
+                    .get("source")
+                    .map(|s| s.starts_with("ingress:"))
+                    .unwrap_or(false)
+            }),
+            "rule" => alerts.retain(|a| {
+                !a.labels
+                    .get("source")
+                    .map(|s| s.starts_with("ingress:"))
+                    .unwrap_or(false)
+            }),
+            _ => {}
+        }
+    }
+    if let Some(needle) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let n = needle.to_ascii_lowercase();
+        alerts.retain(|a| alert_matches_query(a, &n));
+    }
+
+    // Firing first, then pending, then resolved; within group by last_evaluated desc (already mostly).
+    alerts.sort_by(|a, b| {
+        let rank = |s: &AlertStatus| match s {
+            AlertStatus::Firing => 0,
+            AlertStatus::Pending => 1,
+            AlertStatus::Resolved => 2,
+        };
+        rank(&a.status)
+            .cmp(&rank(&b.status))
+            .then_with(|| b.last_evaluated_at.cmp(&a.last_evaluated_at))
+    });
+
+    Ok(Json(alerts))
+}
+
+fn alert_matches_query(a: &AlertEvent, needle: &str) -> bool {
+    let name = a
+        .labels
+        .get("alertname")
+        .cloned()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.contains(needle) {
+        return true;
+    }
+    if a.fingerprint.to_ascii_lowercase().contains(needle) {
+        return true;
+    }
+    if a.labels.values().any(|v| v.to_ascii_lowercase().contains(needle)) {
+        return true;
+    }
+    if a.annotations
+        .values()
+        .any(|v| v.to_ascii_lowercase().contains(needle))
+    {
+        return true;
+    }
+    false
+}
+
+async fn get_alert(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<AlertEvent>> {
+    state
+        .db
+        .get_alert(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("alert not found"))
+}
+
+async fn list_alert_notifies(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<NotifyLog>>> {
+    state
+        .db
+        .list_notify_logs_for_alert(id)
         .map(Json)
         .map_err(ApiError::internal)
+}
+
+#[derive(Deserialize)]
+struct IngressTestInput {
+    /// fire | recover | probe_fire | probe_recover
+    #[serde(default = "default_scenario")]
+    scenario: String,
+}
+
+fn default_scenario() -> String {
+    "fire".into()
+}
+
+async fn test_ingress(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<IngressTestInput>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let route = state
+        .db
+        .get_ingress_route(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("ingress route not found"))?;
+    if !route.enabled {
+        return Err(ApiError::bad("ingress is disabled"));
+    }
+
+    let payload = sample_ingress_payload(&route, &input.scenario);
+    let alerts = eventide_core::parse_ingress_payload(payload.as_bytes())
+        .map_err(ApiError::bad)?;
+    if alerts.is_empty() {
+        return Err(ApiError::bad("sample produced no alerts"));
+    }
+    let n = crate::ingress_api::ingest_list(&state, &route, alerts)
+        .await
+        .map_err(ApiError::bad)?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "accepted": n,
+        "scenario": input.scenario,
+        "hint": "已写入告警事件，可在「告警事件」页查看"
+    })))
+}
+
+fn sample_ingress_payload(route: &IngressRoute, scenario: &str) -> String {
+    let name = format!("试推送·{}", route.name);
+    let now_s = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let fp = format!("test-{}", route.id);
+    let probe_id = format!("test-probe-{}", route.id);
+    match scenario {
+        "recover" => serde_json::json!({
+            "alerts": [{
+                "status": "resolved",
+                "fingerprint": fp,
+                "labels": {
+                    "alertname": name,
+                    "severity": "warning",
+                    "instance": "eventide-test"
+                },
+                "annotations": {
+                    "summary": "控制台试推送：恢复事件"
+                },
+                "severity": "warning",
+                "value": 0.0
+            }]
+        })
+        .to_string(),
+        "probe_fire" => serde_json::json!({
+            "eventType": "fire",
+            "eventTime": now_s,
+            "messageId": probe_id,
+            "resultFlag": "BAD",
+            "retCode": "4001",
+            "retMessage": "控制台试推送：拨测失败示例",
+            "retTimeMs": 1234,
+            "bizname": "demo",
+            "bizchainName": name,
+            "alertCategory": "business",
+            "areacode": "test"
+        })
+        .to_string(),
+        "probe_recover" => serde_json::json!({
+            "eventType": "recover",
+            "eventTime": now_s,
+            "messageId": probe_id,
+            "resultFlag": "GOOD",
+            "retCode": "4000",
+            "retMessage": "控制台试推送：拨测恢复",
+            "retTimeMs": 800,
+            "bizname": "demo",
+            "bizchainName": name,
+            "alertCategory": "business",
+            "areacode": "test"
+        })
+        .to_string(),
+        _ => serde_json::json!({
+            "alerts": [{
+                "status": "firing",
+                "fingerprint": fp,
+                "labels": {
+                    "alertname": name,
+                    "severity": "critical",
+                    "instance": "eventide-test"
+                },
+                "annotations": {
+                    "summary": "控制台试推送：模拟告警触发"
+                },
+                "severity": "critical",
+                "value": 99.0
+            }]
+        })
+        .to_string(),
+    }
 }
 
 // ---- silences ----

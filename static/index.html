@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Eventide</title>
-  <link rel="stylesheet" href="/assets/app.css?v=4" />
+  <link rel="stylesheet" href="/assets/app.css?v=9" />
 </head>
 <body>
   <!-- Login -->
@@ -34,19 +34,27 @@
   <!-- App -->
   <div id="view-app">
     <aside class="sidebar">
-      <div class="brand">Event<span>ide</span></div>
-      <button class="nav-item active" data-page="overview"><span class="ico">◈</span>总览</button>
-      <button class="nav-item" data-page="datasources"><span class="ico">◎</span>数据源</button>
-      <button class="nav-item" data-page="rules"><span class="ico">▣</span>告警规则</button>
-      <button class="nav-item" data-page="channels"><span class="ico">☍</span>通知渠道</button>
-      <button class="nav-item" data-page="ingress"><span class="ico">⇢</span>Ingress 接入</button>
-      <button class="nav-item" data-page="alerts"><span class="ico">⚠</span>告警事件</button>
-      <button class="nav-item" data-page="silences"><span class="ico">◐</span>静默策略</button>
-      <button class="nav-item" data-page="settings"><span class="ico">⚙</span>系统设置</button>
+      <div class="brand-row">
+        <div class="brand">Event<span>ide</span></div>
+        <button type="button" class="sidebar-toggle" id="btn-sidebar" title="收起 / 展开侧栏" aria-label="收起或展开侧栏">
+          <span class="chev">‹</span>
+        </button>
+      </div>
+      <button class="nav-item active" data-page="overview" title="总览"><span class="ico">◈</span><span class="label">总览</span></button>
+      <button class="nav-item" data-page="datasources" title="数据源"><span class="ico">◎</span><span class="label">数据源</span></button>
+      <button class="nav-item" data-page="rules" title="告警规则"><span class="ico">▣</span><span class="label">告警规则</span></button>
+      <button class="nav-item" data-page="channels" title="通知渠道"><span class="ico">☍</span><span class="label">通知渠道</span></button>
+      <button class="nav-item" data-page="ingress" title="Ingress 接入"><span class="ico">⇢</span><span class="label">Ingress 接入</span></button>
+      <button class="nav-item" data-page="alerts" title="告警事件"><span class="ico">⚠</span><span class="label">告警事件</span></button>
+      <button class="nav-item" data-page="silences" title="静默策略"><span class="ico">◐</span><span class="label">静默策略</span></button>
+      <button class="nav-item" data-page="settings" title="系统设置"><span class="ico">⚙</span><span class="label">系统设置</span></button>
       <div class="spacer"></div>
       <div class="user-box">
-        <strong id="user-name">—</strong>
-        <button class="ghost" id="btn-logout" style="width:100%">退出登录</button>
+        <div class="user-meta">
+          <div class="user-avatar" id="user-avatar" title="">A</div>
+          <strong id="user-name">—</strong>
+        </div>
+        <button class="ghost" id="btn-logout">退出登录</button>
       </div>
     </aside>
     <main class="main">
@@ -66,6 +74,6 @@
   </div>
   <div class="toast" id="toast"></div>
 
-  <script src="/assets/app.js?v=4"></script>
+  <script src="/assets/app.js?v=9"></script>
 </body>
 </html>

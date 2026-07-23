@@ -7,7 +7,7 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，产�
 1. **主动拉数评估**：从 Prometheus / VictoriaMetrics / Kafka / Loki(Log) 取数，按规则判断是否告警  
 2. **被动接收告警**：通过 HTTP Webhook 或 Kafka Topic 接收外部平台已判定的告警  
 
-两条路径汇入同一套 **指纹去重 → 静默 → 多通道通知** 流水线。
+两条路径汇入同一套 **告警标识去重 → 静默 → 多通道通知** 流水线。
 
 > License: MIT。参考 WatchAlert 的产品划分，代码为独立实现（WatchAlert 为 AGPL，请勿直接复制其源码）。
 
@@ -47,7 +47,7 @@ Eventide 定位为 **团队级告警中枢**：
 | 规则引擎 | 阈值比较 + `for` 持续时长 |
 | 多数据源 | Prometheus、VictoriaMetrics、Kafka、Log(Loki) |
 | 告警接入 | Alertmanager / Generic Webhook / Kafka |
-| 去重 | 规则 + 标签指纹（fingerprint） |
+| 去重 | 规则 + 标签生成的告警标识（fingerprint） |
 | 静默 | 按规则 ID / 标签匹配 |
 | 通知 | Webhook、钉钉、企微、飞书 |
 | 控制台 | 登录、侧栏菜单、CRUD 配置 |
@@ -109,7 +109,7 @@ eventide/
 │       ├── app.css
 │       └── app.js
 └── crates/
-    ├── eventide-core/         # 模型、评估、指纹、Ingress 归一化
+    ├── eventide-core/         # 模型、评估、告警标识、Ingress 归一化
     ├── eventide-sources/      # Prometheus / Loki / Kafka 适配
     ├── eventide-notify/       # Webhook / 钉钉 / 企微 / 飞书
     └── eventide-server/       # HTTP API、调度、鉴权、静态资源
@@ -119,7 +119,7 @@ eventide/
 
 | Crate | 职责 |
 |-------|------|
-| **eventide-core** | `Datasource` / `Rule` / `AlertEvent` / `Silence` / `IngressRoute`；阈值评估；指纹；告警状态机；Alertmanager/Generic 解析 |
+| **eventide-core** | `Datasource` / `Rule` / `AlertEvent` / `Silence` / `IngressRoute`；阈值评估；告警标识；告警状态机；Alertmanager/Generic 解析 |
 | **eventide-sources** | `fetch_samples()`：按数据源类型拉指标样本 |
 | **eventide-notify** | 统一 `Notifier::send`，按渠道发通知 |
 | **eventide-server** | 进程入口、JWT 鉴权、SQLite、规则调度、Kafka Ingress 轮询、REST API、控制台 |
@@ -142,7 +142,7 @@ eventide-server
                     │              eventide (单进程)            │
                     │                                         │
   Prometheus ──────►│  sources          core                  │
-  VictoriaMetrics ──►│  (拉数) ──────► (评估/指纹/状态机)       │
+  VictoriaMetrics ──►│  (拉数) ──────► (评估/告警标识/状态机)   │
   Loki/Log ────────►│                      │                  │
   Kafka(消息字段) ─►│                      ▼                  │
                     │                 SQLite                   │
@@ -202,9 +202,11 @@ eventide-server
 | `firing` | 正式告警中 |
 | `resolved` | 已恢复 |
 
-字段含指纹、标签、注解、当前值、通知边沿标记（`notified_firing` / `notified_resolved`）。
+字段含告警标识、标签、注解、当前值、通知边沿标记（`notified_firing` / `notified_resolved`）。
 
-### 5.4 指纹 Fingerprint
+### 5.4 告警标识（fingerprint）
+
+相同标签组合会得到同一告警标识，重复触发时合并为同一条事件，而不是新建多条。
 
 对 `rule_id + 有序 labels` 做 SHA-256，用于去重。  
 Ingress 场景会再带上 `route_id` 前缀，避免不同接入互相覆盖。
@@ -443,7 +445,7 @@ cargo run -p eventide-server -- /path/to/eventide.toml
 规则 `expr` 填字段路径（可覆盖 `options.field`），例如 `latency_ms` 或 `metrics.p99`；阈值如 `> 500`。
 
 - 默认 `mode=field`：消费近期消息，解析 JSON 数值字段  
-- `label_fields`：从消息拷贝标签，用于分组与指纹  
+- `label_fields`：从消息拷贝标签，用于分组与告警标识  
 - 可选 `mode=depth` / `mode=count`：Topic 堆积或近期条数（运维指标）
 
 **Log / Loki**
@@ -492,6 +494,7 @@ count_over_time({app="api"} |= "ERROR" [5m])
 
 - 控制台创建 `kind=alertmanager`  
 - URL：`POST /api/ingress/{id}/alertmanager`  
+- 控制台支持「试推送」一键验证接入 → 告警事件闭环（也可 `POST /api/ingress/{id}/test`，需登录 JWT）  
 
 **Generic / 拨测 Probe**
 
@@ -530,7 +533,7 @@ count_over_time({app="api"} |= "ERROR" [5m])
 | 拨测字段 | Eventide |
 |----------|----------|
 | `eventType` fire/recover | status firing/resolved |
-| `messageId` | fingerprint（同链 fire↔recover 对齐） |
+| `messageId` | 告警标识 fingerprint（同链 fire↔recover 对齐） |
 | `bizchainName` 等 | labels.alertname |
 | `retMessage` | annotations.summary |
 | `retTimeMs` | value |
@@ -614,7 +617,7 @@ curl -s http://127.0.0.1:8080/api/overview \
 - [x] Prometheus / VictoriaMetrics 拉数评估  
 - [x] Kafka / Log 数据源  
 - [x] Alertmanager / Generic / Kafka Ingress  
-- [x] 指纹去重、静默、多通道通知  
+- [x] 告警标识去重、静默、多通道通知  
 - [x] JWT 登录与管理控制台  
 
 后续可演进：
@@ -648,7 +651,7 @@ $env:RUST_LOG="info,eventide=debug"
 cargo run -p eventide-server -- eventide.toml
 ```
 
-核心单测集中在 `eventide-core`（比较符、`for` 状态机、指纹、Ingress 解析）。
+核心单测集中在 `eventide-core`（比较符、`for` 状态机、告警标识、Ingress 解析）。
 
 ---
 
@@ -658,7 +661,7 @@ cargo run -p eventide-server -- eventide.toml
 |------|------|
 | PromQL | Prometheus 查询语言 |
 | LogQL | Loki 日志查询语言 |
-| fingerprint | 告警去重指纹 |
+| fingerprint | 告警标识（相同标签合并为同一条事件） |
 | for | 条件需持续满足的时间 |
 | firing / resolved | 告警触发 / 恢复 |
 | Ingress | 外部告警接入入口 |

@@ -2,6 +2,7 @@
 (() => {
   const TOKEN_KEY = "eventide_token";
   const USER_KEY = "eventide_user";
+  const SIDEBAR_KEY = "eventide_sidebar_collapsed";
 
   const state = {
     page: "overview",
@@ -14,8 +15,8 @@
     datasources: ["数据源", "Prometheus / VictoriaMetrics"],
     rules: ["告警规则", "阈值评估与通知绑定"],
     channels: ["通知渠道", "Webhook · 钉钉 · 企微 · 飞书"],
-    ingress: ["Ingress 接入", "接收外部平台推送的告警"],
-    alerts: ["告警事件", "去重后的 firing / pending / resolved"],
+    ingress: ["Ingress 接入", "外部告警接入 · 试推送 · 通知绑定"],
+    alerts: ["告警事件", "接入与规则产生的告警 · 筛选 · 详情 · 静默"],
     silences: ["静默策略", "按规则或标签临时抑制通知"],
     settings: ["系统设置", "运行配置与账号信息（只读）"],
   };
@@ -86,8 +87,28 @@
   function showApp() {
     document.getElementById("view-login").style.display = "none";
     document.getElementById("view-app").classList.add("active");
-    document.getElementById("user-name").textContent =
-      localStorage.getItem(USER_KEY) || "admin";
+    const name = localStorage.getItem(USER_KEY) || "admin";
+    document.getElementById("user-name").textContent = name;
+    const av = document.getElementById("user-avatar");
+    if (av) {
+      av.textContent = (name[0] || "A").toUpperCase();
+      av.title = name;
+    }
+    applySidebarState();
+  }
+
+  function applySidebarState() {
+    const app = document.getElementById("view-app");
+    const collapsed = localStorage.getItem(SIDEBAR_KEY) === "1";
+    app.classList.toggle("sidebar-collapsed", collapsed);
+    const btn = document.getElementById("btn-sidebar");
+    if (btn) btn.title = collapsed ? "展开侧栏" : "收起侧栏";
+  }
+
+  function toggleSidebar() {
+    const next = localStorage.getItem(SIDEBAR_KEY) === "1" ? "0" : "1";
+    localStorage.setItem(SIDEBAR_KEY, next);
+    applySidebarState();
   }
 
   function logout(notify = true) {
@@ -135,6 +156,7 @@
   });
 
   document.getElementById("btn-logout").addEventListener("click", () => logout());
+  document.getElementById("btn-sidebar").addEventListener("click", () => toggleSidebar());
 
   // ---------- Navigation ----------
   document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -211,6 +233,8 @@
       setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
       document.getElementById("btn-refresh").onclick = () => renderPage();
       const d = await api("/api/overview");
+      const ingressRows = await api("/api/ingress").catch(() => []);
+      const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
       root.innerHTML = `
         <div class="stats">
           <div class="stat firing"><div class="n">${d.alerts_firing}</div><div class="l">正在告警</div></div>
@@ -224,8 +248,9 @@
         </div>
         <div class="panel">
           <h3 style="margin:0 0 0.75rem;font-size:1rem">最近告警</h3>
-          ${alertTable(d.recent_alerts || [])}
+          ${alertTable(d.recent_alerts || [], { compact: true, ingressMap })}
         </div>`;
+      bindAlertTable(root, d.recent_alerts || [], ingressMap);
     },
 
     async datasources(root) {
@@ -360,36 +385,95 @@
       document.getElementById("btn-add").onclick = () => editIngress();
       const [rows, chs] = await Promise.all([api("/api/ingress"), api("/api/channels")]);
       state.cache.channels = chs;
+      const chMap = Object.fromEntries(chs.map((c) => [c.id, c]));
       const origin = location.origin;
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>名称</th><th>类型</th><th>Webhook URL</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map((r) => {
-              const url =
-                  r.kind === "kafka"
-                    ? `kafka://${esc(r.endpoint || "")}/${esc((r.options && r.options.topic) || "")}`
-                    : r.kind === "alertmanager"
-                    ? `${origin}/api/ingress/${r.id}/alertmanager`
-                    : `${origin}/api/ingress/${r.id}/generic`;
-                return `<tr>
-              <td>${esc(r.name)}</td>
-              <td>${esc(r.kind)}</td>
-              <td class="mono" style="word-break:break-all">${esc(url)}</td>
-              <td><span class="badge ${r.enabled ? "on" : "off"}">${r.enabled ? "启用" : "停用"}</span></td>
-              <td class="actions">
-                <button data-copy="${esc(url)}">复制</button>
+
+      if (!rows.length) {
+        root.innerHTML = `
+          <div class="panel guide">
+            <h3>从 Ingress 接入告警</h3>
+            <ol class="steps">
+              <li>先在「通知渠道」配置至少一个机器人 / Webhook（可选，也可稍后绑定）</li>
+              <li>创建 Ingress：选择 Alertmanager / Generic（含拨测） / Kafka</li>
+              <li>把外部平台 Webhook 指到下方生成的地址，或使用「试推送」验证</li>
+              <li>在「告警事件」查看 firing / resolved 与通知结果</li>
+            </ol>
+            <button class="primary" id="btn-guide-add">新建第一个 Ingress</button>
+          </div>`;
+        document.getElementById("btn-guide-add").onclick = () => editIngress();
+        return;
+      }
+
+      root.innerHTML = `<div class="ingress-list">${rows
+        .map((r) => {
+          const url =
+            r.kind === "kafka"
+              ? `kafka://${r.endpoint || ""}/${(r.options && r.options.topic) || ""}`
+              : r.kind === "alertmanager"
+              ? `${origin}/api/ingress/${r.id}/alertmanager`
+              : `${origin}/api/ingress/${r.id}/generic`;
+          const pushUrl = `${origin}/api/ingress/${r.id}/push`;
+          const chNames = (r.channel_ids || [])
+            .map((id) => (chMap[id] ? chMap[id].name : id.slice(0, 8)))
+            .join("、") || "未绑定渠道";
+          const kindHint =
+            r.kind === "alertmanager"
+              ? "接收 Prometheus Alertmanager webhook"
+              : r.kind === "kafka"
+              ? "后台消费 Topic 中的告警 JSON"
+              : "通用 JSON / Jeecg 拨测 probe-alert";
+          return `<article class="ingress-card">
+            <div class="ic-head">
+              <div>
+                <div class="ic-title">${esc(r.name)}</div>
+                <div class="ic-sub"><span class="badge ${r.enabled ? "on" : "off"}">${
+                  r.enabled ? "启用" : "停用"
+                }</span> <span class="kind-tag">${esc(r.kind)}</span> · ${esc(kindHint)}</div>
+              </div>
+              <div class="actions">
+                <button data-test="${r.id}" ${r.enabled ? "" : "disabled"}>试推送</button>
+                <button data-alerts="${r.id}">查告警</button>
                 <button data-edit="${r.id}">编辑</button>
                 <button class="danger" data-del="${r.id}">删除</button>
-              </td></tr>`;
-              })
-              .join("")}</tbody></table>`
-          : `<div class="empty">创建 Ingress 后，可将 Alertmanager 或其他平台的 Webhook 指向本系统。</div>`
-      }</div>`;
+              </div>
+            </div>
+            <div class="ic-body">
+              <div class="field">
+                <label>接入地址</label>
+                <div class="url-row">
+                  <code class="mono url-box">${esc(url)}</code>
+                  <button data-copy="${esc(url)}">复制</button>
+                </div>
+                ${
+                  r.kind !== "kafka"
+                    ? `<div class="hint">也可用自动识别入口：<code class="mono">${esc(
+                        pushUrl
+                      )}</code>
+                    ${
+                      r.token
+                        ? `· 请求头需带 <code>Authorization: Bearer ***</code> 或 <code>X-Eventide-Token</code>`
+                        : "· 未配置 Token，任意来源可推送"
+                    }</div>`
+                    : `<div class="hint">Brokers <code class="mono">${esc(
+                        r.endpoint || "—"
+                      )}</code> · Topic <code class="mono">${esc(
+                        (r.options && r.options.topic) || "—"
+                      )}</code> · 起始 ${(r.options && r.options.start) || "latest"}</div>`
+                }
+              </div>
+              <div class="field" style="margin:0">
+                <label>通知渠道</label>
+                <div>${esc(chNames)}</div>
+              </div>
+            </div>
+          </article>`;
+        })
+        .join("")}</div>`;
+
       root.querySelectorAll("[data-copy]").forEach((b) => {
         b.onclick = async () => {
           await navigator.clipboard.writeText(b.dataset.copy);
-          toast("已复制 Webhook URL");
+          toast("已复制");
         };
       });
       root.querySelectorAll("[data-edit]").forEach((b) => {
@@ -403,24 +487,86 @@
           renderPage();
         };
       });
+      root.querySelectorAll("[data-alerts]").forEach((b) => {
+        b.onclick = () => {
+          state.alertFilters = { source: "ingress", q: "" };
+          navigate("alerts");
+        };
+      });
+      root.querySelectorAll("[data-test]").forEach((b) => {
+        b.onclick = () => openIngressTest(rows.find((x) => x.id === b.dataset.test));
+      });
     },
 
     async alerts(root) {
+      const f = state.alertFilters || { status: "", severity: "", source: "", q: "" };
       setActions(`
+        <input id="alert-q" placeholder="搜索名称 / 摘要 / 标签" value="${esc(f.q || "")}" style="width:200px" />
         <select id="alert-filter">
           <option value="">全部状态</option>
-          <option value="firing">firing</option>
-          <option value="pending">pending</option>
-          <option value="resolved">resolved</option>
+          <option value="firing" ${f.status === "firing" ? "selected" : ""}>告警中</option>
+          <option value="pending" ${f.status === "pending" ? "selected" : ""}>等待中</option>
+          <option value="resolved" ${f.status === "resolved" ? "selected" : ""}>已恢复</option>
+        </select>
+        <select id="alert-sev">
+          <option value="">全部级别</option>
+          <option value="critical" ${f.severity === "critical" ? "selected" : ""}>critical</option>
+          <option value="warning" ${f.severity === "warning" ? "selected" : ""}>warning</option>
+          <option value="info" ${f.severity === "info" ? "selected" : ""}>info</option>
+        </select>
+        <select id="alert-source">
+          <option value="">全部来源</option>
+          <option value="ingress" ${f.source === "ingress" ? "selected" : ""}>Ingress 接入</option>
+          <option value="rule" ${f.source === "rule" ? "selected" : ""}>规则评估</option>
         </select>
         <button class="ghost" id="btn-refresh">刷新</button>`);
-      const filter = document.getElementById("alert-filter");
       const load = async () => {
-        const q = filter.value ? `?status=${encodeURIComponent(filter.value)}` : "";
-        const rows = await api("/api/alerts" + q);
-        root.innerHTML = `<div class="panel">${alertTable(rows)}</div>`;
+        const status = document.getElementById("alert-filter").value;
+        const severity = document.getElementById("alert-sev").value;
+        const source = document.getElementById("alert-source").value;
+        const q = document.getElementById("alert-q").value.trim();
+        state.alertFilters = { status, severity, source, q };
+        const params = new URLSearchParams();
+        if (status) params.set("status", status);
+        if (severity) params.set("severity", severity);
+        if (source) params.set("source", source);
+        if (q) params.set("q", q);
+        const qs = params.toString();
+        const [rows, ingressRows] = await Promise.all([
+          api("/api/alerts" + (qs ? `?${qs}` : "")),
+          api("/api/ingress").catch(() => []),
+        ]);
+        const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
+        const firing = rows.filter((a) => a.status === "firing").length;
+        const pending = rows.filter((a) => a.status === "pending").length;
+        const resolved = rows.filter((a) => a.status === "resolved").length;
+        root.innerHTML = `
+          <div class="stats alert-stats">
+            <div class="stat firing"><div class="n">${firing}</div><div class="l">告警中</div></div>
+            <div class="stat"><div class="n">${pending}</div><div class="l">等待中</div></div>
+            <div class="stat ok"><div class="n">${resolved}</div><div class="l">已恢复</div></div>
+            <div class="stat accent"><div class="n">${rows.length}</div><div class="l">当前结果</div></div>
+          </div>
+          <div class="panel">${
+            rows.length
+              ? alertTable(rows, { ingressMap })
+              : `<div class="empty">
+                  暂无告警事件。可先在「Ingress 接入」创建路由并「试推送」，或配置规则评估。
+                  <div style="margin-top:12px"><button class="primary" id="go-ingress">去 Ingress</button></div>
+                </div>`
+          }</div>`;
+        bindAlertTable(root, rows, ingressMap);
+        const go = document.getElementById("go-ingress");
+        if (go) go.onclick = () => navigate("ingress");
       };
-      filter.onchange = load;
+      let t;
+      document.getElementById("alert-q").oninput = () => {
+        clearTimeout(t);
+        t = setTimeout(load, 280);
+      };
+      document.getElementById("alert-filter").onchange = load;
+      document.getElementById("alert-sev").onchange = load;
+      document.getElementById("alert-source").onchange = load;
       document.getElementById("btn-refresh").onclick = load;
       await load();
     },
@@ -477,22 +623,277 @@
     },
   };
 
-  function alertTable(rows) {
+  function alertTable(rows, opts = {}) {
     if (!rows.length) return `<div class="empty">暂无告警事件</div>`;
-    return `<table class="data"><thead><tr>
-      <th>状态</th><th>级别</th><th>指纹</th><th>值</th><th>标签</th><th>最近评估</th>
+    const compact = !!opts.compact;
+    const ingressMap = opts.ingressMap || {};
+    return `<table class="data alert-table"><thead><tr>
+      <th>状态</th><th>级别</th><th>告警名称</th><th>摘要</th><th>当前值</th>
+      <th>来源</th><th>开始时间</th>${compact ? "" : "<th>持续</th>"}<th>最后更新</th><th></th>
     </tr></thead><tbody>${rows
-      .map(
-        (a) => `<tr>
-      <td><span class="badge ${esc(a.status)}">${esc(a.status)}</span></td>
-      <td>${esc(a.severity)}</td>
-      <td class="mono">${esc((a.fingerprint || "").slice(0, 16))}…</td>
-      <td>${a.value ?? "—"}</td>
-      <td class="mono">${esc(JSON.stringify(a.labels || {}))}</td>
+      .map((a, i) => {
+        const name = alertDisplayName(a);
+        const summary = alertSummary(a);
+        const dur = alertDuration(a);
+        const src = alertSourceLabel(a, ingressMap);
+        return `<tr data-alert-idx="${i}">
+      <td><span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span></td>
+      <td><span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
+      <td>
+        <div class="alert-name">${esc(name)}</div>
+        <div class="alert-labels">${labelChips(a.labels, ["alertname", "severity", "source"])}</div>
+      </td>
+      <td class="alert-summary" title="${esc(summary)}">${esc(summary || "—")}</td>
+      <td class="mono">${fmtValue(a.value)}</td>
+      <td><span class="source-tag">${esc(src)}</span></td>
+      <td>${esc(fmtTime(a.starts_at))}</td>
+      ${compact ? "" : `<td>${esc(dur)}</td>`}
       <td>${esc(fmtTime(a.last_evaluated_at))}</td>
-    </tr>`
+      <td class="actions"><button type="button" data-alert-detail="${i}">详情</button></td>
+    </tr>`;
+      })
+      .join("")}</tbody></table>`;
+  }
+
+  function bindAlertTable(container, rows, ingressMap) {
+    if (!container || !rows?.length) return;
+    container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
+      btn.onclick = () =>
+        showAlertDetail(rows[Number(btn.dataset.alertDetail)], ingressMap || {});
+    });
+  }
+
+  function alertSourceLabel(a, ingressMap) {
+    const s = (a.labels && a.labels.source) || "";
+    const route = ingressMap && ingressMap[a.rule_id];
+    if (s.startsWith("ingress:") || route) {
+      const kind = s.startsWith("ingress:") ? s.slice("ingress:".length) : route?.kind || "";
+      const name = route?.name;
+      if (name) return `Ingress · ${name}`;
+      return kind === "alertmanager" ? "AM 接入" : kind === "kafka" ? "Kafka 接入" : "Ingress";
+    }
+    return "规则评估";
+  }
+
+  function alertDisplayName(a) {
+    const l = a.labels || {};
+    return l.alertname || l.bizchainName || l.businessName || l.rule || "未命名告警";
+  }
+
+  function alertSummary(a) {
+    const an = a.annotations || {};
+    return (
+      an.summary ||
+      an.description ||
+      an.message ||
+      an.retMessage ||
+      an.title ||
+      ""
+    );
+  }
+
+  function statusLabel(s) {
+    return { firing: "告警中", pending: "等待中", resolved: "已恢复" }[s] || s;
+  }
+
+  function fmtValue(v) {
+    if (v == null || v === "") return "—";
+    const n = Number(v);
+    if (Number.isFinite(n)) {
+      return Number.isInteger(n) ? String(n) : n.toFixed(4).replace(/\.?0+$/, "");
+    }
+    return String(v);
+  }
+
+  function alertDuration(a) {
+    if (!a.starts_at) return "—";
+    const start = new Date(a.starts_at).getTime();
+    const end =
+      a.status === "resolved" && a.ends_at
+        ? new Date(a.ends_at).getTime()
+        : Date.now();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "—";
+    const sec = Math.floor((end - start) / 1000);
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (h < 48) return `${h}h ${m}m`;
+    return `${Math.floor(h / 24)}d ${h % 24}h`;
+  }
+
+  function labelChips(labels, hide = []) {
+    const entries = Object.entries(labels || {}).filter(([k]) => !hide.includes(k));
+    if (!entries.length) return `<span class="muted">—</span>`;
+    const shown = entries.slice(0, 6);
+    const more = entries.length - shown.length;
+    return (
+      shown
+        .map(
+          ([k, v]) =>
+            `<span class="chip" title="${esc(k)}=${esc(v)}"><b>${esc(k)}</b>${esc(
+              String(v).length > 24 ? String(v).slice(0, 24) + "…" : v
+            )}</span>`
+        )
+        .join("") + (more > 0 ? `<span class="chip more">+${more}</span>` : "")
+    );
+  }
+
+  function kvTable(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return `<div class="empty" style="padding:8px 0">无</div>`;
+    return `<table class="data kv"><tbody>${entries
+      .map(
+        ([k, v]) =>
+          `<tr><th>${esc(k)}</th><td class="mono">${esc(String(v))}</td></tr>`
       )
       .join("")}</tbody></table>`;
+  }
+
+  async function showAlertDetail(a, ingressMap = {}) {
+    if (!a) return;
+    const name = alertDisplayName(a);
+    const srcLabel = alertSourceLabel(a, ingressMap);
+    let notifies = [];
+    try {
+      notifies = await api(`/api/alerts/${a.id}/notifies`);
+    } catch {
+      notifies = [];
+    }
+    const notifyHtml = notifies.length
+      ? `<table class="data"><thead><tr><th>时间</th><th>边沿</th><th>结果</th><th>错误</th></tr></thead>
+         <tbody>${notifies
+           .map(
+             (n) => `<tr>
+           <td>${esc(fmtTime(n.created_at))}</td>
+           <td>${esc(
+             n.transition === "became_firing"
+               ? "触发通知"
+               : n.transition === "became_resolved"
+               ? "恢复通知"
+               : n.transition
+           )}</td>
+           <td><span class="badge ${n.success ? "on" : "firing"}">${
+             n.success ? "成功" : "失败"
+           }</span></td>
+           <td class="mono">${esc(n.error || "—")}</td>
+         </tr>`
+           )
+           .join("")}</tbody></table>`
+      : `<div class="empty" style="padding:8px 0">暂无通知记录（可能未绑定渠道，或尚未发生状态边沿）</div>`;
+
+    openModal(`
+      <div class="modal-head">
+        <h3>${esc(name)}</h3>
+        <p class="desc">
+          <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
+          <span class="sev sev-${esc(a.severity)}" style="margin-left:8px">${esc(a.severity)}</span>
+          <span class="source-tag" style="margin-left:8px">${esc(srcLabel)}</span>
+        </p>
+      </div>
+      <div class="modal-body alert-detail">
+        <div class="detail-grid">
+          <div><label>当前值</label><div class="mono">${fmtValue(a.value)}</div></div>
+          <div><label>持续时长</label><div>${esc(alertDuration(a))}</div></div>
+          <div><label>开始时间</label><div>${esc(fmtTime(a.starts_at))}</div></div>
+          <div><label>结束时间</label><div>${esc(a.ends_at ? fmtTime(a.ends_at) : "—")}</div></div>
+          <div><label>最后更新</label><div>${esc(fmtTime(a.last_evaluated_at))}</div></div>
+          <div><label>Pending 起</label><div>${esc(
+            a.pending_since ? fmtTime(a.pending_since) : "—"
+          )}</div></div>
+          <div><label>已通知触发</label><div>${a.notified_firing ? "是" : "否"}</div></div>
+          <div><label>已通知恢复</label><div>${a.notified_resolved ? "是" : "否"}</div></div>
+        </div>
+        <div class="field">
+          <label>摘要 / 注解</label>
+          <div class="summary-box">${esc(alertSummary(a) || "—")}</div>
+          ${kvTable(a.annotations)}
+        </div>
+        <div class="field">
+          <label>标签</label>
+          ${kvTable(a.labels)}
+        </div>
+        <div class="field">
+          <label>告警标识</label>
+          <div class="mono" style="word-break:break-all">${esc(a.fingerprint)}</div>
+        </div>
+        <div class="field">
+          <label>通知记录</label>
+          ${notifyHtml}
+        </div>
+        <div class="field">
+          <label>事件 ID / 规则·路由 ID</label>
+          <div class="mono" style="font-size:12px">alert: ${esc(a.id)}<br/>rule/route: ${esc(
+            a.rule_id
+          )}</div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-silence">据此静默</button>
+        <button type="button" class="primary" id="m-close">关闭</button>
+      </div>`);
+    document.getElementById("m-close").onclick = closeModal;
+    document.getElementById("m-silence").onclick = () => {
+      closeModal();
+      const matchers = { ...(a.labels || {}) };
+      delete matchers.source;
+      editSilence({
+        comment: `静默 ${alertDisplayName(a)}`,
+        matchers,
+        rule_id: null,
+      });
+    };
+  }
+
+  function openIngressTest(row) {
+    if (!row) return;
+    const isProbeFriendly = row.kind === "generic" || row.kind === "kafka";
+    openModal(`
+      <div class="modal-head">
+        <h3>试推送 · ${esc(row.name)}</h3>
+        <p class="desc">写入一条样例告警，走完整接入 → 去重 → 通知链路，用于验证配置。</p>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>场景</label>
+          <div class="type-list">
+            <label class="type-row"><input type="radio" name="scenario" value="fire" checked />
+              <span class="t-main"><span class="t-name">触发告警</span><span class="t-desc">Generic firing 样例</span></span></label>
+            <label class="type-row"><input type="radio" name="scenario" value="recover" />
+              <span class="t-main"><span class="t-name">恢复告警</span><span class="t-desc">同一告警标识的 resolved</span></span></label>
+            ${
+              isProbeFriendly
+                ? `<label class="type-row"><input type="radio" name="scenario" value="probe_fire" />
+              <span class="t-main"><span class="t-name">拨测失败</span><span class="t-desc">Jeecg probe-alert fire</span></span></label>
+            <label class="type-row"><input type="radio" name="scenario" value="probe_recover" />
+              <span class="t-main"><span class="t-name">拨测恢复</span><span class="t-desc">Jeecg probe-alert recover</span></span></label>`
+                : ""
+            }
+          </div>
+        </div>
+        <div class="hint">试推送使用控制台登录态，不经过 Ingress Token 校验。</div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button type="button" class="primary" id="m-run">推送</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.getElementById("m-run").onclick = async () => {
+      const scenario =
+        document.querySelector('input[name="scenario"]:checked')?.value || "fire";
+      try {
+        const res = await api(`/api/ingress/${row.id}/test`, {
+          method: "POST",
+          body: JSON.stringify({ scenario }),
+        });
+        closeModal();
+        toast(res.hint || `已接受 ${res.accepted} 条`);
+        state.alertFilters = { source: "ingress", status: "", severity: "", q: "" };
+        navigate("alerts");
+      } catch (e) {
+        toast(e.message || "试推送失败", true);
+      }
+    };
   }
 
   // ---------- Editors ----------
@@ -570,7 +971,7 @@
             <div class="field">
               <label>标签字段（可选）</label>
               <input name="label_fields" placeholder="service,instance" value="${esc(opt.label_fields || "")}" />
-              <div class="hint">从消息中取出作为标签，用于分组与指纹。</div>
+              <div class="hint">从消息中取出作为标签，用于分组与告警标识。</div>
             </div>
             <div class="field">
               <label>每次拉取条数</label>
@@ -924,8 +1325,9 @@
           <div class="field">
             <label>鉴权 Token（可选）</label>
             <input name="token" value="${esc(row?.token || "")}" placeholder="请求头 Bearer / X-Eventide-Token" />
-            <div class="hint">留空则不校验。保存后可在列表中复制 Webhook 地址。</div>
+            <div class="hint">留空则不校验。保存后在卡片上复制 Webhook，或使用「试推送」验证。</div>
           </div>
+          <div class="hint sample-hint" id="ing-format-hint"></div>
         </div>
 
         <div class="kind-panel" data-kinds="kafka" id="ing-kafka" hidden>
@@ -946,6 +1348,11 @@
               </select>
             </div>
           </div>
+          <div class="field">
+            <label>扫描分区数</label>
+            <input name="partitions" type="number" min="1" placeholder="8" value="${esc(opt.partitions || "8")}" />
+            <div class="hint">也可用 HTTP <code>/api/ingress/{id}/push</code> 测推，无需真实 Topic。</div>
+          </div>
         </div>
 
         <div class="field">
@@ -955,6 +1362,7 @@
             chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
             row?.channel_ids || []
           )}
+          <div class="hint">未绑定渠道时告警仍会入库，但不会发送通知。</div>
         </div>
       </form>
       <div class="modal-actions">
@@ -969,6 +1377,17 @@
         const kinds = (p.dataset.kinds || "").split(",");
         p.hidden = !kinds.includes(k);
       });
+      const hint = document.getElementById("ing-format-hint");
+      if (!hint) return;
+      if (k === "alertmanager") {
+        hint.innerHTML =
+          "载荷示例：Alertmanager <code>{\"alerts\":[{\"status\":\"firing\",\"labels\":{...}}]}</code>";
+      } else if (k === "generic") {
+        hint.innerHTML =
+          "支持 Generic 批量告警，或拨测 JSON：<code>{\"eventType\":\"fire\",\"messageId\":\"...\",\"resultFlag\":\"BAD\",...}</code>";
+      } else {
+        hint.textContent = "";
+      }
     };
     form.querySelectorAll('input[name="kind"]').forEach((el) => el.addEventListener("change", syncKind));
     syncKind();
@@ -981,6 +1400,10 @@
       const options = {};
       let endpoint = "";
       let token = String(fd.get("token") || "").trim();
+      const channelIds = selectedValues(form, "channel_ids");
+      if (!channelIds.length && !confirm("尚未绑定通知渠道，告警只会入库不会通知。仍要保存吗？")) {
+        return;
+      }
       if (k === "kafka") {
         endpoint = String(fd.get("endpoint") || "").trim();
         const topic = String(fd.get("topic") || "").trim();
@@ -990,6 +1413,8 @@
         }
         options.topic = topic;
         options.start = String(fd.get("start") || "latest");
+        const parts = String(fd.get("partitions") || "").trim();
+        if (parts) options.partitions = parts;
         token = "";
       }
       const body = {
@@ -998,18 +1423,82 @@
         token: token || null,
         endpoint,
         options,
-        channel_ids: selectedValues(form, "channel_ids"),
+        channel_ids: channelIds,
         enabled: form.querySelector('[name="enabled"]').checked,
       };
-      if (row) await api(`/api/ingress/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      else await api("/api/ingress", { method: "POST", body: JSON.stringify(body) });
+      let saved;
+      if (row) {
+        saved = await api(`/api/ingress/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        saved = await api("/api/ingress", { method: "POST", body: JSON.stringify(body) });
+      }
       closeModal();
-      toast("已保存");
-      renderPage();
+      showIngressSaved(saved || { ...body, id: row?.id });
     };
   }
 
-  function editSilence() {
+  function showIngressSaved(route) {
+    if (!route?.id) {
+      toast("已保存");
+      renderPage();
+      return;
+    }
+    const origin = location.origin;
+    const mainUrl =
+      route.kind === "kafka"
+        ? `kafka://${route.endpoint || ""}/${(route.options && route.options.topic) || ""}`
+        : route.kind === "alertmanager"
+        ? `${origin}/api/ingress/${route.id}/alertmanager`
+        : `${origin}/api/ingress/${route.id}/generic`;
+    const pushUrl = `${origin}/api/ingress/${route.id}/push`;
+    const tokenHint = route.token
+      ? `-H "Authorization: Bearer <token>"`
+      : "# 未配置 Token，可直接推送";
+    openModal(`
+      <div class="modal-head">
+        <h3>Ingress 已保存</h3>
+        <p class="desc">${esc(route.name)} · ${esc(route.kind)}。复制地址或试推送验证。</p>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>主接入地址</label>
+          <div class="url-row">
+            <code class="mono url-box">${esc(mainUrl)}</code>
+            <button type="button" data-copy="${esc(mainUrl)}">复制</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>自动识别 / 测推</label>
+          <div class="url-row">
+            <code class="mono url-box">${esc(pushUrl)}</code>
+            <button type="button" data-copy="${esc(pushUrl)}">复制</button>
+          </div>
+          <div class="hint">curl 示例：<code class="mono">curl -X POST ${esc(pushUrl)} ${esc(
+            tokenHint
+          )} -H "Content-Type: application/json" -d "{...}"</code></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-test">试推送</button>
+        <button type="button" class="primary" id="m-close">完成</button>
+      </div>`);
+    document.querySelectorAll("#modal [data-copy]").forEach((b) => {
+      b.onclick = async () => {
+        await navigator.clipboard.writeText(b.dataset.copy);
+        toast("已复制");
+      };
+    });
+    document.getElementById("m-close").onclick = () => {
+      closeModal();
+      renderPage();
+    };
+    document.getElementById("m-test").onclick = () => {
+      closeModal();
+      openIngressTest(route);
+    };
+  }
+
+  function editSilence(prefill) {
     const now = new Date();
     const end = new Date(now.getTime() + 2 * 3600 * 1000);
     const toLocal = (d) => {
@@ -1018,13 +1507,21 @@
         d.getHours()
       )}:${pad(d.getMinutes())}`;
     };
+    const matchersJson = JSON.stringify(prefill?.matchers || {}, null, 2);
     openModal(`
-      <h3>新建静默</h3>
-      <form id="f">
-        <div class="field"><label>注释</label><input name="comment" placeholder="维护窗口" /></div>
-        <div class="field"><label>规则 ID（可选，留空匹配全部）</label><input name="rule_id" placeholder="uuid" /></div>
+      <div class="modal-head">
+        <h3>新建静默</h3>
+        <p class="desc">在时间窗内抑制匹配标签的通知。</p>
+      </div>
+      <form id="f" class="modal-body">
+        <div class="field"><label>注释</label><input name="comment" placeholder="维护窗口" value="${esc(
+          prefill?.comment || ""
+        )}" /></div>
+        <div class="field"><label>规则 ID（可选，留空匹配全部）</label><input name="rule_id" placeholder="uuid" value="${esc(
+          prefill?.rule_id || ""
+        )}" /></div>
         <div class="field"><label>匹配标签 JSON</label>
-          <textarea name="matchers" rows="2">{}</textarea>
+          <textarea name="matchers" rows="4">${esc(matchersJson)}</textarea>
         </div>
         <div class="row">
           <div class="field"><label>开始</label><input name="starts_at" type="datetime-local" required value="${toLocal(
@@ -1034,11 +1531,11 @@
             end
           )}" /></div>
         </div>
-        <div class="modal-actions">
-          <button type="button" class="ghost" id="m-cancel">取消</button>
-          <button class="primary" type="submit">保存</button>
-        </div>
-      </form>`);
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">保存</button>
+      </div>`);
     document.getElementById("m-cancel").onclick = closeModal;
     document.getElementById("f").onsubmit = async (e) => {
       e.preventDefault();

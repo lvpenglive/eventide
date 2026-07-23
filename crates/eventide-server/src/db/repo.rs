@@ -293,6 +293,31 @@ impl Db {
         .map_err(Into::into)
     }
 
+    pub fn get_alert(&self, id: Uuid) -> Result<Option<AlertEvent>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
+                    value, starts_at, ends_at, pending_since, last_evaluated_at,
+                    notified_firing, notified_resolved
+             FROM alert_events WHERE id=?1",
+            params![id.to_string()],
+            map_alert,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_notify_logs_for_alert(&self, alert_id: Uuid) -> Result<Vec<NotifyLog>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, alert_id, channel_id, transition, success, error, created_at
+             FROM notify_logs WHERE alert_id=?1 ORDER BY created_at DESC LIMIT 100",
+        )?;
+        let rows = stmt.query_map(params![alert_id.to_string()], map_notify_log)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn alerts_for_rule(&self, rule_id: Uuid) -> Result<BTreeMap<String, AlertEvent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -646,5 +671,30 @@ fn map_ingress(row: &Row<'_>) -> rusqlite::Result<IngressRoute> {
         enabled: row.get::<_, i64>(5)? != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
+    })
+}
+
+fn map_notify_log(row: &Row<'_>) -> rusqlite::Result<NotifyLog> {
+    let transition_s: String = row.get(3)?;
+    let created: String = row.get(6)?;
+    let transition = match transition_s.as_str() {
+        "became_firing" => AlertTransition::BecameFiring,
+        "became_resolved" => AlertTransition::BecameResolved,
+        _ => AlertTransition::Unchanged,
+    };
+    Ok(NotifyLog {
+        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        alert_id: Uuid::parse_str(&row.get::<_, String>(1)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        channel_id: Uuid::parse_str(&row.get::<_, String>(2)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        transition,
+        success: row.get::<_, i64>(4)? != 0,
+        error: row.get(5)?,
+        created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
     })
 }

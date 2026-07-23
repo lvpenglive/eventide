@@ -161,7 +161,10 @@ where
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": format!("route kind is {}, use matching endpoint or /api/ingress/{{id}}", route.kind.as_str())
+                "error": format!(
+                    "route kind is {}, use matching endpoint or /api/ingress/{{id}}/push",
+                    route.kind.as_str()
+                )
             })),
         )
             .into_response());
@@ -217,7 +220,7 @@ fn check_auth(route: &IngressRoute, headers: &HeaderMap) -> Result<(), axum::res
     }
 }
 
-async fn ingest_list(
+pub(crate) async fn ingest_list(
     state: &Arc<AppState>,
     route: &IngressRoute,
     alerts: Vec<eventide_core::IngressAlert>,
