@@ -1,0 +1,158 @@
+{
+  "datasources": [
+    {
+      "name": "Demo Prometheus",
+      "kind": "prometheus",
+      "url": "http://127.0.0.1:9090",
+      "options": {},
+      "enabled": true
+    },
+    {
+      "name": "Demo VictoriaMetrics",
+      "kind": "victoriametrics",
+      "url": "http://127.0.0.1:8428",
+      "options": {},
+      "enabled": true
+    },
+    {
+      "name": "Demo Loki",
+      "kind": "log",
+      "url": "http://127.0.0.1:3100",
+      "options": { "backend": "loki" },
+      "enabled": true
+    }
+  ],
+  "channels": [
+    {
+      "name": "Demo Webhook",
+      "kind": "webhook",
+      "url": "http://127.0.0.1:9999/hooks/eventide",
+      "secret": null,
+      "enabled": true
+    },
+    {
+      "name": "Demo DingTalk",
+      "kind": "dingtalk",
+      "url": "https://oapi.dingtalk.com/robot/send?access_token=demo-token",
+      "secret": null,
+      "enabled": false
+    },
+    {
+      "name": "Demo WeCom",
+      "kind": "wecom",
+      "url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=demo-key",
+      "secret": null,
+      "enabled": false
+    }
+  ],
+  "rules": [
+    {
+      "name": "Demo High CPU",
+      "expr": "100 - (avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+      "comparator": ">",
+      "threshold": 90,
+      "for_seconds": 60,
+      "interval_seconds": 30,
+      "severity": "critical",
+      "labels": { "team": "sre", "service": "infra" },
+      "annotations": {
+        "summary": "{{labels.instance}} CPU {{value}}% above threshold",
+        "runbook": "https://wiki.example/runbooks/cpu"
+      },
+      "enabled": true,
+      "_datasource": "Demo Prometheus",
+      "_channels": ["Demo Webhook"]
+    },
+    {
+      "name": "Demo Low Memory",
+      "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+      "comparator": ">",
+      "threshold": 85,
+      "for_seconds": 120,
+      "interval_seconds": 30,
+      "severity": "warning",
+      "labels": { "team": "sre", "service": "infra" },
+      "annotations": {
+        "summary": "{{labels.instance}} memory usage {{value}}%"
+      },
+      "enabled": true,
+      "_datasource": "Demo Prometheus",
+      "_channels": ["Demo Webhook"]
+    },
+    {
+      "name": "Demo API Error Rate",
+      "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))",
+      "comparator": ">",
+      "threshold": 0.05,
+      "for_seconds": 0,
+      "interval_seconds": 15,
+      "severity": "critical",
+      "labels": { "team": "platform", "service": "api" },
+      "annotations": {
+        "summary": "API 5xx ratio {{value}}"
+      },
+      "enabled": false,
+      "_datasource": "Demo VictoriaMetrics",
+      "_channels": ["Demo Webhook", "Demo DingTalk"]
+    }
+  ],
+  "ingress": [
+    {
+      "name": "Demo Alertmanager",
+      "kind": "alertmanager",
+      "token": "demo-am-token",
+      "endpoint": "",
+      "options": {},
+      "enabled": true,
+      "_channels": ["Demo Webhook"]
+    },
+    {
+      "name": "Demo Generic Probe",
+      "kind": "generic",
+      "token": "demo-generic-token",
+      "endpoint": "",
+      "options": {},
+      "enabled": true,
+      "_channels": ["Demo Webhook"]
+    }
+  ],
+  "enrich": [
+    {
+      "name": "Demo Runbook Template",
+      "kind": "annotation_template",
+      "matchers": {},
+      "match_key": "",
+      "templates": {
+        "dashboard": "https://grafana.example/d/nodes?var-instance={{labels.instance}}",
+        "hint": "rule {{rule.name}} severity {{severity}} value {{value}}"
+      },
+      "mappings": {},
+      "write_labels": false,
+      "enabled": true,
+      "priority": 50
+    },
+    {
+      "name": "Demo Instance Owner Map",
+      "kind": "label_map",
+      "matchers": {},
+      "match_key": "instance",
+      "templates": {},
+      "mappings": {
+        "10.0.0.1": { "owner": "alice", "team": "sre", "biz": "pay" },
+        "10.0.0.8": { "owner": "bob", "team": "platform", "biz": "gateway" },
+        "db-1": { "owner": "carol", "team": "dba", "biz": "database" },
+        "api-prod-1": { "owner": "dave", "team": "platform", "biz": "api" }
+      },
+      "write_labels": true,
+      "enabled": true,
+      "priority": 10
+    }
+  ],
+  "silence": {
+    "comment": "Demo maintenance window (staging)",
+    "rule_id": null,
+    "matchers": { "env": "staging" },
+    "hours_from": -1,
+    "hours_to": 3
+  }
+}

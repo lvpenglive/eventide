@@ -1,10 +1,13 @@
 //! Core types for Eventide: rules, alert events, channels, and evaluation helpers.
 
+mod enrich;
 mod eval;
 mod fingerprint;
 mod ingress;
 mod models;
+mod template;
 
+pub use enrich::{enrich_alert, matchers_match, EnrichKind, EnrichRule, LookupTable};
 pub use eval::{
     alert_title, apply_evaluation, compare, evaluate_rule, evaluate_sample, merge_labels,
     EvaluateResult, MetricSample,
@@ -17,3 +20,4 @@ pub use ingress::{
     GenericWebhook,
 };
 pub use models::*;
+pub use template::{render_map, render_template, TemplateContext};

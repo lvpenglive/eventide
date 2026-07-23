@@ -1,5 +1,7 @@
 /target/
-/data/
-*.db
+/data/**
+!/data/eventide.db
+*.db-wal
+*.db-shm
 *.db-*
 .DS_Store

@@ -3,7 +3,8 @@
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use eventide_core::{
-    AlertEvent, AlertStatus, AlertTransition, Comparator, IngressRoute, NotifyLog, Rule,
+    enrich_alert, AlertEvent, AlertStatus, AlertTransition, Comparator, IngressRoute, NotifyLog,
+    Rule,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,6 +26,11 @@ pub async fn persist_and_notify(
     {
         return Ok(());
     }
+
+    // Enrich after fingerprint is fixed, before silence / notify.
+    let enrich_rules = state.db.list_enrich_rules().unwrap_or_default();
+    let lookups = state.db.lookup_tables_map().unwrap_or_default();
+    enrich_alert(&mut event, Some(&rule.name), &enrich_rules, &lookups);
 
     let silences = state.db.active_silences(now)?;
     let silenced = silences

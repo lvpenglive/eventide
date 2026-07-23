@@ -18,6 +18,7 @@
     channels: ["通知渠道", "Webhook · 钉钉 · 企微 · 飞书"],
     ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
     alerts: ["告警事件", "按状态浏览 · 点开看详情"],
+    enrich: ["告警丰富", "注解模板 · 标签映射 · Lookup 外表"],
     silences: ["静默策略", "按规则或标签临时抑制通知"],
     settings: ["系统设置", "运行配置与账号信息（只读）"],
   };
@@ -607,6 +608,131 @@
       // seed filters from initial f
       state.alertFilters = { ...f };
       await load();
+    },
+
+    async enrich(root) {
+      setActions(`
+        <button class="ghost" id="btn-add-lookup">新建 Lookup 外表</button>
+        <button class="primary" id="btn-add">新建丰富规则</button>`);
+      document.getElementById("btn-add").onclick = () => editEnrich();
+      document.getElementById("btn-add-lookup").onclick = () => editLookup();
+      const [rows, lookups] = await Promise.all([api("/api/enrich"), api("/api/lookups")]);
+      state.cache.lookups = lookups;
+      const kindLabel = (k) =>
+        ({
+          annotation_template: "注解模板",
+          label_map: "内联映射",
+          lookup: "Lookup 外表",
+        }[k] || k);
+      const lookupName = (id) => {
+        const t = lookups.find((x) => x.id === id);
+        return t ? t.name : id ? id.slice(0, 8) + "…" : "—";
+      };
+      root.innerHTML = `
+      <div class="panel" style="margin-bottom:1rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:0.75rem">
+          <h3 style="margin:0;font-size:1rem">Lookup 外表</h3>
+          <span class="hint" style="margin:0">可被多条丰富规则复用的键值表（如 CMDB / 主机台账）</span>
+        </div>
+        ${
+          lookups.length
+            ? `<table class="data"><thead><tr>
+                <th>名称</th><th>匹配键</th><th>行数</th><th>说明</th><th>状态</th><th></th>
+              </tr></thead>
+              <tbody>${lookups
+                .map(
+                  (t) => `<tr>
+                <td>${esc(t.name)}</td>
+                <td class="mono">${esc(t.key_label || "instance")}</td>
+                <td>${Object.keys(t.rows || {}).length}</td>
+                <td>${esc(t.description || "—")}</td>
+                <td><span class="badge ${t.enabled ? "on" : "off"}">${
+                    t.enabled ? "启用" : "停用"
+                  }</span></td>
+                <td class="actions">
+                  <button data-edit-lookup="${t.id}">编辑</button>
+                  <button class="danger" data-del-lookup="${t.id}">删除</button>
+                </td>
+              </tr>`
+                )
+                .join("")}</tbody></table>`
+            : `<div class="empty">暂无外表。先建一张 Lookup 表，再在丰富规则中选择「Lookup 外表」引用。</div>`
+        }
+      </div>
+      <div class="panel">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">丰富规则</h3>
+        ${
+          rows.length
+            ? `<table class="data"><thead><tr>
+                <th>名称</th><th>类型</th><th>优先级</th><th>匹配条件</th><th>摘要</th><th>状态</th><th></th>
+              </tr></thead>
+              <tbody>${rows
+                .map((r) => {
+                  let summary = "";
+                  if (r.kind === "label_map") {
+                    summary = `按 ${r.match_key || "—"} 内联 · ${
+                      Object.keys(r.mappings || {}).length
+                    } 条`;
+                  } else if (r.kind === "lookup") {
+                    summary = `外表 ${lookupName(r.lookup_table_id)} · 键 ${
+                      r.match_key || "(用外表默认)"
+                    }`;
+                  } else {
+                    summary = `${Object.keys(r.templates || {}).length} 个模板`;
+                  }
+                  const matchers = Object.keys(r.matchers || {}).length
+                    ? esc(JSON.stringify(r.matchers))
+                    : "全部";
+                  return `<tr>
+                <td>${esc(r.name)}</td>
+                <td>${esc(kindLabel(r.kind))}</td>
+                <td class="mono">${r.priority}</td>
+                <td class="mono" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${matchers}</td>
+                <td>${esc(summary)}</td>
+                <td><span class="badge ${r.enabled ? "on" : "off"}">${
+                    r.enabled ? "启用" : "停用"
+                  }</span></td>
+                <td class="actions">
+                  <button data-edit="${r.id}">编辑</button>
+                  <button class="danger" data-del="${r.id}">删除</button>
+                </td>
+              </tr>`;
+                })
+                .join("")}</tbody></table>`
+            : `<div class="empty">
+                暂无丰富规则。可用注解模板、内联映射，或引用上方 Lookup 外表。
+              </div>`
+        }
+      </div>
+      <p class="hint" style="margin-top:0.75rem">
+        变量：<code>{{labels.x}}</code> · <code>{{annotations.x}}</code> ·
+        <code>{{value}}</code> · <code>{{severity}}</code> · <code>{{status}}</code> ·
+        <code>{{rule.name}}</code>。丰富在 fingerprint 之后、静默/通知之前执行。
+      </p>`;
+      const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+      const lookupById = Object.fromEntries(lookups.map((t) => [t.id, t]));
+      root.querySelectorAll("[data-edit]").forEach((b) => {
+        b.onclick = () => editEnrich(byId[b.dataset.edit]);
+      });
+      root.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("确认删除该丰富规则？")) return;
+          await api(`/api/enrich/${b.dataset.del}`, { method: "DELETE" });
+          toast("已删除");
+          renderPage();
+        };
+      });
+      root.querySelectorAll("[data-edit-lookup]").forEach((b) => {
+        b.onclick = () => editLookup(lookupById[b.dataset.editLookup]);
+      });
+      root.querySelectorAll("[data-del-lookup]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("确认删除该 Lookup 外表？引用它的丰富规则将失效。")) return;
+          await api(`/api/lookups/${b.dataset.delLookup}`, { method: "DELETE" });
+          toast("已删除");
+          renderPage();
+        };
+      });
     },
 
     async silences(root) {
@@ -1402,6 +1528,14 @@
               Object.keys(row?.labels || {}).length ? JSON.stringify(row.labels, null, 0) : ""
             )}</textarea>
           </div>
+          <div class="field"><label>注解 annotations（可选，JSON，支持模板）</label>
+            <textarea name="annotations" rows="3" placeholder='{"summary":"{{labels.instance}} 超阈值 {{value}}"}'>${esc(
+              Object.keys(row?.annotations || {}).length
+                ? JSON.stringify(row.annotations, null, 2)
+                : ""
+            )}</textarea>
+            <div class="hint">通知前自动渲染 {{labels.x}} / {{value}} / {{severity}} 等变量。</div>
+          </div>
         </div>
       </form>
       <div class="modal-actions">
@@ -1414,12 +1548,22 @@
       const form = e.target;
       const fd = new FormData(form);
       let labels = {};
+      let annotations = {};
       const rawLabels = String(fd.get("labels") || "").trim();
       if (rawLabels) {
         try {
           labels = JSON.parse(rawLabels);
         } catch {
           toast("标签 JSON 无效", true);
+          return;
+        }
+      }
+      const rawAnn = String(fd.get("annotations") || "").trim();
+      if (rawAnn) {
+        try {
+          annotations = JSON.parse(rawAnn);
+        } catch {
+          toast("注解 JSON 无效", true);
           return;
         }
       }
@@ -1433,7 +1577,7 @@
         interval_seconds: Number(fd.get("interval_seconds") || 30),
         severity: fd.get("severity"),
         labels,
-        annotations: row?.annotations || {},
+        annotations,
         channel_ids: selectedValues(form, "channel_ids"),
         enabled: form.querySelector('[name="enabled"]').checked,
       };
@@ -1620,11 +1764,17 @@
 
         <div class="field">
           <label>通知渠道</label>
-          ${multiSelect(
-            "channel_ids",
-            chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
-            row?.channel_ids || []
-          )}
+          <select name="channel_id">
+            <option value="">不绑定渠道</option>
+            ${chs
+              .map((c) => {
+                const selected = (row?.channel_ids || [])[0] === c.id ? "selected" : "";
+                return `<option value="${esc(c.id)}" ${selected}>${esc(c.name)}（${esc(
+                  c.kind
+                )}）</option>`;
+              })
+              .join("")}
+          </select>
           <div class="hint">未绑定渠道时告警仍会入库，但不会发送通知。</div>
         </div>
       </form>
@@ -1663,7 +1813,8 @@
       const options = {};
       let endpoint = "";
       let token = String(fd.get("token") || "").trim();
-      const channelIds = selectedValues(form, "channel_ids");
+      const channelId = String(fd.get("channel_id") || "").trim();
+      const channelIds = channelId ? [channelId] : [];
       if (!channelIds.length && !confirm("尚未绑定通知渠道，告警只会入库不会通知。仍要保存吗？")) {
         return;
       }
@@ -1787,6 +1938,278 @@
     document.getElementById("m-test").onclick = () => {
       closeModal();
       openIngressTest(route);
+    };
+  }
+
+  async function editLookup(row) {
+    openModal(`
+      <div class="modal-head">
+        <h3>${row ? "编辑 Lookup 外表" : "新建 Lookup 外表"}</h3>
+        <p class="desc">共享键值表，供丰富规则以 Lookup 类型引用。</p>
+      </div>
+      <form id="f" class="modal-body">
+        <div class="field"><label>名称</label>
+          <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 CMDB 主机台账" />
+        </div>
+        <div class="field"><label>说明（可选）</label>
+          <input name="description" value="${esc(row?.description || "")}" placeholder="来源、用途" />
+        </div>
+        <div class="field"><label>默认匹配标签键 key_label</label>
+          <input name="key_label" required value="${esc(row?.key_label || "instance")}" placeholder="instance" />
+          <div class="hint">规则未填 match_key 时使用此键，从告警 labels 取值查表。</div>
+        </div>
+        <div class="field"><label>行数据 JSON</label>
+          <textarea name="rows" rows="10" required placeholder='{"10.0.0.1":{"owner":"alice","team":"sre","biz":"pay"}}'>${esc(
+            Object.keys(row?.rows || {}).length ? JSON.stringify(row.rows, null, 2) : ""
+          )}</textarea>
+          <div class="hint">键为标签值，值为要写入 annotations 的字段。</div>
+        </div>
+        <label class="check"><input type="checkbox" name="enabled" ${
+          row?.enabled !== false ? "checked" : ""
+        } /> 启用</label>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">保存</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      let rows = {};
+      try {
+        rows = JSON.parse(String(fd.get("rows") || "{}"));
+      } catch (err) {
+        toast("行数据 JSON 无效：" + err.message, true);
+        return;
+      }
+      const body = {
+        name: fd.get("name"),
+        description: fd.get("description") || "",
+        key_label: fd.get("key_label") || "instance",
+        rows,
+        enabled: e.target.querySelector('[name="enabled"]').checked,
+      };
+      if (row) {
+        await api(`/api/lookups/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        await api("/api/lookups", { method: "POST", body: JSON.stringify(body) });
+      }
+      closeModal();
+      toast("已保存");
+      renderPage();
+    };
+  }
+
+  async function editEnrich(row) {
+    const lookups = state.cache.lookups || (await api("/api/lookups"));
+    state.cache.lookups = lookups;
+    const kind = row?.kind || "annotation_template";
+    const isTpl = kind === "annotation_template";
+    const isMap = kind === "label_map";
+    const isLookup = kind === "lookup";
+    openModal(`
+      <div class="modal-head">
+        <h3>${row ? "编辑丰富规则" : "新建丰富规则"}</h3>
+        <p class="desc">在通知前为告警补全 annotations / labels。</p>
+      </div>
+      <form id="f" class="modal-body">
+        <div class="field"><label>名称</label>
+          <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 CMDB 负责人" />
+        </div>
+        <div class="row">
+          <div class="field"><label>类型</label>
+            <select name="kind" id="enrich-kind">
+              <option value="annotation_template" ${isTpl ? "selected" : ""}>注解模板</option>
+              <option value="label_map" ${isMap ? "selected" : ""}>内联映射</option>
+              <option value="lookup" ${isLookup ? "selected" : ""}>Lookup 外表</option>
+            </select>
+          </div>
+          <div class="field"><label>优先级（越小越先）</label>
+            <input name="priority" type="number" value="${row?.priority ?? 100}" />
+          </div>
+        </div>
+        <div class="field"><label>匹配标签 JSON（可选，全部匹配才生效）</label>
+          <textarea name="matchers" rows="2" placeholder='{"job":"api"}'>${esc(
+            Object.keys(row?.matchers || {}).length ? JSON.stringify(row.matchers, null, 0) : ""
+          )}</textarea>
+        </div>
+        <div id="enrich-template-fields" style="${isTpl ? "" : "display:none"}">
+          <div class="field"><label>注解模板 JSON</label>
+            <textarea name="templates" rows="5" placeholder='{"summary":"{{labels.instance}} CPU {{value}}%","runbook":"https://wiki/{{labels.job}}"}'>${esc(
+              Object.keys(row?.templates || {}).length
+                ? JSON.stringify(row.templates, null, 2)
+                : ""
+            )}</textarea>
+            <div class="hint">写入 annotations；支持 {{labels.x}} 等变量。</div>
+          </div>
+        </div>
+        <div id="enrich-map-fields" style="${isMap ? "" : "display:none"}">
+          <div class="field"><label>匹配标签键 match_key</label>
+            <input name="match_key_map" value="${esc(
+              isMap ? row?.match_key || "instance" : "instance"
+            )}" placeholder="instance" />
+          </div>
+          <div class="field"><label>映射表 JSON</label>
+            <textarea name="mappings" rows="6" placeholder='{"10.0.0.1":{"owner":"alice","team":"sre"}}'>${esc(
+              Object.keys(row?.mappings || {}).length
+                ? JSON.stringify(row.mappings, null, 2)
+                : ""
+            )}</textarea>
+            <div class="hint">键为标签值，值为要写入的字段（默认进 annotations）。</div>
+          </div>
+        </div>
+        <div id="enrich-lookup-fields" style="${isLookup ? "" : "display:none"}">
+          <div class="field"><label>Lookup 外表</label>
+            <select name="lookup_table_id" id="enrich-lookup-id">
+              <option value="">请选择外表</option>
+              ${lookups
+                .map(
+                  (t) =>
+                    `<option value="${esc(t.id)}" ${
+                      row?.lookup_table_id === t.id ? "selected" : ""
+                    }>${esc(t.name)}（键 ${esc(t.key_label || "instance")} · ${
+                      Object.keys(t.rows || {}).length
+                    } 行）${t.enabled ? "" : " [停用]"}</option>`
+                )
+                .join("")}
+            </select>
+            ${
+              lookups.length
+                ? ""
+                : `<div class="hint">还没有外表，请先点「新建 Lookup 外表」。</div>`
+            }
+          </div>
+          <div class="field"><label>匹配标签键 match_key（可选）</label>
+            <input name="match_key_lookup" value="${esc(
+              isLookup ? row?.match_key || "" : ""
+            )}" placeholder="留空则用外表的 key_label" />
+          </div>
+        </div>
+        <div id="enrich-write-labels" style="${isMap || isLookup ? "" : "display:none"}">
+          <label class="check"><input type="checkbox" name="write_labels" ${
+            row?.write_labels ? "checked" : ""
+          } /> 同时写入 labels（不影响 fingerprint）</label>
+        </div>
+        <label class="check" style="margin-top:0.75rem"><input type="checkbox" name="enabled" ${
+          row?.enabled !== false ? "checked" : ""
+        } /> 启用</label>
+        <div class="field" style="margin-top:1rem">
+          <label>试跑预览（可选）</label>
+          <textarea name="preview_labels" rows="2" placeholder='示例 labels：{"instance":"10.0.0.1","job":"api"}'>{"instance":"10.0.0.1","job":"api"}</textarea>
+          <button type="button" class="ghost" id="m-preview" style="margin-top:0.5rem">预览结果</button>
+          <pre id="preview-out" class="mono" style="margin:0.5rem 0 0;font-size:0.8rem;white-space:pre-wrap;color:var(--muted)"></pre>
+        </div>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">保存</button>
+      </div>`);
+
+    const kindEl = document.getElementById("enrich-kind");
+    const syncKind = () => {
+      const k = kindEl.value;
+      document.getElementById("enrich-template-fields").style.display =
+        k === "annotation_template" ? "" : "none";
+      document.getElementById("enrich-map-fields").style.display =
+        k === "label_map" ? "" : "none";
+      document.getElementById("enrich-lookup-fields").style.display =
+        k === "lookup" ? "" : "none";
+      document.getElementById("enrich-write-labels").style.display =
+        k === "label_map" || k === "lookup" ? "" : "none";
+    };
+    kindEl.onchange = syncKind;
+    document.getElementById("m-cancel").onclick = closeModal;
+
+    const buildDraft = (fd, form) => {
+      let matchers = {};
+      let templates = {};
+      let mappings = {};
+      const rawM = String(fd.get("matchers") || "").trim();
+      if (rawM) matchers = JSON.parse(rawM);
+      const rawT = String(fd.get("templates") || "").trim();
+      if (rawT) templates = JSON.parse(rawT);
+      const rawMap = String(fd.get("mappings") || "").trim();
+      if (rawMap) mappings = JSON.parse(rawMap);
+      const kind = fd.get("kind");
+      let match_key = "";
+      let lookup_table_id = null;
+      if (kind === "label_map") {
+        match_key = String(fd.get("match_key_map") || "").trim();
+      } else if (kind === "lookup") {
+        match_key = String(fd.get("match_key_lookup") || "").trim();
+        const tid = String(fd.get("lookup_table_id") || "").trim();
+        lookup_table_id = tid || null;
+      }
+      return {
+        name: fd.get("name") || "preview",
+        kind,
+        matchers,
+        match_key,
+        templates,
+        mappings,
+        lookup_table_id,
+        write_labels: form.querySelector('[name="write_labels"]')?.checked || false,
+        enabled: form.querySelector('[name="enabled"]')?.checked !== false,
+        priority: Number(fd.get("priority") || 100),
+      };
+    };
+
+    document.getElementById("m-preview").onclick = async () => {
+      const form = document.getElementById("f");
+      const fd = new FormData(form);
+      let draft;
+      let previewLabels = {};
+      try {
+        draft = buildDraft(fd, form);
+        previewLabels = JSON.parse(String(fd.get("preview_labels") || "{}"));
+      } catch (e) {
+        toast("JSON 无效：" + e.message, true);
+        return;
+      }
+      try {
+        const out = await api("/api/enrich/preview", {
+          method: "POST",
+          body: JSON.stringify({
+            rule: draft,
+            labels: previewLabels,
+            annotations: { summary: "CPU high on {{labels.instance}}" },
+            value: 95.5,
+            severity: "critical",
+            rule_name: "PreviewRule",
+          }),
+        });
+        document.getElementById("preview-out").textContent = JSON.stringify(out, null, 2);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fd = new FormData(form);
+      let body;
+      try {
+        body = buildDraft(fd, form);
+        body.name = fd.get("name");
+        body.enabled = form.querySelector('[name="enabled"]').checked;
+      } catch (err) {
+        toast("JSON 无效：" + err.message, true);
+        return;
+      }
+      if (body.kind === "lookup" && !body.lookup_table_id) {
+        toast("请选择 Lookup 外表", true);
+        return;
+      }
+      if (row) {
+        await api(`/api/enrich/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        await api("/api/enrich", { method: "POST", body: JSON.stringify(body) });
+      }
+      closeModal();
+      toast("已保存");
+      renderPage();
     };
   }
 

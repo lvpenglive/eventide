@@ -62,6 +62,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/alerts/{id}/notifies", get(list_alert_notifies))
         .route("/api/silences", get(list_silences).post(create_silence))
         .route("/api/silences/{id}", delete(delete_silence))
+        .route("/api/enrich", get(list_enrich).post(create_enrich))
+        .route("/api/enrich/preview", post(preview_enrich))
+        .route(
+            "/api/enrich/{id}",
+            get(get_enrich).put(update_enrich).delete(delete_enrich),
+        )
+        .route("/api/lookups", get(list_lookups).post(create_lookup))
+        .route(
+            "/api/lookups/{id}",
+            get(get_lookup).put(update_lookup).delete(delete_lookup),
+        )
         .route("/api/ingress", get(list_ingress).post(create_ingress))
         .route(
             "/api/ingress/{id}",
@@ -726,6 +737,305 @@ async fn delete_silence(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("silence not found"))
+    }
+}
+
+// ---- enrich rules ----
+
+#[derive(Deserialize)]
+struct EnrichInput {
+    name: String,
+    kind: String,
+    #[serde(default)]
+    matchers: BTreeMap<String, String>,
+    #[serde(default)]
+    match_key: String,
+    #[serde(default)]
+    templates: BTreeMap<String, String>,
+    #[serde(default)]
+    mappings: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    lookup_table_id: Option<Uuid>,
+    #[serde(default)]
+    write_labels: bool,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default = "default_priority")]
+    priority: i32,
+}
+
+fn default_priority() -> i32 {
+    100
+}
+
+fn enrich_from_input(
+    id: Uuid,
+    input: EnrichInput,
+    created_at: DateTime<Utc>,
+) -> ApiResult<EnrichRule> {
+    let kind = EnrichKind::parse(&input.kind).ok_or_else(|| ApiError::bad("bad enrich kind"))?;
+    if kind == EnrichKind::LabelMap && input.match_key.trim().is_empty() {
+        return Err(ApiError::bad("label_map requires match_key"));
+    }
+    if kind == EnrichKind::AnnotationTemplate && input.templates.is_empty() {
+        return Err(ApiError::bad("annotation_template requires templates"));
+    }
+    if kind == EnrichKind::Lookup && input.lookup_table_id.is_none() {
+        return Err(ApiError::bad("lookup requires lookup_table_id"));
+    }
+    Ok(EnrichRule {
+        id,
+        name: input.name,
+        kind,
+        matchers: input.matchers,
+        match_key: input.match_key,
+        templates: input.templates,
+        mappings: input.mappings,
+        lookup_table_id: input.lookup_table_id,
+        write_labels: input.write_labels,
+        enabled: input.enabled,
+        priority: input.priority,
+        created_at,
+        updated_at: Utc::now(),
+    })
+}
+
+async fn list_enrich(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<EnrichRule>>> {
+    state
+        .db
+        .list_enrich_rules()
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn get_enrich(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<EnrichRule>> {
+    let id = parse_id(&id)?;
+    state
+        .db
+        .get_enrich_rule(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("enrich rule not found"))
+}
+
+async fn create_enrich(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<EnrichInput>,
+) -> ApiResult<(StatusCode, Json<EnrichRule>)> {
+    let rule = enrich_from_input(Uuid::new_v4(), input, Utc::now())?;
+    state
+        .db
+        .upsert_enrich_rule(&rule)
+        .map_err(ApiError::internal)?;
+    Ok((StatusCode::CREATED, Json(rule)))
+}
+
+async fn update_enrich(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<EnrichInput>,
+) -> ApiResult<Json<EnrichRule>> {
+    let id = parse_id(&id)?;
+    let existing = state
+        .db
+        .get_enrich_rule(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("enrich rule not found"))?;
+    let rule = enrich_from_input(id, input, existing.created_at)?;
+    state
+        .db
+        .upsert_enrich_rule(&rule)
+        .map_err(ApiError::internal)?;
+    Ok(Json(rule))
+}
+
+async fn delete_enrich(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let id = parse_id(&id)?;
+    let ok = state
+        .db
+        .delete_enrich_rule(id)
+        .map_err(ApiError::internal)?;
+    if ok {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("enrich rule not found"))
+    }
+}
+
+#[derive(Deserialize)]
+struct EnrichPreviewInput {
+    /// Optional: apply only this rule draft (not yet saved).
+    #[serde(default)]
+    rule: Option<EnrichInput>,
+    /// Or apply all saved rules when `rule` is omitted.
+    #[serde(default)]
+    use_saved: bool,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
+    annotations: BTreeMap<String, String>,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    rule_name: Option<String>,
+}
+
+async fn preview_enrich(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<EnrichPreviewInput>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let severity = input
+        .severity
+        .as_deref()
+        .and_then(Severity::parse)
+        .unwrap_or(Severity::Warning);
+    let mut event = AlertEvent {
+        id: Uuid::nil(),
+        rule_id: Uuid::nil(),
+        fingerprint: "preview".into(),
+        status: AlertStatus::Firing,
+        severity,
+        labels: input.labels,
+        annotations: input.annotations,
+        value: input.value,
+        starts_at: Utc::now(),
+        ends_at: None,
+        pending_since: None,
+        last_evaluated_at: Utc::now(),
+        notified_firing: false,
+        notified_resolved: false,
+    };
+
+    let mut rules = Vec::new();
+    if let Some(draft) = input.rule {
+        rules.push(enrich_from_input(Uuid::nil(), draft, Utc::now())?);
+    } else if input.use_saved {
+        rules = state.db.list_enrich_rules().map_err(ApiError::internal)?;
+    }
+
+    let lookups = state.db.lookup_tables_map().map_err(ApiError::internal)?;
+    enrich_alert(&mut event, input.rule_name.as_deref(), &rules, &lookups);
+    Ok(Json(serde_json::json!({
+        "labels": event.labels,
+        "annotations": event.annotations,
+    })))
+}
+
+// ---- lookup tables ----
+
+#[derive(Deserialize)]
+struct LookupInput {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "default_lookup_key")]
+    key_label: String,
+    #[serde(default)]
+    rows: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_lookup_key() -> String {
+    "instance".into()
+}
+
+fn lookup_from_input(
+    id: Uuid,
+    input: LookupInput,
+    created_at: DateTime<Utc>,
+) -> ApiResult<LookupTable> {
+    if input.name.trim().is_empty() {
+        return Err(ApiError::bad("name required"));
+    }
+    if input.key_label.trim().is_empty() {
+        return Err(ApiError::bad("key_label required"));
+    }
+    Ok(LookupTable {
+        id,
+        name: input.name,
+        description: input.description,
+        key_label: input.key_label,
+        rows: input.rows,
+        enabled: input.enabled,
+        created_at,
+        updated_at: Utc::now(),
+    })
+}
+
+async fn list_lookups(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<LookupTable>>> {
+    state
+        .db
+        .list_lookup_tables()
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn get_lookup(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<LookupTable>> {
+    let id = parse_id(&id)?;
+    state
+        .db
+        .get_lookup_table(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("lookup table not found"))
+}
+
+async fn create_lookup(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<LookupInput>,
+) -> ApiResult<(StatusCode, Json<LookupTable>)> {
+    let table = lookup_from_input(Uuid::new_v4(), input, Utc::now())?;
+    state
+        .db
+        .upsert_lookup_table(&table)
+        .map_err(ApiError::internal)?;
+    Ok((StatusCode::CREATED, Json(table)))
+}
+
+async fn update_lookup(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<LookupInput>,
+) -> ApiResult<Json<LookupTable>> {
+    let id = parse_id(&id)?;
+    let existing = state
+        .db
+        .get_lookup_table(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("lookup table not found"))?;
+    let table = lookup_from_input(id, input, existing.created_at)?;
+    state
+        .db
+        .upsert_lookup_table(&table)
+        .map_err(ApiError::internal)?;
+    Ok(Json(table))
+}
+
+async fn delete_lookup(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let id = parse_id(&id)?;
+    let ok = state
+        .db
+        .delete_lookup_table(id)
+        .map_err(ApiError::internal)?;
+    if ok {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("lookup table not found"))
     }
 }
 

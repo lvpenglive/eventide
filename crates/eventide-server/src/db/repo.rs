@@ -416,6 +416,142 @@ impl Db {
         Ok(n > 0)
     }
 
+    // ---------- enrich rules ----------
+
+    pub fn list_enrich_rules(&self) -> Result<Vec<EnrichRule>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, matchers_json, match_key, templates_json, mappings_json,
+                    write_labels, enabled, priority, created_at, updated_at,
+                    lookup_table_id
+             FROM enrich_rules ORDER BY priority ASC, name ASC",
+        )?;
+        let rows = stmt.query_map([], map_enrich)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn get_enrich_rule(&self, id: Uuid) -> Result<Option<EnrichRule>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, name, kind, matchers_json, match_key, templates_json, mappings_json,
+                    write_labels, enabled, priority, created_at, updated_at,
+                    lookup_table_id
+             FROM enrich_rules WHERE id=?1",
+            params![id.to_string()],
+            map_enrich,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn upsert_enrich_rule(&self, r: &EnrichRule) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO enrich_rules (
+                id, name, kind, matchers_json, match_key, templates_json, mappings_json,
+                write_labels, enabled, priority, created_at, updated_at, lookup_table_id
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name, kind=excluded.kind, matchers_json=excluded.matchers_json,
+               match_key=excluded.match_key, templates_json=excluded.templates_json,
+               mappings_json=excluded.mappings_json, write_labels=excluded.write_labels,
+               enabled=excluded.enabled, priority=excluded.priority,
+               updated_at=excluded.updated_at, lookup_table_id=excluded.lookup_table_id",
+            params![
+                r.id.to_string(),
+                r.name,
+                r.kind.as_str(),
+                serde_json::to_string(&r.matchers)?,
+                r.match_key,
+                serde_json::to_string(&r.templates)?,
+                serde_json::to_string(&r.mappings)?,
+                r.write_labels as i64,
+                r.enabled as i64,
+                r.priority,
+                fmt_dt(r.created_at),
+                fmt_dt(r.updated_at),
+                r.lookup_table_id.map(|u| u.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_enrich_rule(&self, id: Uuid) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "DELETE FROM enrich_rules WHERE id=?1",
+            params![id.to_string()],
+        )?;
+        Ok(n > 0)
+    }
+
+    // ---------- lookup tables ----------
+
+    pub fn list_lookup_tables(&self) -> Result<Vec<LookupTable>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, key_label, rows_json, enabled, created_at, updated_at
+             FROM lookup_tables ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], map_lookup)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn lookup_tables_map(&self) -> Result<BTreeMap<Uuid, LookupTable>> {
+        Ok(self
+            .list_lookup_tables()?
+            .into_iter()
+            .map(|t| (t.id, t))
+            .collect())
+    }
+
+    pub fn get_lookup_table(&self, id: Uuid) -> Result<Option<LookupTable>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, name, description, key_label, rows_json, enabled, created_at, updated_at
+             FROM lookup_tables WHERE id=?1",
+            params![id.to_string()],
+            map_lookup,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn upsert_lookup_table(&self, t: &LookupTable) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO lookup_tables (
+                id, name, description, key_label, rows_json, enabled, created_at, updated_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name, description=excluded.description,
+               key_label=excluded.key_label, rows_json=excluded.rows_json,
+               enabled=excluded.enabled, updated_at=excluded.updated_at",
+            params![
+                t.id.to_string(),
+                t.name,
+                t.description,
+                t.key_label,
+                serde_json::to_string(&t.rows)?,
+                t.enabled as i64,
+                fmt_dt(t.created_at),
+                fmt_dt(t.updated_at),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_lookup_table(&self, id: Uuid) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "DELETE FROM lookup_tables WHERE id=?1",
+            params![id.to_string()],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn insert_notify_log(&self, log: &NotifyLog) -> Result<()> {
         let conn = self.lock()?;
         let transition = match log.transition {
@@ -629,6 +765,54 @@ fn map_alert(row: &Row<'_>) -> rusqlite::Result<AlertEvent> {
         last_evaluated_at: parse_dt(&last).unwrap_or_else(|_| Utc::now()),
         notified_firing: row.get::<_, i64>(12)? != 0,
         notified_resolved: row.get::<_, i64>(13)? != 0,
+    })
+}
+
+fn map_enrich(row: &Row<'_>) -> rusqlite::Result<EnrichRule> {
+    let kind_s: String = row.get(2)?;
+    let matchers_json: String = row.get(3)?;
+    let templates_json: String = row.get(5)?;
+    let mappings_json: String = row.get(6)?;
+    let created: String = row.get(10)?;
+    let updated: String = row.get(11)?;
+    let lookup_table_id: Option<String> = row.get(12).unwrap_or(None);
+    let mappings: BTreeMap<String, Labels> =
+        serde_json::from_str(&mappings_json).unwrap_or_default();
+    Ok(EnrichRule {
+        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        name: row.get(1)?,
+        kind: EnrichKind::parse(&kind_s).unwrap_or(EnrichKind::AnnotationTemplate),
+        matchers: labels_from_json(&matchers_json).unwrap_or_default(),
+        match_key: row.get(4)?,
+        templates: labels_from_json(&templates_json).unwrap_or_default(),
+        mappings,
+        lookup_table_id: lookup_table_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        write_labels: row.get::<_, i64>(7)? != 0,
+        enabled: row.get::<_, i64>(8)? != 0,
+        priority: row.get(9)?,
+        created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
+        updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
+    })
+}
+
+fn map_lookup(row: &Row<'_>) -> rusqlite::Result<LookupTable> {
+    let rows_json: String = row.get(4)?;
+    let created: String = row.get(6)?;
+    let updated: String = row.get(7)?;
+    let rows: BTreeMap<String, Labels> = serde_json::from_str(&rows_json).unwrap_or_default();
+    Ok(LookupTable {
+        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        key_label: row.get(3)?,
+        rows,
+        enabled: row.get::<_, i64>(5)? != 0,
+        created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
+        updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 

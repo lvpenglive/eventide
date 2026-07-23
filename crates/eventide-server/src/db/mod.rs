@@ -204,6 +204,72 @@ INSERT INTO schema_meta(key, value) VALUES('version', '3')
 "#,
             )?;
         }
+
+        // v4: alert enrichment rules (annotation templates + label maps)
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 4 {
+            conn.execute_batch(
+                r#"
+CREATE TABLE IF NOT EXISTS enrich_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    matchers_json TEXT NOT NULL DEFAULT '{}',
+    match_key TEXT NOT NULL DEFAULT '',
+    templates_json TEXT NOT NULL DEFAULT '{}',
+    mappings_json TEXT NOT NULL DEFAULT '{}',
+    write_labels INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 100,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO schema_meta(key, value) VALUES('version', '4')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v5: shared lookup tables + enrich.lookup_table_id
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 5 {
+            conn.execute_batch(
+                r#"
+CREATE TABLE IF NOT EXISTS lookup_tables (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    key_label TEXT NOT NULL DEFAULT 'instance',
+    rows_json TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"#,
+            )?;
+            let _ = conn.execute(
+                "ALTER TABLE enrich_rules ADD COLUMN lookup_table_id TEXT",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+INSERT INTO schema_meta(key, value) VALUES('version', '5')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
         Ok(())
     }
 
