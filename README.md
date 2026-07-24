@@ -7,7 +7,7 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
 1. **主动拉数评估**：从 Prometheus / VictoriaMetrics / Kafka / Loki(Log) 取数，按规则判断是否告警  
 2. **被动接收告警**：通过 HTTP Webhook 或 Kafka Topic 接收外部平台已判定的告警  
 
-两条路径汇入同一套 **告警标识去重 → 静默 → 多通道通知** 流水线。
+两条路径汇入同一套 **告警标识去重 → 告警丰富（台账补字段）→ 静默 → 多通道通知** 流水线。
 
 > License: MIT。参考 WatchAlert 的产品划分，代码为独立实现（WatchAlert 为 AGPL，请勿直接复制其源码）。
 
@@ -46,10 +46,11 @@ Eventide 定位为 **团队级告警中枢**：
 |------|------|
 | 规则引擎 | 阈值比较 + `for` 持续时长 |
 | 多数据源 | Prometheus、VictoriaMetrics、Kafka、Log(Loki) |
-| 告警接入 | Alertmanager / Generic Webhook / Kafka |
+| 告警接入 | Alertmanager / Generic Webhook / Kafka；支持自定义字段映射 |
+| 告警丰富 | 台账查表、标签抽取、模板改写描述 / IP / 级别 |
 | 去重 | 规则 + 标签生成的告警标识（fingerprint） |
 | 静默 | 按规则 ID / 标签匹配 |
-| 通知 | Webhook、钉钉、企微、飞书 |
+| 通知 | Webhook、钉钉、企微、飞书（内容为丰富后的告警） |
 | 控制台 | 登录、侧栏菜单、CRUD 配置 |
 
 ---
@@ -119,7 +120,7 @@ eventide/
 
 | Crate | 职责 |
 |-------|------|
-| **eventide-core** | `Datasource` / `Rule` / `AlertEvent` / `Silence` / `IngressRoute`；阈值评估；告警标识；告警状态机；Alertmanager/Generic 解析 |
+| **eventide-core** | 领域模型；阈值评估；告警标识；状态机；Ingress 解析与字段映射；模板渲染；告警丰富 / 台账查表 |
 | **eventide-sources** | `fetch_samples()`：按数据源类型拉指标样本 |
 | **eventide-notify** | 统一 `Notifier::send`，按渠道发通知 |
 | **eventide-server** | 进程入口、JWT 鉴权、SQLite、规则调度、Kafka Ingress 轮询、REST API、控制台 |
@@ -150,7 +151,8 @@ eventide-server
   Generic Webhook ─►│  kafka ingress ──► 同一 AlertEvent       │
   Kafka(告警总线) ─►│                      │                  │
                     │                      ▼                  │
-                    │  silence 过滤 → notify → 钉钉/企微/飞书  │
+                    │  enrich（台账/模板）→ silence → notify   │
+                    │                      → 钉钉/企微/飞书    │
                     │                                         │
                     │  Axum API + 静态控制台                    │
                     └─────────────────────────────────────────┘
@@ -226,6 +228,22 @@ Ingress 场景会再带上 `route_id` 前缀，避免不同接入互相覆盖。
 
 仅在状态边沿（变为 firing / 变为 resolved）发送，避免刷屏。
 
+### 5.7 告警丰富 Enrich 与台账 Lookup
+
+在落库与发通知前，可对 `AlertEvent` 做统一丰富（拉数评估与 Ingress 共用同一管线）：
+
+| 概念 | 说明 |
+|------|------|
+| **台账 LookupTable** | 键值对照表（如 IP → 主机名 / 联系人）；`key_label` 为默认匹配标签名 |
+| **丰富规则 EnrichRule** | 可启用多条；按 `priority` 升序执行；可用 `matchers` 限定生效范围 |
+| **查表前抽取** | `label_extracts`：用模板从 summary/labels 截出临时标签（如 `sss_ip`） |
+| **查表匹配键** | 默认用台账 `key_label`；规则内可按台账覆盖为抽取标签名（`lookup_match_keys`） |
+| **写回字段** | 台账列写入 `labels.台账名.列名`；再用 `field_templates` 改写描述 / IP / 级别 / 名称 |
+
+**单条规则内顺序**：抽取 → 台账查表 → 内联映射 → 注解模板 → 字段模板。
+
+接入绑定的通知渠道发出的内容，是**丰富之后**的告警。
+
 ---
 
 ## 6. 数据流与状态机
@@ -237,6 +255,7 @@ Ingress 场景会再带上 `route_id` 前缀，避免不同接入互相覆盖。
   → fetch_samples(datasource, expr)
   → evaluate_rule（逐样本比较阈值，处理 for）
   → 缺失样本则 resolve 旧告警
+  → enrich_alert（台账 / 模板）
   → 命中静默则跳过通知
   → 边沿通知 + upsert alert_events
 ```
@@ -257,8 +276,9 @@ Ingress 场景会再带上 `route_id` 前缀，避免不同接入互相覆盖。
 
 ```
 HTTP POST / Kafka 消费
-  → 解析为 IngressAlert[]
+  → 解析为 IngressAlert[]（含可选字段映射）
   → apply_ingress（与已有 fingerprint 合并）
+  → enrich_alert（台账 / 模板）
   → 静默 / 边沿通知 / 落库
 ```
 
@@ -279,10 +299,13 @@ SQLite 文件默认：`data/eventide.db`（WAL）。
 | `silences` | 静默策略 |
 | `ingress_routes` | 接入路由（含 endpoint / options） |
 | `ingress_kafka_offsets` | Kafka Ingress 消费位点 |
+| `enrich_rules` | 告警丰富规则 |
+| `lookup_tables` | 台账数据 |
 | `notify_logs` | 通知发送记录 |
+| `departments` / `roles` / `users` | 组织与 RBAC（可选） |
 | `schema_meta` | 迁移版本 |
 
-Schema 通过启动时 `migrate()` 演进（当前至 v3）。
+Schema 通过启动时 `migrate()` 演进（当前至 **v10**：含 `label_extracts`、按规则覆盖查表键等）。
 
 ---
 
@@ -318,7 +341,10 @@ Header：`Authorization: Bearer <jwt>`
 | `/api/channels` | 通知渠道 CRUD |
 | `/api/alerts` | 告警列表（可 `?status=`） |
 | `/api/silences` | 静默 CRUD |
-| `/api/ingress` | 接入路由 CRUD |
+| `/api/ingress` | 接入路由 CRUD + 试推送 |
+| `/api/enrich` | 丰富规则 CRUD |
+| `/api/enrich/preview` | 试跑预览（可带接入映射 + 草稿规则） |
+| `/api/lookups` | 台账 CRUD |
 
 ---
 
@@ -352,9 +378,15 @@ cargo run -p eventide-server -- eventide.toml
 ### 9.4 最小闭环（接 Alertmanager）
 
 1. **通知渠道** 先建好  
-2. **Ingress** → 类型 `alertmanager`，填 token 与 channel  
+2. **告警接入** → 类型 `alertmanager`，填 token 与 channel  
 3. 复制 Webhook URL：`/api/ingress/{id}/alertmanager`  
 4. 在 Alertmanager 配置 `webhook_configs`  
+
+### 9.5 可选：台账丰富后再通知
+
+1. **告警丰富 → 台账数据**：导入主机对照表（匹配键如 `ip`）  
+2. **丰富规则**：勾选台账，描述写 `{{labels.台账名.主机名}}`  
+3. 用「试跑预览」验证；真实通知内容为丰富后的告警  
 
 ---
 
@@ -401,9 +433,11 @@ cargo run -p eventide-server -- /path/to/eventide.toml
 | 数据源 | Prometheus / VM / Kafka / Log |
 | 告警规则 | CRUD、试跑 |
 | 通知渠道 | Webhook / 钉钉 / 企微 / 飞书 |
-| 告警接入 | Alertmanager / Generic / Kafka |
-| 告警事件 | 按状态筛选 |
+| 告警接入 | Alertmanager / Generic / Kafka；字段映射与帮助说明 |
+| 告警丰富 | 台账数据 + 丰富规则；试跑预览弹窗 |
+| 告警事件 | 按状态筛选、详情（含丰富后 labels） |
 | 静默策略 | 时间窗 + 标签匹配 |
+| 用户 / 部门 / 角色 | 账号与权限（按部署启用） |
 | 系统设置 | 只读运行信息（改密码改 toml 后重启） |
 
 ### 11.2 数据源配置示例
@@ -543,22 +577,35 @@ count_over_time({app="api"} |= "ERROR" [5m])
 
 **自定义字段映射（Generic / Kafka）**
 
-在 Ingress 表单「字段映射」中填写对方 JSON 点分路径，例如：
+在接入编辑「字段映射」中填写对方 JSON 点分路径（控制台有可展开的字段说明）。任一路径非空或勾选「启用自定义字段映射」即启用，并优先于内置 Generic/拨测解析。
 
-| 配置项 | 示例路径 | 含义 |
-|--------|----------|------|
-| `map_list` | `data.items` | 告警数组（空=整条对象） |
-| `map_status` | `state` | 状态字段 |
-| `map_fire` / `map_resolve` | `ALARM` / `OK` | 触发/恢复取值 |
-| `map_name` | `title` | 告警名称 |
-| `map_description` | `msg` | 告警描述 |
-| `map_ip` | `host` | 告警 IP |
-| `map_value` | `metric` | 当前值 |
-| `map_fingerprint` | `id` | 告警标识 |
-| `map_severity` | `level` | 级别 |
-| `map_labels` | `region:zone` | 额外标签 `名:路径` |
+| 配置项 | 作用 | 写入结果 |
+|--------|------|----------|
+| `map_list` | 告警数组路径，空=整条消息当一条 | — |
+| `map_status` | 状态字段 | firing / resolved |
+| `map_fire` | 视为触发的取值（逗号分隔） | — |
+| `map_resolve` | 视为恢复的取值 | — |
+| `map_name` | 告警名称 | `labels.alertname` |
+| `map_description` | 告警描述 | `annotations.summary` / `description` |
+| `map_ip` | 告警 IP | `labels.ip` / `alertIp` / `instance`（三者同步） |
+| `map_value` | 当前值 | `value` |
+| `map_fingerprint` | 去重标识 | `fingerprint` |
+| `map_severity` | 级别原始值 | `labels.severity` + 引擎级别 |
+| `map_critical` | 哪些取值算严重 | → Critical |
+| `map_warning` | 警告取值列表（引擎支持；控制台无单独框） | → Warning |
+| `map_labels` | 额外标签，`目标标签:源路径,...` | 对应 `labels.*` |
+| `map_enabled` | 强制开启映射 | — |
 
-启用映射后优先于内置 Generic/拨测解析。
+路径支持字符串截取（与丰富模板相同）：
+
+| 语法 | 说明 | 示例 |
+|------|------|------|
+| `\|before:SEP` | 分隔符之前 | `sourceciname\|before:_` → `82.12.161.32` |
+| `\|after:SEP` | 分隔符之后 | `summary\|after:为：` |
+| `\|split:SEP:INDEX` | 按分隔符拆分，取第 INDEX 段（从 0） | `x\|split:_:0` |
+| `\|between:起点:终点` | 两段之间；起点/终点可空 | `summary\|between:为：: %` |
+
+Zabbix 风格示例：`map_ip=sourceciname|before:_`，`map_name=sourcealertkey`，`map_description=summary`，`map_fingerprint=sourceidentifier`，`map_severity=sourceseverity`。
 
 **Kafka Ingress（告警总线）**
 
@@ -577,10 +624,39 @@ count_over_time({app="api"} |= "ERROR" [5m])
 }
 ```
 
-消息体支持 Alertmanager JSON、Generic 批量/单条，以及 Jeecg 拨测 `eventType` JSON（含日志行前缀）。  
+消息体支持 Alertmanager JSON、Generic 批量/单条、Jeecg 拨测，以及带字段映射的自定义 JSON。  
 位点保存在 `ingress_kafka_offsets`；默认从 `latest` 开始，只消费新消息。
 
-### 11.5 静默示例
+### 11.5 告警丰富（台账 + 规则）
+
+典型路径：
+
+1. **台账数据**：建表，设匹配键（如 `ip`），导入行（键 → 主机名 / 联系人等列）  
+2. **丰富规则**：勾选台账；需要时先「查表前抽取」；配置告警描述 / IP / 级别模板  
+3. **试跑预览**：粘贴原始 JSON，选字段映射接入，看丰富前后 labels / 描述  
+
+**模板变量**（可用于抽取、描述、IP、级别、名称）：
+
+| 写法 | 含义 |
+|------|------|
+| `{{labels.xxx}}` | 告警标签（含接入映射写入的 `ip` / `alertname` 等） |
+| `{{labels.台账名.列名}}` | 台账命中后的列（必须带台账名前缀） |
+| `{{annotations.xxx}}` | 注解，常见 `summary` / `description` |
+| `{{value}}` / `{{severity}}` / `{{status}}` / `{{fingerprint}}` | 内置字段 |
+| `{{rule.name}}` | 当前丰富规则名 |
+
+截取语法与接入映射相同：`|before:` / `|after:` / `|split:` / `|between:`。
+
+**推荐配置**
+
+- 接入已映射出 `labels.ip` → 台账「用标签」填 `ip` → 描述写 `{{labels.device_info_form.主机名}}`  
+- IP 只在描述里：抽取 `sss_ip = {{annotations.summary|before:_}}`，台账「用标签」填 `sss_ip`  
+
+控制台支持点选 / 拖拽标签芯片插入描述；保存前可用「试跑预览」。
+
+注意：查表键必须与 labels 中的名字一致。若只有 `alertIp` 没有 `ip`，旧版本会查不到台账；当前字段映射会同时写入 `ip` / `alertIp` / `instance`。
+
+### 11.6 静默示例
 
 ```json
 {
@@ -592,7 +668,7 @@ count_over_time({app="api"} |= "ERROR" [5m])
 }
 ```
 
-### 11.6 用 curl 登录并调用 API
+### 11.7 用 curl 登录并调用 API
 
 ```bash
 TOKEN=$(curl -s -X POST http://127.0.0.1:8080/api/auth/login \
@@ -635,17 +711,18 @@ curl -s http://127.0.0.1:8080/api/overview \
 
 - [x] Prometheus / VictoriaMetrics 拉数评估  
 - [x] Kafka / Log 数据源  
-- [x] Alertmanager / Generic / Kafka Ingress  
-- [x] 告警标识去重、静默、多通道通知  
+- [x] Alertmanager / Generic / Kafka Ingress（含自定义字段映射与截取语法）  
+- [x] 告警丰富：台账查表、标签抽取、字段模板、试跑预览  
+- [x] 告警标识去重、静默、多通道通知（通知前先丰富）  
 - [x] JWT 登录与管理控制台  
 
 后续可演进：
 
-- [ ] 企微/飞书以外渠道与通知模板  
+- [ ] 企微/飞书以外渠道与更丰富的通知模板  
 - [ ] 值班、升级、认领  
 - [ ] SQLite → Postgres；多实例 + Redis  
 - [ ] 更多日志后端（ES 等）  
-- [ ] Ingress 更多平台适配器  
+- [ ] Ingress 更多平台适配器（开箱预设）  
 
 ---
 
@@ -670,7 +747,7 @@ $env:RUST_LOG="info,eventide=debug"
 cargo run -p eventide-server -- eventide.toml
 ```
 
-核心单测集中在 `eventide-core`（比较符、`for` 状态机、告警标识、Ingress 解析）。
+核心单测集中在 `eventide-core`（比较符、`for` 状态机、告警标识、Ingress 解析与字段映射、模板截取、告警丰富）。
 
 ---
 
@@ -685,7 +762,10 @@ cargo run -p eventide-server -- eventide.toml
 | firing / resolved | 告警触发 / 恢复 |
 | Ingress | 外部告警接入入口 |
 | Datasource | 可查询的原始数据源 |
+| Enrich | 告警丰富（台账补字段 / 模板改写） |
+| Lookup / 台账 | 键值对照表，供丰富规则查表 |
+| field mapping | 接入侧把任意 JSON 映射为统一告警字段 |
 
 ---
 
-如需二次开发，建议从 `eventide-core` 的模型与 `apply_evaluation` / `apply_ingress` 读起，再看 `eventide-server` 的 `scheduler` 与 `notify_pipeline`。
+如需二次开发，建议从 `eventide-core` 的模型与 `apply_evaluation` / `apply_ingress` / `enrich_alert` 读起，再看 `eventide-server` 的 `scheduler` 与 `notify_pipeline`。

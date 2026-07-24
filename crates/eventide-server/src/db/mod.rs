@@ -1,5 +1,6 @@
 //! SQLite persistence for Eventide.
 
+mod iam_repo;
 mod repo;
 
 use anyhow::{anyhow, Context, Result};
@@ -270,6 +271,214 @@ INSERT INTO schema_meta(key, value) VALUES('version', '5')
 "#,
             )?;
         }
+
+        // v6: enrich rules may reference many lookup tables (M:N)
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 6 {
+            let _ = conn.execute(
+                "ALTER TABLE enrich_rules ADD COLUMN lookup_table_ids_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            );
+            // Migrate legacy single lookup_table_id → lookup_table_ids_json array.
+            let mut stmt = conn.prepare(
+                "SELECT id, lookup_table_id FROM enrich_rules WHERE lookup_table_id IS NOT NULL AND lookup_table_id != ''",
+            )?;
+            let legacy: Vec<(String, String)> = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for (id, tid) in legacy {
+                let json = serde_json::to_string(&vec![tid])?;
+                conn.execute(
+                    "UPDATE enrich_rules SET lookup_table_ids_json=?1 WHERE id=?2",
+                    rusqlite::params![json, id],
+                )?;
+            }
+            conn.execute_batch(
+                r#"
+INSERT INTO schema_meta(key, value) VALUES('version', '6')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v7: enrich field_templates (severity / ip / alertname / summary overrides)
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 7 {
+            let _ = conn.execute(
+                "ALTER TABLE enrich_rules ADD COLUMN field_templates_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+INSERT INTO schema_meta(key, value) VALUES('version', '7')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v8: departments / roles / users (RBAC)
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 8 {
+            conn.execute_batch(
+                r#"
+CREATE TABLE IF NOT EXISTS departments (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    parent_id TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS roles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    permissions_json TEXT NOT NULL DEFAULT '[]',
+    is_system INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    department_id TEXT,
+    role_ids_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_dept ON users(department_id);
+CREATE INDEX IF NOT EXISTS idx_departments_parent ON departments(parent_id);
+
+INSERT INTO schema_meta(key, value) VALUES('version', '8')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v9: enrich label_extracts (pre-lookup template extracts)
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 9 {
+            let _ = conn.execute(
+                "ALTER TABLE enrich_rules ADD COLUMN label_extracts_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+INSERT INTO schema_meta(key, value) VALUES('version', '9')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v10: per-rule lookup match key overrides
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 10 {
+            let _ = conn.execute(
+                "ALTER TABLE enrich_rules ADD COLUMN lookup_match_keys_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+INSERT INTO schema_meta(key, value) VALUES('version', '10')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Seed admin role + toml bootstrap user when users table is empty.
+    pub fn seed_iam_if_empty(&self, username: &str, password: &str) -> Result<()> {
+        let count: i64 = {
+            let conn = self.lock()?;
+            conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
+                .unwrap_or(0)
+        };
+        if count > 0 {
+            return Ok(());
+        }
+
+        use crate::iam::{Department, Role, UserAccount};
+        use crate::password::hash_password;
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        let now = Utc::now();
+        let dept_id = Uuid::new_v4();
+        let role_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        self.upsert_department(&Department {
+            id: dept_id,
+            name: "默认组织".into(),
+            parent_id: None,
+            sort_order: 0,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        })?;
+
+        self.upsert_role(&Role {
+            id: role_id,
+            name: "admin".into(),
+            description: "系统管理员（全部权限）".into(),
+            permissions: vec!["*".into()],
+            is_system: true,
+            created_at: now,
+            updated_at: now,
+        })?;
+
+        self.upsert_user(&UserAccount {
+            id: user_id,
+            username: username.to_string(),
+            display_name: "管理员".into(),
+            password_hash: hash_password(password),
+            department_id: Some(dept_id),
+            role_ids: vec![role_id],
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        })?;
+
+        tracing::info!("seeded IAM admin user '{username}' with system role admin");
         Ok(())
     }
 

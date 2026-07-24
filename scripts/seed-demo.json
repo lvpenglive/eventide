@@ -114,6 +114,47 @@
       "options": {},
       "enabled": true,
       "_channels": ["Demo Webhook"]
+    },
+    {
+      "name": "Demo Zabbix Kafka",
+      "kind": "kafka",
+      "token": "demo-zabbix-kafka-token",
+      "endpoint": "127.0.0.1:9092",
+      "options": {
+        "topic": "zabbix-alerts",
+        "group_id": "eventide-demo-zabbix",
+        "map_enabled": "1",
+        "map_status": "status",
+        "map_fire": "1,2",
+        "map_resolve": "0",
+        "map_name": "sourcealertkey",
+        "map_description": "summary",
+        "map_fingerprint": "sourceidentifier",
+        "map_severity": "sourceseverity",
+        "map_critical": "Disaster,High,Critical,4,5",
+        "map_ip": "sourceciname|before:_",
+        "map_labels": "sourceciname:sourceciname,ciinstance:ciinstance,sourceeventid:sourceeventid,sourceseverity:sourceseverity"
+      },
+      "enabled": true,
+      "_channels": ["Demo Webhook"],
+      "_sample": "zabbix"
+    }
+  ],
+  "sample_alerts": [
+    {
+      "_ingress": "Demo Zabbix Kafka",
+      "severity": 4,
+      "summary": "麒麟主机当前系统磁盘[vdb] IO使用百分比为: 97.49 %, 已超过90%阈值",
+      "lastoccurrence": "2026-07-18 08:39:33",
+      "status": 2,
+      "sourceid": 1,
+      "sourceeventid": "71978",
+      "sourceciname": "82.12.161.32_kylin",
+      "sourcealertkey": "vfs.dev.util[vdb]",
+      "sourceseverity": "High",
+      "sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]_Application:Disk vdb",
+      "ciinstance": "Application:Disk vdb",
+      "eventtypeid": "*UNKNOWN*"
     }
   ],
   "enrich": [
@@ -141,7 +182,8 @@
         "10.0.0.1": { "owner": "alice", "team": "sre", "biz": "pay" },
         "10.0.0.8": { "owner": "bob", "team": "platform", "biz": "gateway" },
         "db-1": { "owner": "carol", "team": "dba", "biz": "database" },
-        "api-prod-1": { "owner": "dave", "team": "platform", "biz": "api" }
+        "api-prod-1": { "owner": "dave", "team": "platform", "biz": "api" },
+        "82.12.161.32": { "owner": "ops-kylin", "team": "infra", "biz": "kylin-host", "ci": "82.12.161.32_kylin" }
       },
       "write_labels": true,
       "enabled": true,

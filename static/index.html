@@ -4,11 +4,27 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Eventide</title>
-  <link rel="stylesheet" href="/assets/app.css?v=18" />
+  <script>
+    (function () {
+      try {
+        var k = "eventide_theme";
+        var pref = localStorage.getItem(k) || "system";
+        var dark = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme = pref === "light" || pref === "dark" ? pref : dark ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.setAttribute("data-theme-pref", pref === "light" || pref === "dark" ? pref : "system");
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+        document.documentElement.setAttribute("data-theme-pref", "system");
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/assets/app.css?v=41" />
 </head>
 <body>
   <!-- Login -->
   <div id="view-login">
+    <div class="login-theme theme-switch" id="login-theme"></div>
     <div class="login-stage">
       <div class="login-brand">
         <div class="mark">Eventide</div>
@@ -26,7 +42,7 @@
         </div>
         <div class="login-error" id="login-error"></div>
         <button class="primary" type="submit" style="width:100%">进入系统</button>
-        <div class="login-hint">默认账号见 eventide.toml 的 [auth] 段</div>
+        <div class="login-hint">首次启动使用 eventide.toml 中的账号种子管理员；之后在「用户管理」维护</div>
       </form>
     </div>
   </div>
@@ -40,21 +56,58 @@
           <span class="chev">‹</span>
         </button>
       </div>
-      <button class="nav-item active" data-page="overview" title="总览"><span class="ico">◈</span><span class="label">总览</span></button>
-      <button class="nav-item" data-page="datasources" title="数据源"><span class="ico">◎</span><span class="label">数据源</span></button>
-      <button class="nav-item" data-page="rules" title="告警规则"><span class="ico">▣</span><span class="label">告警规则</span></button>
-      <button class="nav-item" data-page="channels" title="通知渠道"><span class="ico">☍</span><span class="label">通知渠道</span></button>
-      <button class="nav-item" data-page="ingress" title="告警接入"><span class="ico">⇢</span><span class="label">告警接入</span></button>
-      <button class="nav-item" data-page="alerts" title="告警事件"><span class="ico">⚠</span><span class="label">告警事件</span></button>
-      <button class="nav-item" data-page="enrich" title="告警丰富"><span class="ico">✦</span><span class="label">告警丰富</span></button>
-      <button class="nav-item" data-page="silences" title="静默策略"><span class="ico">◐</span><span class="label">静默策略</span></button>
-      <button class="nav-item" data-page="settings" title="系统设置"><span class="ico">⚙</span><span class="label">系统设置</span></button>
-      <div class="spacer"></div>
+      <nav class="nav-scroll" aria-label="主导航">
+        <button class="nav-item active" data-page="overview" title="总览"><span class="ico">◈</span><span class="label">总览</span></button>
+
+        <div class="nav-group open" data-group="ops">
+          <button type="button" class="nav-group-btn" data-group-toggle="ops" title="告警运营">
+            <span class="ico">⚠</span><span class="label">告警运营</span><span class="caret">▾</span>
+          </button>
+          <div class="nav-sub">
+            <button class="nav-item" data-page="alerts" title="告警事件"><span class="ico">●</span><span class="label">告警事件</span></button>
+            <button class="nav-item" data-page="silences" title="静默策略"><span class="ico">◐</span><span class="label">静默策略</span></button>
+          </div>
+        </div>
+
+        <div class="nav-group open" data-group="config">
+          <button type="button" class="nav-group-btn" data-group-toggle="config" title="接入配置">
+            <span class="ico">▣</span><span class="label">接入配置</span><span class="caret">▾</span>
+          </button>
+          <div class="nav-sub">
+            <button class="nav-item" data-page="datasources" title="数据源"><span class="ico">◎</span><span class="label">数据源</span></button>
+            <button class="nav-item" data-page="rules" title="告警规则"><span class="ico">▦</span><span class="label">告警规则</span></button>
+            <button class="nav-item" data-page="ingress" title="告警接入"><span class="ico">⇢</span><span class="label">告警接入</span></button>
+          </div>
+        </div>
+
+        <div class="nav-group open" data-group="notify">
+          <button type="button" class="nav-group-btn" data-group-toggle="notify" title="通知丰富">
+            <span class="ico">✦</span><span class="label">通知丰富</span><span class="caret">▾</span>
+          </button>
+          <div class="nav-sub">
+            <button class="nav-item" data-page="channels" title="通知渠道"><span class="ico">☍</span><span class="label">通知渠道</span></button>
+            <button class="nav-item" data-page="enrich" title="告警丰富"><span class="ico">✧</span><span class="label">告警丰富</span></button>
+          </div>
+        </div>
+
+        <div class="nav-group open" data-group="system">
+          <button type="button" class="nav-group-btn" data-group-toggle="system" title="系统管理">
+            <span class="ico">⚙</span><span class="label">系统管理</span><span class="caret">▾</span>
+          </button>
+          <div class="nav-sub">
+            <button class="nav-item" data-page="users" title="用户管理"><span class="ico">◎</span><span class="label">用户管理</span></button>
+            <button class="nav-item" data-page="roles" title="权限管理"><span class="ico">▣</span><span class="label">权限管理</span></button>
+            <button class="nav-item" data-page="departments" title="部门管理"><span class="ico">▦</span><span class="label">部门管理</span></button>
+            <button class="nav-item" data-page="settings" title="系统设置"><span class="ico">⚙</span><span class="label">系统设置</span></button>
+          </div>
+        </div>
+      </nav>
       <div class="user-box">
         <div class="user-meta">
           <div class="user-avatar" id="user-avatar" title="">A</div>
           <strong id="user-name">—</strong>
         </div>
+        <div id="sidebar-theme" class="theme-switch compact" style="width:100%;margin-bottom:10px"></div>
         <button class="ghost" id="btn-logout">退出登录</button>
       </div>
     </aside>
@@ -64,7 +117,9 @@
           <h1 id="page-title">总览</h1>
           <p class="sub" id="page-sub">系统运行状态与近期告警</p>
         </div>
-        <div class="toolbar" id="page-actions"></div>
+        <div class="toolbar">
+          <div id="page-actions"></div>
+        </div>
       </div>
       <div id="page-root"></div>
     </main>
@@ -75,6 +130,6 @@
   </div>
   <div class="toast" id="toast"></div>
 
-  <script src="/assets/app.js?v=18"></script>
+  <script src="/assets/app.js?v=47"></script>
 </body>
 </html>

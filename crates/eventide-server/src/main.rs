@@ -4,9 +4,11 @@ mod api;
 mod auth;
 mod config;
 mod db;
+mod iam;
 mod ingress_api;
 mod kafka_ingress;
 mod notify_pipeline;
+mod password;
 mod scheduler;
 mod state;
 
@@ -47,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Db::open(&config.database_path).context("open sqlite")?;
     db.migrate().context("migrate sqlite")?;
+    db.seed_iam_if_empty(&config.auth.username, &config.auth.password)
+        .context("seed IAM")?;
 
     let state = Arc::new(AppState {
         db,

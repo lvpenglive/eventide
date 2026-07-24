@@ -3,7 +3,54 @@
   const TOKEN_KEY = "eventide_token";
   const USER_KEY = "eventide_user";
   const SIDEBAR_KEY = "eventide_sidebar_collapsed";
+  const NAV_GROUPS_KEY = "eventide_nav_groups";
   const ALERT_VIEW_KEY = "eventide_alert_view"; // cards | table
+  const THEME_KEY = "eventide_theme"; // light | dark | system
+
+  const PAGE_GROUP = {
+    overview: null,
+    alerts: "ops",
+    silences: "ops",
+    datasources: "config",
+    rules: "config",
+    ingress: "config",
+    channels: "notify",
+    enrich: "notify",
+    users: "system",
+    roles: "system",
+    departments: "system",
+    settings: "system",
+  };
+
+  const PAGE_PERM = {
+    overview: "overview:read",
+    alerts: "alerts:read",
+    silences: "silences:read",
+    datasources: "datasources:read",
+    rules: "rules:read",
+    ingress: "ingress:read",
+    channels: "channels:read",
+    enrich: "enrich:read",
+    users: "users:read",
+    roles: "roles:read",
+    departments: "departments:read",
+    settings: "settings:read",
+  };
+
+  const PAGE_ORDER = [
+    "overview",
+    "alerts",
+    "silences",
+    "datasources",
+    "rules",
+    "ingress",
+    "channels",
+    "enrich",
+    "users",
+    "roles",
+    "departments",
+    "settings",
+  ];
 
   const state = {
     page: "overview",
@@ -18,10 +65,39 @@
     channels: ["通知渠道", "Webhook · 钉钉 · 企微 · 飞书"],
     ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
     alerts: ["告警事件", "按状态浏览 · 点开看详情"],
-    enrich: ["告警丰富", "注解模板 · 标签映射 · Lookup 外表"],
+    enrich: ["告警丰富", "台账补字段 · 写描述 / IP / 级别"],
     silences: ["静默策略", "按规则或标签临时抑制通知"],
-    settings: ["系统设置", "运行配置与账号信息（只读）"],
+    users: ["用户管理", "账号 · 部门 · 角色"],
+    roles: ["权限管理", "角色与权限码"],
+    departments: ["部门管理", "组织架构"],
+    settings: ["系统设置", "外观主题 · 运行信息"],
   };
+
+  function can(perm) {
+    const perms = (state.me && state.me.permissions) || [];
+    return perms.includes("*") || perms.includes(perm);
+  }
+
+  function canPage(page) {
+    const need = PAGE_PERM[page];
+    return !need || can(need);
+  }
+
+  function firstAllowedPage() {
+    return PAGE_ORDER.find((p) => canPage(p)) || "settings";
+  }
+
+  function applyNavPermissions() {
+    document.querySelectorAll(".nav-item[data-page]").forEach((btn) => {
+      const ok = canPage(btn.dataset.page);
+      btn.hidden = !ok;
+      if (!ok) btn.classList.remove("active");
+    });
+    document.querySelectorAll(".nav-group").forEach((g) => {
+      const any = [...g.querySelectorAll(".nav-item[data-page]")].some((b) => !b.hidden);
+      g.hidden = !any;
+    });
+  }
 
   // ---------- API ----------
   function token() {
@@ -97,6 +173,7 @@
       av.title = name;
     }
     applySidebarState();
+    applyNavPermissions();
   }
 
   function applySidebarState() {
@@ -111,6 +188,82 @@
     const next = localStorage.getItem(SIDEBAR_KEY) === "1" ? "0" : "1";
     localStorage.setItem(SIDEBAR_KEY, next);
     applySidebarState();
+  }
+
+  // ---------- Theme ----------
+  function themePref() {
+    const p = localStorage.getItem(THEME_KEY);
+    return p === "light" || p === "dark" ? p : "system";
+  }
+
+  function resolveTheme(pref) {
+    const p = pref || themePref();
+    if (p === "light" || p === "dark") return p;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+
+  function applyTheme(pref) {
+    const p = pref === "light" || pref === "dark" ? pref : "system";
+    localStorage.setItem(THEME_KEY, p);
+    const resolved = resolveTheme(p);
+    document.documentElement.setAttribute("data-theme", resolved);
+    document.documentElement.setAttribute("data-theme-pref", p);
+    syncThemeControls();
+  }
+
+  function themeSwitchHtml(mode) {
+    const pref = themePref();
+    const items =
+      mode === "cards"
+        ? [
+            ["light", "浅色", "明亮工作台"],
+            ["dark", "深色", "夜间护眼"],
+            ["system", "跟随系统", "自动匹配 OS"],
+          ]
+        : [
+            ["light", "☀", "浅色"],
+            ["dark", "☾", "深色"],
+            ["system", "◐", "跟随系统"],
+          ];
+    if (mode === "cards") {
+      return `<div class="theme-cards">${items
+        .map(
+          ([v, title, desc]) =>
+            `<button type="button" class="theme-card${pref === v ? " on" : ""}" data-theme-set="${v}">
+              <strong>${title}</strong><span>${desc}</span>
+            </button>`
+        )
+        .join("")}</div>`;
+    }
+    return items
+      .map(
+        ([v, label, title]) =>
+          `<button type="button" class="${pref === v ? "on" : ""}" data-theme-set="${v}" title="${title}">${label}</button>`
+      )
+      .join("");
+  }
+
+  function bindThemeHost(el, mode) {
+    if (!el) return;
+    el.innerHTML = themeSwitchHtml(mode);
+    el.querySelectorAll("[data-theme-set]").forEach((btn) => {
+      btn.addEventListener("click", () => applyTheme(btn.dataset.themeSet));
+    });
+  }
+
+  function syncThemeControls() {
+    bindThemeHost(document.getElementById("login-theme"));
+    bindThemeHost(document.getElementById("sidebar-theme"));
+    const settingsHost = document.getElementById("settings-theme");
+    if (settingsHost) bindThemeHost(settingsHost, "cards");
+  }
+
+  bindThemeHost(document.getElementById("login-theme"));
+  bindThemeHost(document.getElementById("sidebar-theme"));
+  if (window.matchMedia) {
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+      if (themePref() === "system") applyTheme("system");
+    });
   }
 
   function logout(notify = true) {
@@ -129,7 +282,8 @@
       state.me = await api("/api/auth/me");
       localStorage.setItem(USER_KEY, state.me.username);
       showApp();
-      navigate(state.page);
+      const page = canPage(state.page) ? state.page : firstAllowedPage();
+      navigate(page);
     } catch {
       showLogin();
     }
@@ -150,7 +304,7 @@
       localStorage.setItem(USER_KEY, data.username);
       state.me = await api("/api/auth/me");
       showApp();
-      navigate("overview");
+      navigate(firstAllowedPage());
       toast("登录成功");
     } catch (ex) {
       err.textContent = ex.message || "登录失败";
@@ -161,14 +315,60 @@
   document.getElementById("btn-sidebar").addEventListener("click", () => toggleSidebar());
 
   // ---------- Navigation ----------
+  function loadNavGroups() {
+    try {
+      return JSON.parse(localStorage.getItem(NAV_GROUPS_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  function saveNavGroups(map) {
+    localStorage.setItem(NAV_GROUPS_KEY, JSON.stringify(map));
+  }
+
+  function applyNavGroups(forceOpenGroup) {
+    const saved = loadNavGroups();
+    document.querySelectorAll(".nav-group").forEach((g) => {
+      const id = g.dataset.group;
+      let open = saved[id];
+      if (open === undefined) open = true; // default expanded
+      if (forceOpenGroup && id === forceOpenGroup) open = true;
+      g.classList.toggle("open", !!open);
+    });
+  }
+
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => navigate(btn.dataset.page));
   });
+  document.querySelectorAll("[data-group-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.groupToggle;
+      const group = document.querySelector(`.nav-group[data-group="${id}"]`);
+      if (!group) return;
+      const next = !group.classList.contains("open");
+      group.classList.toggle("open", next);
+      const saved = loadNavGroups();
+      saved[id] = next;
+      saveNavGroups(saved);
+    });
+  });
 
   function navigate(page) {
+    if (!canPage(page)) {
+      page = firstAllowedPage();
+    }
     state.page = page;
+    applyNavPermissions();
     document.querySelectorAll(".nav-item").forEach((b) => {
       b.classList.toggle("active", b.dataset.page === page);
+    });
+    const gid = PAGE_GROUP[page];
+    applyNavGroups(gid || undefined);
+    // mark group containing active page
+    document.querySelectorAll(".nav-group").forEach((g) => {
+      const hasActive = !!g.querySelector(`.nav-item.active`);
+      g.classList.toggle("has-active", hasActive);
     });
     const [t, s] = titles[page] || [page, ""];
     document.getElementById("page-title").textContent = t;
@@ -176,6 +376,8 @@
     document.getElementById("page-actions").innerHTML = "";
     renderPage();
   }
+
+  applyNavGroups();
 
   async function renderPage() {
     const root = document.getElementById("page-root");
@@ -196,12 +398,17 @@
   const modal = document.getElementById("modal");
   const modalBody = document.getElementById("modal-body");
 
-  function openModal(html) {
+  function openModal(html, opts = {}) {
+    modalBody.classList.remove("wide", "xl");
+    // Default all modals to wide; pass { xl: true } for large forms.
+    if (opts.xl) modalBody.classList.add("xl");
+    else modalBody.classList.add("wide");
     modalBody.innerHTML = html;
     modal.classList.add("open");
   }
   function closeModal() {
     modal.classList.remove("open");
+    modalBody.classList.remove("wide", "xl");
     modalBody.innerHTML = "";
   }
   modal.addEventListener("click", (e) => {
@@ -611,104 +818,175 @@
     },
 
     async enrich(root) {
-      setActions(`
-        <button class="ghost" id="btn-add-lookup">新建 Lookup 外表</button>
-        <button class="primary" id="btn-add">新建丰富规则</button>`);
-      document.getElementById("btn-add").onclick = () => editEnrich();
-      document.getElementById("btn-add-lookup").onclick = () => editLookup();
+      const ENRICH_TAB_KEY = "eventide_enrich_tab";
       const [rows, lookups] = await Promise.all([api("/api/enrich"), api("/api/lookups")]);
       state.cache.lookups = lookups;
-      const kindLabel = (k) =>
-        ({
-          annotation_template: "注解模板",
-          label_map: "内联映射",
-          lookup: "Lookup 外表",
-        }[k] || k);
+      let tab = localStorage.getItem(ENRICH_TAB_KEY) || "rules";
+      if (tab !== "rules" && tab !== "lookups") tab = "rules";
+      // first visit with no ledger: nudge to lookups
+      if (!lookups.length && !rows.length && !localStorage.getItem(ENRICH_TAB_KEY)) {
+        tab = "lookups";
+      }
+
       const lookupName = (id) => {
         const t = lookups.find((x) => x.id === id);
         return t ? t.name : id ? id.slice(0, 8) + "…" : "—";
       };
+      const enrichWhat = (r) => {
+        const parts = [];
+        const ids =
+          r.lookup_table_ids && r.lookup_table_ids.length
+            ? r.lookup_table_ids
+            : r.lookup_table_id
+            ? [r.lookup_table_id]
+            : [];
+        if (ids.length) {
+          parts.push(`查 ${ids.map(lookupName).join("、")}`);
+        }
+        if (r.mappings && Object.keys(r.mappings).length) {
+          parts.push(`内联映射 ${Object.keys(r.mappings).length} 条`);
+        }
+        const ft = r.field_templates || {};
+        const writes = [];
+        if (ft.summary || (r.templates && r.templates.summary)) writes.push("描述");
+        if (ft.ip || ft.alertIp) writes.push("IP");
+        if (ft.severity) writes.push("级别");
+        if (ft.alertname) writes.push("名称");
+        if (writes.length) parts.push(`写${writes.join("/")}`);
+        else if (r.templates && Object.keys(r.templates).length) {
+          parts.push("写注解模板");
+        }
+        return parts.length ? parts.join(" · ") : "未配置动作";
+      };
+      const enrichScope = (r) => {
+        const m = r.matchers || {};
+        const keys = Object.keys(m);
+        if (!keys.length) return "全部告警";
+        return keys.map((k) => `${k}=${m[k]}`).join("，");
+      };
+
+      const setTab = (next) => {
+        localStorage.setItem(ENRICH_TAB_KEY, next);
+        renderPage();
+      };
+
+      const syncActions = () => {
+        if (tab === "lookups") {
+          setActions(`<button class="primary" id="btn-add-lookup">新建台账</button>`);
+          document.getElementById("btn-add-lookup").onclick = () => editLookup();
+        } else {
+          setActions(`<button class="ghost" id="btn-preview">试跑预览</button><button class="primary" id="btn-add">新建丰富规则</button>`);
+          document.getElementById("btn-preview").onclick = () => openEnrichPreviewModal({});
+          document.getElementById("btn-add").onclick = () => {
+            if (!lookups.length) {
+              toast("请先在「台账数据」里准备一张表", true);
+              setTab("lookups");
+              return;
+            }
+            editEnrich();
+          };
+        }
+      };
+      syncActions();
+
+      const rulesPanel = rows.length
+        ? `<table class="data"><thead><tr>
+              <th>名称</th><th>做什么</th><th>作用范围</th><th>状态</th><th></th>
+            </tr></thead>
+            <tbody>${rows
+              .map((r) => `<tr>
+              <td>${esc(r.name)}</td>
+              <td>${esc(enrichWhat(r))}</td>
+              <td>${esc(enrichScope(r))}</td>
+              <td><span class="badge ${r.enabled ? "on" : "off"}">${
+                r.enabled ? "启用" : "停用"
+              }</span></td>
+              <td class="actions">
+                <button data-edit="${r.id}">编辑</button>
+                <button class="danger" data-del="${r.id}">删除</button>
+              </td>
+            </tr>`)
+              .join("")}</tbody></table>`
+        : `<div class="enrich-empty">
+            <p><strong>还没有丰富规则</strong></p>
+            <p class="hint">规则会把台账里的主机名、联系人等信息写到告警描述 / IP / 级别上。</p>
+            ${
+              lookups.length
+                ? `<button class="primary" id="btn-empty-rule">新建第一条规则</button>`
+                : `<button class="primary" id="btn-empty-to-lookup">先去准备台账</button>`
+            }
+          </div>`;
+
+      const lookupsPanel = lookups.length
+        ? `<table class="data"><thead><tr>
+              <th>名称</th><th>用哪个标签匹配</th><th>行数</th><th>说明</th><th>状态</th><th></th>
+            </tr></thead>
+            <tbody>${lookups
+              .map(
+                (t) => `<tr>
+              <td>${esc(t.name)}</td>
+              <td class="mono">${esc(t.key_label || "ip")}</td>
+              <td>${Object.keys(t.rows || {}).length}</td>
+              <td>${esc(t.description || "—")}</td>
+              <td><span class="badge ${t.enabled ? "on" : "off"}">${
+                t.enabled ? "启用" : "停用"
+              }</span></td>
+              <td class="actions">
+                <button data-edit-lookup="${t.id}">编辑</button>
+                <button class="danger" data-del-lookup="${t.id}">删除</button>
+              </td>
+            </tr>`
+              )
+              .join("")}</tbody></table>`
+        : `<div class="enrich-empty">
+            <p><strong>还没有台账数据</strong></p>
+            <p class="hint">台账像一张对照表：用告警里的 IP（或其它标签）查出主机名、机房、联系人等，再写回告警。</p>
+            <button class="primary" id="btn-empty-lookup">新建台账</button>
+          </div>`;
+
       root.innerHTML = `
-      <div class="panel" style="margin-bottom:1rem">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:0.75rem">
-          <h3 style="margin:0;font-size:1rem">Lookup 外表</h3>
-          <span class="hint" style="margin:0">可被多条丰富规则复用的键值表（如 CMDB / 主机台账）</span>
+        <div class="enrich-guide panel">
+          <div class="enrich-guide-steps">
+            <div class="enrich-guide-step"><span class="n">1</span><div><strong>准备台账</strong><p>导入主机 / 设备对照表</p></div></div>
+            <div class="enrich-guide-step"><span class="n">2</span><div><strong>建丰富规则</strong><p>勾选要用的台账</p></div></div>
+            <div class="enrich-guide-step"><span class="n">3</span><div><strong>写到告警上</strong><p>配置描述、IP、级别；保存前可弹窗试跑</p></div></div>
+          </div>
+          ${
+            !lookups.length
+              ? `<button class="primary" id="btn-guide-start">从台账开始</button>`
+              : `<button class="primary" id="btn-guide-rule">新建丰富规则</button>`
+          }
         </div>
-        ${
-          lookups.length
-            ? `<table class="data"><thead><tr>
-                <th>名称</th><th>匹配键</th><th>行数</th><th>说明</th><th>状态</th><th></th>
-              </tr></thead>
-              <tbody>${lookups
-                .map(
-                  (t) => `<tr>
-                <td>${esc(t.name)}</td>
-                <td class="mono">${esc(t.key_label || "instance")}</td>
-                <td>${Object.keys(t.rows || {}).length}</td>
-                <td>${esc(t.description || "—")}</td>
-                <td><span class="badge ${t.enabled ? "on" : "off"}">${
-                    t.enabled ? "启用" : "停用"
-                  }</span></td>
-                <td class="actions">
-                  <button data-edit-lookup="${t.id}">编辑</button>
-                  <button class="danger" data-del-lookup="${t.id}">删除</button>
-                </td>
-              </tr>`
-                )
-                .join("")}</tbody></table>`
-            : `<div class="empty">暂无外表。先建一张 Lookup 表，再在丰富规则中选择「Lookup 外表」引用。</div>`
-        }
-      </div>
-      <div class="panel">
-        <h3 style="margin:0 0 0.75rem;font-size:1rem">丰富规则</h3>
-        ${
-          rows.length
-            ? `<table class="data"><thead><tr>
-                <th>名称</th><th>类型</th><th>优先级</th><th>匹配条件</th><th>摘要</th><th>状态</th><th></th>
-              </tr></thead>
-              <tbody>${rows
-                .map((r) => {
-                  let summary = "";
-                  if (r.kind === "label_map") {
-                    summary = `按 ${r.match_key || "—"} 内联 · ${
-                      Object.keys(r.mappings || {}).length
-                    } 条`;
-                  } else if (r.kind === "lookup") {
-                    summary = `外表 ${lookupName(r.lookup_table_id)} · 键 ${
-                      r.match_key || "(用外表默认)"
-                    }`;
-                  } else {
-                    summary = `${Object.keys(r.templates || {}).length} 个模板`;
-                  }
-                  const matchers = Object.keys(r.matchers || {}).length
-                    ? esc(JSON.stringify(r.matchers))
-                    : "全部";
-                  return `<tr>
-                <td>${esc(r.name)}</td>
-                <td>${esc(kindLabel(r.kind))}</td>
-                <td class="mono">${r.priority}</td>
-                <td class="mono" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">${matchers}</td>
-                <td>${esc(summary)}</td>
-                <td><span class="badge ${r.enabled ? "on" : "off"}">${
-                    r.enabled ? "启用" : "停用"
-                  }</span></td>
-                <td class="actions">
-                  <button data-edit="${r.id}">编辑</button>
-                  <button class="danger" data-del="${r.id}">删除</button>
-                </td>
-              </tr>`;
-                })
-                .join("")}</tbody></table>`
-            : `<div class="empty">
-                暂无丰富规则。可用注解模板、内联映射，或引用上方 Lookup 外表。
-              </div>`
-        }
-      </div>
-      <p class="hint" style="margin-top:0.75rem">
-        变量：<code>{{labels.x}}</code> · <code>{{annotations.x}}</code> ·
-        <code>{{value}}</code> · <code>{{severity}}</code> · <code>{{status}}</code> ·
-        <code>{{rule.name}}</code>。丰富在 fingerprint 之后、静默/通知之前执行。
-      </p>`;
+        <div class="enrich-tabs" role="tablist">
+          <button type="button" class="enrich-tab ${
+            tab === "rules" ? "on" : ""
+          }" data-tab="rules" role="tab">丰富规则${
+            rows.length ? ` · ${rows.length}` : ""
+          }</button>
+          <button type="button" class="enrich-tab ${
+            tab === "lookups" ? "on" : ""
+          }" data-tab="lookups" role="tab">台账数据${
+            lookups.length ? ` · ${lookups.length}` : ""
+          }</button>
+        </div>
+        <div class="panel enrich-tab-panel">
+          ${tab === "rules" ? rulesPanel : lookupsPanel}
+        </div>`;
+
+      root.querySelectorAll(".enrich-tab").forEach((btn) => {
+        btn.onclick = () => setTab(btn.dataset.tab);
+      });
+      const guideStart = document.getElementById("btn-guide-start");
+      if (guideStart) guideStart.onclick = () => setTab("lookups");
+      const guideRule = document.getElementById("btn-guide-rule");
+      if (guideRule) guideRule.onclick = () => editEnrich();
+      const emptyRule = document.getElementById("btn-empty-rule");
+      if (emptyRule) emptyRule.onclick = () => editEnrich();
+      const emptyToLookup = document.getElementById("btn-empty-to-lookup");
+      if (emptyToLookup) emptyToLookup.onclick = () => setTab("lookups");
+      const emptyLookup = document.getElementById("btn-empty-lookup");
+      if (emptyLookup) emptyLookup.onclick = () => editLookup();
+
       const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
       const lookupById = Object.fromEntries(lookups.map((t) => [t.id, t]));
       root.querySelectorAll("[data-edit]").forEach((b) => {
@@ -727,7 +1005,7 @@
       });
       root.querySelectorAll("[data-del-lookup]").forEach((b) => {
         b.onclick = async () => {
-          if (!confirm("确认删除该 Lookup 外表？引用它的丰富规则将失效。")) return;
+          if (!confirm("确认删除该台账？引用它的丰富规则将失效。")) return;
           await api(`/api/lookups/${b.dataset.delLookup}`, { method: "DELETE" });
           toast("已删除");
           renderPage();
@@ -771,19 +1049,189 @@
     async settings(root) {
       const me = await api("/api/auth/me");
       state.me = me;
+      applyNavPermissions();
+      const perms = (me.permissions || []).join(", ") || "—";
       root.innerHTML = `
-        <div class="panel" style="max-width:640px">
+        <div class="panel" style="max-width:720px;margin-bottom:16px">
+          <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
+          <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
+          <div id="settings-theme"></div>
+        </div>
+        <div class="panel" style="max-width:720px">
           <h3 style="margin:0 0 1rem;font-size:1rem">运行信息</h3>
-          <div class="field"><label>当前用户</label><div>${esc(me.username)}</div></div>
+          <div class="field"><label>当前用户</label><div>${esc(me.display_name || me.username)}（${esc(
+        me.username
+      )}）</div></div>
+          <div class="field"><label>权限</label><div class="mono" style="font-size:12px;word-break:break-all">${esc(
+            perms
+          )}</div></div>
           <div class="field"><label>监听地址</label><div class="mono">${esc(me.listen)}</div></div>
           <div class="field"><label>数据库</label><div class="mono">${esc(me.database_path)}</div></div>
           <div class="field"><label>静态资源目录</label><div class="mono">${esc(me.static_dir)}</div></div>
           <div class="field"><label>调度周期</label><div>${me.scheduler_tick_seconds} 秒</div></div>
           <div class="field"><label>Token 有效期</label><div>${me.token_ttl_hours} 小时</div></div>
           <p style="color:var(--muted);font-size:0.88rem;margin:1rem 0 0">
-            账号密码与 JWT 密钥请修改 <code>eventide.toml</code> 中的 <code>[auth]</code> 段后重启服务。
+            账号请在「用户管理」维护。JWT 密钥与有效期见 <code>eventide.toml</code> 的 <code>[auth]</code> 段（<code>jwt_secret</code> / <code>token_ttl_hours</code>）；首次空库会用其中的 username/password 种子管理员。
           </p>
         </div>`;
+      bindThemeHost(document.getElementById("settings-theme"), "cards");
+    },
+
+    async users(root) {
+      const canWrite = can("users:write");
+      setActions(
+        canWrite ? `<button class="primary" id="btn-add">新建用户</button>` : ""
+      );
+      if (canWrite) document.getElementById("btn-add").onclick = () => editUser();
+      const [rows, roles, depts] = await Promise.all([
+        api("/api/users"),
+        api("/api/roles"),
+        api("/api/departments"),
+      ]);
+      state.cache.roles = roles;
+      state.cache.departments = depts;
+      const roleMap = Object.fromEntries(roles.map((r) => [r.id, r.name]));
+      const deptMap = Object.fromEntries(depts.map((d) => [d.id, d.name]));
+      root.innerHTML = `<div class="panel">${
+        rows.length
+          ? `<table class="data"><thead><tr><th>用户名</th><th>显示名</th><th>部门</th><th>角色</th><th>状态</th><th></th></tr></thead>
+            <tbody>${rows
+              .map((u) => {
+                const roleNames = (u.role_ids || [])
+                  .map((id) => roleMap[id] || id.slice(0, 8))
+                  .join("、") || "—";
+                const dept = u.department_id ? deptMap[u.department_id] || "—" : "—";
+                return `<tr>
+              <td class="mono">${esc(u.username)}</td>
+              <td>${esc(u.display_name || "—")}</td>
+              <td>${esc(dept)}</td>
+              <td>${esc(roleNames)}</td>
+              <td><span class="badge ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span></td>
+              <td class="actions">${
+                canWrite
+                  ? `<button data-edit="${u.id}">编辑</button>
+                <button data-pw="${u.id}">重置密码</button>
+                <button class="danger" data-del="${u.id}">删除</button>`
+                  : ""
+              }</td></tr>`;
+              })
+              .join("")}</tbody></table>`
+          : `<div class="empty">暂无用户。</div>`
+      }</div>`;
+      root.querySelectorAll("[data-edit]").forEach((b) => {
+        b.onclick = () => editUser(rows.find((x) => x.id === b.dataset.edit));
+      });
+      root.querySelectorAll("[data-pw]").forEach((b) => {
+        b.onclick = () => resetUserPassword(b.dataset.pw);
+      });
+      root.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("确认删除该用户？")) return;
+          try {
+            await api(`/api/users/${b.dataset.del}`, { method: "DELETE" });
+            toast("已删除");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      });
+    },
+
+    async roles(root) {
+      const canWrite = can("roles:write");
+      setActions(canWrite ? `<button class="primary" id="btn-add">新建角色</button>` : "");
+      if (canWrite) document.getElementById("btn-add").onclick = () => editRole();
+      const [rows, catalog] = await Promise.all([api("/api/roles"), api("/api/permissions")]);
+      state.cache.permCatalog = catalog;
+      root.innerHTML = `<div class="panel">${
+        rows.length
+          ? `<table class="data"><thead><tr><th>名称</th><th>说明</th><th>权限</th><th></th></tr></thead>
+            <tbody>${rows
+              .map((r) => {
+                const perms = (r.permissions || []).join(", ") || "—";
+                return `<tr>
+              <td>${esc(r.name)}${r.is_system ? ' <span class="badge on">系统</span>' : ""}</td>
+              <td>${esc(r.description || "—")}</td>
+              <td class="mono" style="font-size:12px;max-width:360px;word-break:break-all">${esc(
+                perms
+              )}</td>
+              <td class="actions">${
+                canWrite
+                  ? `<button data-edit="${r.id}">编辑</button>
+                ${
+                  r.is_system
+                    ? ""
+                    : `<button class="danger" data-del="${r.id}">删除</button>`
+                }`
+                  : ""
+              }</td></tr>`;
+              })
+              .join("")}</tbody></table>`
+          : `<div class="empty">暂无角色。</div>`
+      }</div>`;
+      root.querySelectorAll("[data-edit]").forEach((b) => {
+        b.onclick = () => editRole(rows.find((x) => x.id === b.dataset.edit));
+      });
+      root.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("确认删除该角色？")) return;
+          try {
+            await api(`/api/roles/${b.dataset.del}`, { method: "DELETE" });
+            toast("已删除");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      });
+    },
+
+    async departments(root) {
+      const canWrite = can("departments:write");
+      setActions(canWrite ? `<button class="primary" id="btn-add">新建部门</button>` : "");
+      if (canWrite) document.getElementById("btn-add").onclick = () => editDepartment();
+      const rows = await api("/api/departments");
+      state.cache.departments = rows;
+      const byId = Object.fromEntries(rows.map((d) => [d.id, d]));
+      root.innerHTML = `<div class="panel">${
+        rows.length
+          ? `<table class="data"><thead><tr><th>名称</th><th>上级</th><th>排序</th><th>状态</th><th></th></tr></thead>
+            <tbody>${rows
+              .map((d) => {
+                const parent = d.parent_id
+                  ? (byId[d.parent_id] && byId[d.parent_id].name) || "—"
+                  : "—";
+                return `<tr>
+              <td>${esc(d.name)}</td>
+              <td>${esc(parent)}</td>
+              <td>${d.sort_order}</td>
+              <td><span class="badge ${d.enabled ? "on" : "off"}">${d.enabled ? "启用" : "停用"}</span></td>
+              <td class="actions">${
+                canWrite
+                  ? `<button data-edit="${d.id}">编辑</button>
+                <button class="danger" data-del="${d.id}">删除</button>`
+                  : ""
+              }</td></tr>`;
+              })
+              .join("")}</tbody></table>`
+          : `<div class="empty">暂无部门。</div>`
+      }</div>`;
+      root.querySelectorAll("[data-edit]").forEach((b) => {
+        b.onclick = () => editDepartment(rows.find((x) => x.id === b.dataset.edit));
+      });
+      root.querySelectorAll("[data-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("确认删除该部门？")) return;
+          try {
+            await api(`/api/departments/${b.dataset.del}`, { method: "DELETE" });
+            toast("已删除");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      });
     },
   };
 
@@ -1123,7 +1571,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-silence">据此静默</button>
         <button type="button" class="primary" id="m-close">关闭</button>
-      </div>`);
+      </div>`, { xl: true });
     document.getElementById("m-close").onclick = closeModal;
     document.getElementById("m-silence").onclick = () => {
       closeModal();
@@ -1168,7 +1616,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
         <button type="button" class="primary" id="m-run">推送</button>
-      </div>`);
+      </div>`, { wide: true });
     document.getElementById("m-cancel").onclick = closeModal;
     document.getElementById("m-run").onclick = async () => {
       const scenario =
@@ -1290,7 +1738,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
         <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+      </div>`, { wide: true });
 
     const form = document.getElementById("f");
     const syncKind = () => {
@@ -1403,7 +1851,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
         <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+      </div>`, { wide: true });
     document.getElementById("m-cancel").onclick = closeModal;
     document.getElementById("f").onsubmit = async (e) => {
       e.preventDefault();
@@ -1541,7 +1989,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
         <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+      </div>`, { wide: true });
     document.getElementById("m-cancel").onclick = closeModal;
     document.getElementById("f").onsubmit = async (e) => {
       e.preventDefault();
@@ -1679,8 +2127,37 @@
           <div class="seg">
             <div class="seg-title">字段映射（可选）</div>
             <div class="hint" style="margin-bottom:12px">
-              填写对方 JSON 的点分路径（如 <code>data.title</code>）。任一路径非空即启用映射，并优先于内置 Generic/拨测解析。
+              填写对方 JSON 的点分路径（如 <code>data.title</code>）。可用变换截取字符串，例如
+              <code>sourceciname|before:_</code> → <code>82.12.161.32</code>。
+              任一路径非空即启用映射，并优先于内置 Generic/拨测解析。
             </div>
+            <details class="map-help">
+              <summary>字段说明（点开查看）</summary>
+              <div class="map-help-body">
+                <p>路径填原始 JSON 字段；可用 <code>|before:</code> / <code>|after:</code> / <code>|split:SEP:INDEX</code> / <code>|between:起点:终点</code> 截取。</p>
+                <table class="map-help-table">
+                  <thead>
+                    <tr><th>配置项</th><th>作用</th><th>写入结果</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr><td><code>map_list</code></td><td>告警数组路径，空=整条消息当一条</td><td>—</td></tr>
+                    <tr><td><code>map_status</code></td><td>状态字段</td><td>firing / resolved</td></tr>
+                    <tr><td><code>map_fire</code></td><td>视为触发的取值（逗号分隔）</td><td>—</td></tr>
+                    <tr><td><code>map_resolve</code></td><td>视为恢复的取值</td><td>—</td></tr>
+                    <tr><td><code>map_name</code></td><td>告警名称</td><td><code>labels.alertname</code></td></tr>
+                    <tr><td><code>map_description</code></td><td>告警描述</td><td><code>annotations.summary</code> / <code>description</code></td></tr>
+                    <tr><td><code>map_ip</code></td><td>告警 IP</td><td><code>labels.ip</code> / <code>alertIp</code> / <code>instance</code></td></tr>
+                    <tr><td><code>map_value</code></td><td>当前值</td><td><code>value</code></td></tr>
+                    <tr><td><code>map_fingerprint</code></td><td>去重标识</td><td><code>fingerprint</code></td></tr>
+                    <tr><td><code>map_severity</code></td><td>级别原始值</td><td><code>labels.severity</code> + 引擎级别</td></tr>
+                    <tr><td><code>map_critical</code></td><td>哪些取值算严重</td><td>→ Critical</td></tr>
+                    <tr><td><code>map_labels</code></td><td>额外标签，<code>目标标签:源路径,...</code></td><td>对应 <code>labels.*</code></td></tr>
+                    <tr><td><code>map_enabled</code></td><td>强制开启映射</td><td>—</td></tr>
+                  </tbody>
+                </table>
+                <p class="hint" style="margin:10px 0 0">引擎另支持 <code>map_warning</code>（警告取值列表），可在高级 options 中配置；控制台暂无单独输入框。</p>
+              </div>
+            </details>
             <div class="field">
               <label class="check-row">
                 <input type="checkbox" name="map_enabled" ${mapOn ? "checked" : ""} />
@@ -1726,7 +2203,8 @@
             <div class="row">
               <div class="field">
                 <label>告警 IP map_ip</label>
-                <input name="map_ip" placeholder="host / target.ip" value="${esc(opt.map_ip || "")}" />
+                <input name="map_ip" placeholder="sourceciname|before:_" value="${esc(opt.map_ip || "")}" />
+                <div class="hint"><code>before:_</code> / <code>after:_</code> / <code>split:_:0</code> / <code>between:起点:终点</code></div>
               </div>
               <div class="field">
                 <label>当前值 map_value</label>
@@ -1781,7 +2259,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
         <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+      </div>`, { wide: true });
 
     const form = document.getElementById("f");
     const syncKind = () => {
@@ -1924,7 +2402,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-test">试推送</button>
         <button type="button" class="primary" id="m-close">完成</button>
-      </div>`);
+      </div>`, { wide: true });
     document.querySelectorAll("#modal [data-copy]").forEach((b) => {
       b.onclick = async () => {
         await navigator.clipboard.writeText(b.dataset.copy);
@@ -1942,247 +2420,1130 @@
   }
 
   async function editLookup(row) {
+    const initialText =
+      row && Object.keys(row.rows || {}).length
+        ? formatLookupText(row.key_label || "ip", row.rows)
+        : "";
     openModal(`
       <div class="modal-head">
-        <h3>${row ? "编辑 Lookup 外表" : "新建 Lookup 外表"}</h3>
-        <p class="desc">共享键值表，供丰富规则以 Lookup 类型引用。</p>
+        <h3>${row ? "编辑台账数据" : "新建台账数据"}</h3>
+        <p class="desc">第一列是匹配键（如 IP），后面各列会补到告警上。表头可用 <code>$列名</code>，键列前加 <code>#</code>；列用 Tab 或空格分隔。</p>
       </div>
       <form id="f" class="modal-body">
         <div class="field"><label>名称</label>
-          <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 CMDB 主机台账" />
+          <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 主机台账" />
         </div>
         <div class="field"><label>说明（可选）</label>
           <input name="description" value="${esc(row?.description || "")}" placeholder="来源、用途" />
         </div>
-        <div class="field"><label>默认匹配标签键 key_label</label>
-          <input name="key_label" required value="${esc(row?.key_label || "instance")}" placeholder="instance" />
-          <div class="hint">规则未填 match_key 时使用此键，从告警 labels 取值查表。</div>
+        <div class="field"><label>用告警的哪个标签来匹配</label>
+          <input name="key_label" id="lookup-key-label" required value="${esc(
+            row?.key_label || "ip"
+          )}" placeholder="ip" />
+          <div class="hint">从告警 labels 取这个键去查表。告警 IP 在 <code>instance</code> 里就填 instance；表头是 <code>$ip</code> 时通常填 ip。</div>
         </div>
-        <div class="field"><label>行数据 JSON</label>
-          <textarea name="rows" rows="10" required placeholder='{"10.0.0.1":{"owner":"alice","team":"sre","biz":"pay"}}'>${esc(
-            Object.keys(row?.rows || {}).length ? JSON.stringify(row.rows, null, 2) : ""
+        <div class="field"><label>台账内容</label>
+          <div style="display:flex;gap:0.5rem;margin-bottom:0.4rem;flex-wrap:wrap">
+            <label class="ghost" style="display:inline-flex;align-items:center;gap:0.35rem;cursor:pointer;padding:0.35rem 0.7rem;border:1px solid var(--line);border-radius:6px">
+              导入文件
+              <input type="file" id="lookup-file" accept=".lookup,.txt,.tsv,text/plain" style="display:none" />
+            </label>
+            <button type="button" class="ghost" id="lookup-to-json">转为 JSON 预览</button>
+          </div>
+          <textarea name="text" id="lookup-text" rows="12" required spellcheck="false" placeholder="#$ip&#9;$cabinet&#9;$brand&#9;$usagedesc&#10;21.13.0.32&#9;生产中心机房SC-T06&#9;华为&#9;电子渠道综合前置">${esc(
+            initialText
           )}</textarea>
-          <div class="hint">键为标签值，值为要写入 annotations 的字段。</div>
+          <div class="hint">也支持 JSON：<code>{"21.1.11.11":{"主机名":"DX-AAM"}}</code></div>
+          <pre id="lookup-parse-hint" class="mono" style="margin:0.4rem 0 0;font-size:0.78rem;color:var(--muted);white-space:pre-wrap"></pre>
         </div>
-        <label class="check"><input type="checkbox" name="enabled" ${
+        <label class="check-row"><input type="checkbox" name="enabled" ${
           row?.enabled !== false ? "checked" : ""
-        } /> 启用</label>
+        } /> <span>启用</span></label>
       </form>
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+        <button class="primary" type="submit" form="f">保存台账</button>
+      </div>`, { wide: true });
     document.getElementById("m-cancel").onclick = closeModal;
+
+    const textEl = document.getElementById("lookup-text");
+    const keyEl = document.getElementById("lookup-key-label");
+    const hintEl = document.getElementById("lookup-parse-hint");
+
+    const refreshHint = () => {
+      try {
+        const parsed = parseLookupClient(textEl.value);
+        hintEl.textContent = `已识别 ${parsed.count} 行 · 键列 ${
+          parsed.keyHint || "—"
+        } · 共 ${(parsed.columns || []).length || "?"} 列`;
+        hintEl.style.color = "var(--muted)";
+      } catch (err) {
+        hintEl.textContent = String(err.message || err);
+        hintEl.style.color = "var(--crit-soft, #c44)";
+      }
+    };
+    textEl.addEventListener("input", refreshHint);
+    refreshHint();
+
+    document.getElementById("lookup-file").onchange = async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      const text = await file.text();
+      textEl.value = text;
+      try {
+        const parsed = parseLookupClient(text);
+        if (parsed.keyHint) keyEl.value = parsed.keyHint;
+        if (!document.querySelector('#f [name="name"]').value) {
+          document.querySelector('#f [name="name"]').value = file.name.replace(
+            /\.(lookup|txt|tsv)$/i,
+            ""
+          );
+        }
+        refreshHint();
+        toast(`已导入 ${parsed.count} 行`);
+      } catch (err) {
+        refreshHint();
+        toast(err.message || String(err), true);
+      }
+    };
+
+    document.getElementById("lookup-to-json").onclick = () => {
+      try {
+        const parsed = parseLookupClient(textEl.value);
+        textEl.value = JSON.stringify(parsed.rows, null, 2);
+        refreshHint();
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    };
+
     document.getElementById("f").onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
-      let rows = {};
+      const text = String(fd.get("text") || "");
+      let parsed;
       try {
-        rows = JSON.parse(String(fd.get("rows") || "{}"));
+        parsed = parseLookupClient(text);
       } catch (err) {
-        toast("行数据 JSON 无效：" + err.message, true);
+        toast(err.message || String(err), true);
+        return;
+      }
+      if (!parsed.count) {
+        toast("未识别到数据行，请检查表头与分隔符", true);
         return;
       }
       const body = {
         name: fd.get("name"),
         description: fd.get("description") || "",
-        key_label: fd.get("key_label") || "instance",
-        rows,
+        key_label: fd.get("key_label") || parsed.keyHint || "ip",
+        rows: parsed.rows,
+        text,
+        sync_key_from_text: false,
         enabled: e.target.querySelector('[name="enabled"]').checked,
       };
-      if (row) {
-        await api(`/api/lookups/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      } else {
-        await api("/api/lookups", { method: "POST", body: JSON.stringify(body) });
+      try {
+        if (row) {
+          await api(`/api/lookups/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+        } else {
+          await api("/api/lookups", { method: "POST", body: JSON.stringify(body) });
+        }
+      } catch (err) {
+        toast(err.message || String(err), true);
+        return;
       }
       closeModal();
-      toast("已保存");
+      toast(`已保存 ${parsed.count} 行`);
+      localStorage.setItem("eventide_enrich_tab", "lookups");
       renderPage();
     };
   }
 
-  async function editEnrich(row) {
+  /** Client-side parse for Omnibus .lookup or JSON rows. */
+  function parseLookupClient(text) {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) throw new Error("外表内容为空");
+    if (trimmed.startsWith("{")) {
+      const rows = JSON.parse(trimmed);
+      return { keyHint: null, rows, count: Object.keys(rows).length };
+    }
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((l) => l.replace(/\s+$/, ""))
+      .filter((l) => {
+        const t = l.trim();
+        return t && !t.startsWith("//") && !t.startsWith(";");
+      });
+    if (!lines.length) throw new Error("lookup 文件为空");
+
+    const splitFields = (line) => {
+      const s = String(line || "").trim();
+      if (!s) return [];
+      if (s.includes("\t")) return s.split("\t").map((x) => x.trim());
+      return s.split(/\s+/).filter(Boolean);
+    };
+
+    const splitRow = (line, ncols) => {
+      let fields = splitFields(line);
+      if (!ncols) return fields;
+      if (fields.length === ncols) return fields;
+      if (String(line).includes("\t") || fields.length < ncols) {
+        while (fields.length < ncols) fields.push("");
+        return fields.slice(0, ncols);
+      }
+      if (ncols === 1) return [fields.join(" ")];
+      if (ncols === 2) return [fields[0], fields.slice(1).join(" ")];
+      const last = fields[fields.length - 1];
+      const midCols = ncols - 2;
+      const midTokens = fields.slice(1, -1);
+      const out = [fields[0]];
+      if (midTokens.length <= midCols) {
+        out.push(...midTokens);
+        while (out.length < ncols - 1) out.push("");
+      } else {
+        const keep = midCols - 1;
+        out.push(...midTokens.slice(0, keep));
+        out.push(midTokens.slice(keep).join(" "));
+      }
+      out.push(last);
+      return out;
+    };
+
+    const header = splitFields(lines[0]);
+    let keyIdx = 0;
+    let foundKey = false;
+    const names = header.map((raw, i) => {
+      let s = String(raw).trim();
+      const isKey = s.startsWith("#");
+      if (isKey) {
+        keyIdx = i;
+        foundKey = true;
+      }
+      s = s.replace(/^#/, "").replace(/^\$/, "").trim();
+      if (!s) throw new Error(`第 ${i + 1} 列表头无效`);
+      return s;
+    });
+    if (!foundKey) keyIdx = 0;
+    const keyHint = names[keyIdx];
+    const rows = {};
+    for (let li = 1; li < lines.length; li++) {
+      const fields = splitRow(lines[li], names.length);
+      if (fields.every((f) => !String(f).trim())) continue;
+      if (fields.length <= keyIdx) {
+        throw new Error(
+          `第 ${li + 1} 行字段不足（表头 ${names.length} 列）。请用空格或 Tab 分隔列。`
+        );
+      }
+      const key = String(fields[keyIdx] || "").trim();
+      if (!key) continue;
+      const attrs = {};
+      names.forEach((name, i) => {
+        if (i === keyIdx) return;
+        const val = String(fields[i] || "").trim();
+        if (val) attrs[name] = val;
+      });
+      rows[key] = attrs;
+    }
+    return { keyHint, rows, count: Object.keys(rows).length, columns: names };
+  }
+
+  function formatLookupText(keyLabel, rows) {
+    const attrKeys = new Set();
+    Object.values(rows || {}).forEach((attrs) => {
+      Object.keys(attrs || {}).forEach((k) => attrKeys.add(k));
+    });
+    const cols = [...attrKeys].sort();
+    const header = [`#$${keyLabel}`, ...cols.map((k) => `$${k}`)].join("\t");
+    const body = Object.entries(rows || {})
+      .map(([key, attrs]) => [key, ...cols.map((c) => attrs[c] || "")].join("\t"))
+      .join("\n");
+    return body ? `${header}\n${body}\n` : `${header}\n`;
+  }
+
+
+  async function openEnrichPreviewModal(opts = {}) {
+    const draft = opts.draft || null;
+    const ruleId = opts.ruleId || null;
+    const fromEditor = !!opts.fromEditor;
+    const samplePayload = `{
+  "severity": 4,
+  "summary": "麒麟主机当前系统磁盘[vdb] IO使用百分比为: 97.49 %, 已超过90%阈值",
+  "lastoccurrence": "2026-07-18 08:39:33",
+  "status": 2,
+  "sourceid": 1,
+  "sourceeventid": "71978",
+  "sourceciname": "82.12.161.32_kylin",
+  "sourcealertkey": "vfs.dev.util[vdb]",
+  "sourceseverity": "High",
+  "sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]_Application:Disk vdb",
+  "ciinstance": "Application:Disk vdb",
+  "eventtypeid": "*UNKNOWN*"
+}`;
+    let savedPayload = "";
+    try {
+      const stash = JSON.parse(sessionStorage.getItem("eventide_enrich_preview") || "{}");
+      savedPayload = stash.payload || "";
+    } catch (_) {}
+
+    const [rules, ingressRoutes] = await Promise.all([
+      api("/api/enrich"),
+      api("/api/ingress").catch(() => []),
+    ]);
+    const mappedIngress = (ingressRoutes || []).filter((r) => {
+      const o = r.options || {};
+      return !!(
+        o.map_status ||
+        o.map_name ||
+        o.map_description ||
+        o.map_ip ||
+        o.map_fingerprint ||
+        o.map_enabled === "1"
+      );
+    });
+    const defaultIngress =
+      mappedIngress.find((r) => /zabbix/i.test(r.name || "")) || mappedIngress[0] || null;
+
+    openModal(
+      `
+      <div class="modal-head">
+        <h3>试跑预览</h3>
+        <p class="desc">粘贴原始告警 JSON，先按接入字段映射解析，再套丰富规则看结果。</p>
+      </div>
+      <div class="modal-body">
+        ${
+          draft
+            ? `<div class="enrich-preview-banner panel" style="margin-bottom:12px">
+                使用<strong>当前编辑草稿</strong>${
+                  draft.name ? `「${esc(draft.name)}」` : ""
+                }（未保存）
+              </div>`
+            : ""
+        }
+        <div class="enrich-preview-layout">
+          <div>
+            <div class="field">
+              <label>字段映射接入</label>
+              <select id="pv-ingress">
+                <option value="">自动 / 仅 labels 对象</option>
+                ${mappedIngress
+                  .map(
+                    (r) =>
+                      `<option value="${esc(r.id)}" ${
+                        defaultIngress && r.id === defaultIngress.id ? "selected" : ""
+                      }>${esc(r.name)}（${esc(r.kind)}）</option>`
+                  )
+                  .join("")}
+              </select>
+            </div>
+            <div class="field" ${draft ? "hidden" : ""}>
+              <label>丰富规则</label>
+              <select id="pv-rule">
+                <option value="__all__">全部已启用规则（按优先级）</option>
+                ${rules
+                  .map(
+                    (r) =>
+                      `<option value="${esc(r.id)}" ${
+                        ruleId && r.id === ruleId ? "selected" : ""
+                      }>${esc(r.name)}${r.enabled === false ? "（已停用）" : ""}</option>`
+                  )
+                  .join("")}
+              </select>
+            </div>
+            <div class="field">
+              <label>原始告警 JSON</label>
+              <textarea id="pv-payload" rows="14" class="mono">${esc(
+                savedPayload || samplePayload
+              )}</textarea>
+            </div>
+          </div>
+          <div>
+            <div id="preview-summary" class="summary-box">点「预览丰富结果」查看</div>
+            <div class="preview-metrics">
+              <div class="box"><div class="hint">告警 IP</div><div id="preview-ip" class="mono">—</div></div>
+              <div class="box"><div class="hint">级别</div><div id="preview-sev" class="mono">—</div></div>
+              <div class="box"><div class="hint">名称</div><div id="preview-name" class="mono">—</div></div>
+            </div>
+            <pre id="preview-out" class="mono enrich-preview-json"></pre>
+          </div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        ${
+          fromEditor
+            ? `<button type="button" class="ghost" id="pv-back-edit">返回编辑</button>`
+            : `<button type="button" class="ghost" id="pv-close">关闭</button>`
+        }
+        <button type="button" class="primary" id="pv-run">预览丰富结果</button>
+      </div>
+    `,
+      { xl: true }
+    );
+
+    const persistPayload = () => {
+      try {
+        sessionStorage.setItem(
+          "eventide_enrich_preview",
+          JSON.stringify({ payload: document.getElementById("pv-payload").value })
+        );
+      } catch (_) {}
+    };
+
+    document.getElementById("pv-run").onclick = async () => {
+      let payload;
+      try {
+        payload = JSON.parse(document.getElementById("pv-payload").value || "{}");
+      } catch (e) {
+        toast("JSON 无效：" + e.message, true);
+        return;
+      }
+      persistPayload();
+      const ingressId = String(document.getElementById("pv-ingress").value || "").trim();
+      const body = {
+        payload,
+        annotations: {},
+        value: 1,
+        severity: "info",
+        rule_name: "PreviewRule",
+      };
+      if (ingressId) body.ingress_id = ingressId;
+
+      if (draft) {
+        body.rule = draft;
+      } else {
+        const ruleSel = document.getElementById("pv-rule").value;
+        if (ruleSel === "__all__") {
+          body.use_saved = true;
+        } else {
+          const r = rules.find((x) => x.id === ruleSel);
+          if (!r) {
+            toast("请选择丰富规则", true);
+            return;
+          }
+          body.rule = {
+            name: r.name,
+            kind: r.kind || "auto",
+            matchers: r.matchers || {},
+            match_key: r.match_key || "",
+            templates: r.templates || {},
+            mappings: r.mappings || {},
+            lookup_table_ids:
+              r.lookup_table_ids || (r.lookup_table_id ? [r.lookup_table_id] : []),
+            lookup_match_keys: r.lookup_match_keys || {},
+            field_templates: r.field_templates || {},
+            label_extracts: r.label_extracts || {},
+            write_labels: r.write_labels !== false,
+            enabled: r.enabled !== false,
+            priority: r.priority ?? 100,
+          };
+        }
+      }
+
+      try {
+        const out = await api("/api/enrich/preview", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const labels = out.labels || {};
+        const an = out.annotations || {};
+        document.getElementById("preview-summary").textContent =
+          an.summary || an.description || "（未生成描述）";
+        document.getElementById("preview-ip").textContent =
+          labels.alertIp || labels.ip || labels.instance || "—";
+        document.getElementById("preview-sev").textContent =
+          labels.severity || out.severity || "—";
+        document.getElementById("preview-name").textContent = labels.alertname || "—";
+        document.getElementById("preview-out").textContent = JSON.stringify(
+          {
+            parsed_via: out.parsed_via,
+            before: out.before,
+            after: {
+              labels: out.labels,
+              annotations: out.annotations,
+              severity: out.severity,
+            },
+          },
+          null,
+          2
+        );
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+
+    const closeBtn = document.getElementById("pv-close");
+    if (closeBtn) closeBtn.onclick = closeModal;
+
+    const backBtn = document.getElementById("pv-back-edit");
+    if (backBtn) {
+      backBtn.onclick = () => {
+        persistPayload();
+        const base = ruleId ? rules.find((r) => r.id === ruleId) : null;
+        editEnrich(base || null, { draft });
+      };
+    }
+  }
+
+  async function editEnrich(row, opts = {}) {
+    const draft = opts.draft || null;
+    const src = draft
+      ? {
+          ...(row || {}),
+          ...draft,
+          id: row?.id,
+          lookup_table_ids:
+            draft.lookup_table_ids ||
+            row?.lookup_table_ids ||
+            (row?.lookup_table_id ? [row.lookup_table_id] : []),
+          lookup_match_keys: draft.lookup_match_keys || row?.lookup_match_keys || {},
+          field_templates: draft.field_templates || row?.field_templates || {},
+          label_extracts: draft.label_extracts || row?.label_extracts || {},
+          mappings: draft.mappings || row?.mappings || {},
+          matchers: draft.matchers || row?.matchers || {},
+        }
+      : row;
     const lookups = state.cache.lookups || (await api("/api/lookups"));
     state.cache.lookups = lookups;
-    const kind = row?.kind || "annotation_template";
-    const isTpl = kind === "annotation_template";
-    const isMap = kind === "label_map";
-    const isLookup = kind === "lookup";
-    openModal(`
+    const selectedIds = new Set(
+      src?.lookup_table_ids?.length
+        ? src.lookup_table_ids
+        : src?.lookup_table_id
+        ? [src.lookup_table_id]
+        : []
+    );
+    const ft = src?.field_templates || {};
+    const tpl = { ...(src?.templates || {}) };
+    const summaryTpl =
+      ft.summary ||
+      tpl.summary ||
+      (selectedIds.size
+        ? "{{labels.样例-主机台账.主机名}}（{{labels.样例-主机台账.别名}}）"
+        : "{{labels.alertname}} · {{labels.instance}}");
+    delete tpl.summary;
+    const otherTplJson = Object.keys(tpl).length ? JSON.stringify(tpl, null, 2) : "";
+    const builtinChipFields = ["ip", "instance", "alertIp", "alertname", "severity"];
+    const colsFromLookup = (t) => {
+      const set = new Set();
+      Object.values(t.rows || {}).forEach((attrs) => {
+        Object.keys(attrs || {}).forEach((k) => set.add(k));
+      });
+      return [...set].sort();
+    };
+    const matcherPairs = Object.entries(src?.matchers || {}).map(([k, v]) => ({ k, v }));
+    if (!matcherPairs.length) matcherPairs.push({ k: "", v: "" });
+
+    const matcherRowsHtml = (pairs) =>
+      pairs
+        .map(
+          (p, i) => `<div class="matcher-row" data-idx="${i}">
+            <input name="mk_key" placeholder="标签名，如 job" value="${esc(p.k)}" />
+            <span class="matcher-eq">=</span>
+            <input name="mk_val" placeholder="值，如 api" value="${esc(p.v)}" />
+            <button type="button" class="ghost" data-rm-matcher title="删除">×</button>
+          </div>`
+        )
+        .join("");
+
+    const hasAdvanced =
+      (src?.mappings && Object.keys(src.mappings).length) ||
+      otherTplJson ||
+      (src?.priority != null && src.priority !== 100) ||
+      src?.write_labels === false;
+
+    openModal(
+      `
       <div class="modal-head">
         <h3>${row ? "编辑丰富规则" : "新建丰富规则"}</h3>
-        <p class="desc">在通知前为告警补全 annotations / labels。</p>
+        <p class="desc">选台账补字段，再决定告警上显示的描述、IP 和级别。保存前可点「试跑预览」验证。</p>
       </div>
       <form id="f" class="modal-body">
-        <div class="field"><label>名称</label>
-          <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 CMDB 负责人" />
-        </div>
-        <div class="row">
-          <div class="field"><label>类型</label>
-            <select name="kind" id="enrich-kind">
-              <option value="annotation_template" ${isTpl ? "selected" : ""}>注解模板</option>
-              <option value="label_map" ${isMap ? "selected" : ""}>内联映射</option>
-              <option value="lookup" ${isLookup ? "selected" : ""}>Lookup 外表</option>
-            </select>
+        <details class="map-help enrich-help">
+          <summary>帮助说明：可用字段与语法</summary>
+          <div class="map-help-body">
+            <p><b>执行顺序</b>：查表前抽取 → 台账查表 → 内联映射 → 注解模板 → 写到告警卡片（描述/IP/级别/名称）。</p>
+
+            <p><b>模板变量</b>（可写在抽取模板、告警描述、IP、级别、名称等处）</p>
+            <table class="map-help-table">
+              <thead>
+                <tr><th>写法</th><th>含义</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>{{labels.xxx}}</code></td><td>告警标签；常见有 <code>ip</code> / <code>alertIp</code> / <code>instance</code> / <code>alertname</code> / <code>severity</code>，以及接入 <code>map_labels</code> 写入的字段</td></tr>
+                <tr><td><code>{{labels.台账名.列名}}</code></td><td>台账查出的列（必须带台账名前缀，如 <code>{{labels.device_info_form.主机名}}</code>）</td></tr>
+                <tr><td><code>{{annotations.xxx}}</code></td><td>告警注解；常见 <code>summary</code> / <code>description</code></td></tr>
+                <tr><td><code>{{value}}</code></td><td>当前监控值</td></tr>
+                <tr><td><code>{{severity}}</code></td><td>引擎级别（critical / warning / info 等）</td></tr>
+                <tr><td><code>{{status}}</code></td><td>firing / resolved</td></tr>
+                <tr><td><code>{{fingerprint}}</code></td><td>告警指纹</td></tr>
+                <tr><td><code>{{rule.name}}</code></td><td>当前丰富规则名</td></tr>
+              </tbody>
+            </table>
+
+            <p style="margin-top:12px"><b>字符串截取语法</b>（加在变量路径后，用 <code>|</code> 连接）</p>
+            <table class="map-help-table">
+              <thead>
+                <tr><th>语法</th><th>说明</th><th>示例</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>|before:SEP</code></td><td>取分隔符<strong>之前</strong></td><td><code>{{labels.sourceciname|before:_}}</code> → <code>82.12.161.32</code></td></tr>
+                <tr><td><code>|after:SEP</code></td><td>取分隔符<strong>之后</strong></td><td><code>{{annotations.summary|after:为：}}</code></td></tr>
+                <tr><td><code>|split:SEP:INDEX</code></td><td>按分隔符拆分，取第 INDEX 段（从 0 起）</td><td><code>{{labels.x|split:_:0}}</code></td></tr>
+                <tr><td><code>|between:起点:终点</code></td><td>取两段之间；起点/终点可空（空=串首/串尾）</td><td><code>{{annotations.summary|between:为：: %}}</code></td></tr>
+              </tbody>
+            </table>
+
+            <p style="margin-top:12px"><b>各配置项怎么用</b></p>
+            <table class="map-help-table">
+              <thead>
+                <tr><th>配置</th><th>说明</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>何时生效</td><td>按 <code>labels</code> 精确匹配；全部满足才应用本规则；不配=全部告警</td></tr>
+                <tr><td>查表前抽取</td><td>用模板算出值，写入 <code>labels.标签名</code>（也可进 annotations），供下方「用标签」查台账。例：标签 <code>sss_ip</code> = <code>{{annotations.summary|before:_}}</code></td></tr>
+                <tr><td>从台账补字段</td><td>勾选台账；「用标签」填匹配键（默认台账的 key，可改为抽取的 <code>sss_ip</code>）。命中后写入 <code>labels.台账名.列名</code></td></tr>
+                <tr><td>告警描述</td><td>对应 field 模板 <code>summary</code>；可点/拖下方芯片插入</td></tr>
+                <tr><td>告警 IP</td><td>写入 <code>ip</code> / <code>alertIp</code>（及必要时 <code>instance</code>）</td></tr>
+                <tr><td>告警级别</td><td>可用 critical / warning / info，或中文 严重 / 警告 / 信息，也可用模板</td></tr>
+                <tr><td>告警名称</td><td>可选，改写 <code>labels.alertname</code></td></tr>
+                <tr><td>高级 · 内联映射</td><td>无台账时用 JSON 对照表；匹配键填标签名</td></tr>
+              </tbody>
+            </table>
+
+            <p class="hint" style="margin:12px 0 0">推荐路径：接入已映射出 <code>ip</code> → 直接用标签 <code>ip</code> 查台账 → 描述写 <code>{{labels.台账名.主机名}}</code>。若 IP 在描述里，先抽取再把「用标签」改成抽取名。</p>
           </div>
-          <div class="field"><label>优先级（越小越先）</label>
-            <input name="priority" type="number" value="${row?.priority ?? 100}" />
+        </details>
+
+        <div class="enrich-step">
+          <div class="enrich-step-head">
+            <h4>基本信息</h4>
+            <p>给规则起个名字；默认对全部告警生效。</p>
           </div>
-        </div>
-        <div class="field"><label>匹配标签 JSON（可选，全部匹配才生效）</label>
-          <textarea name="matchers" rows="2" placeholder='{"job":"api"}'>${esc(
-            Object.keys(row?.matchers || {}).length ? JSON.stringify(row.matchers, null, 0) : ""
-          )}</textarea>
-        </div>
-        <div id="enrich-template-fields" style="${isTpl ? "" : "display:none"}">
-          <div class="field"><label>注解模板 JSON</label>
-            <textarea name="templates" rows="5" placeholder='{"summary":"{{labels.instance}} CPU {{value}}%","runbook":"https://wiki/{{labels.job}}"}'>${esc(
-              Object.keys(row?.templates || {}).length
-                ? JSON.stringify(row.templates, null, 2)
-                : ""
-            )}</textarea>
-            <div class="hint">写入 annotations；支持 {{labels.x}} 等变量。</div>
+          <div class="row">
+            <div class="field" style="flex:2"><label>名称</label>
+              <input name="name" required value="${esc(src?.name || "")}" placeholder="例如 主机台账丰富" />
+            </div>
+            <div class="field" style="flex:0.8;min-width:120px;align-self:flex-end">
+              <label class="check-row" style="margin:0;padding:8px 0"><input type="checkbox" name="enabled" ${
+                src?.enabled !== false ? "checked" : ""
+              }/><span>启用</span></label>
+            </div>
           </div>
+          <details class="enrich-when" ${
+            Object.keys(src?.matchers || {}).length ? "open" : ""
+          }>
+            <summary>何时生效（可选）· 默认全部告警</summary>
+            <div class="hint" style="margin:10px 0 8px">仅当告警同时带有下列标签时才应用本规则。</div>
+            <div id="matcher-rows">${matcherRowsHtml(matcherPairs)}</div>
+            <button type="button" class="ghost" id="btn-add-matcher" style="margin-top:8px">添加条件</button>
+          </details>
         </div>
-        <div id="enrich-map-fields" style="${isMap ? "" : "display:none"}">
-          <div class="field"><label>匹配标签键 match_key</label>
-            <input name="match_key_map" value="${esc(
-              isMap ? row?.match_key || "instance" : "instance"
-            )}" placeholder="instance" />
+
+        <div class="enrich-step">
+          <div class="enrich-step-head">
+            <h4>查表前抽取标签（可选）</h4>
+            <p>从原告警描述/标签截取后写入 labels，供台账匹配。支持 <code>|before:</code> / <code>|after:</code> / <code>|split:SEP:INDEX</code> / <code>|between:起点:终点</code>。</p>
           </div>
-          <div class="field"><label>映射表 JSON</label>
-            <textarea name="mappings" rows="6" placeholder='{"10.0.0.1":{"owner":"alice","team":"sre"}}'>${esc(
-              Object.keys(row?.mappings || {}).length
-                ? JSON.stringify(row.mappings, null, 2)
-                : ""
-            )}</textarea>
-            <div class="hint">键为标签值，值为要写入的字段（默认进 annotations）。</div>
+          <div id="extract-rows"></div>
+          <button type="button" class="ghost" id="btn-add-extract" style="margin-top:8px">添加抽取</button>
+          <div class="hint" style="margin-top:8px">例：标签名 <code>sss_ip</code>，模板 <code>{{annotations.summary|before:_}}</code>；下方台账「用标签」填 <code>sss_ip</code>。</div>
+        </div>
+
+        <div class="enrich-step">
+          <div class="enrich-step-head">
+            <h4>从台账补字段</h4>
+            <p>勾选台账，并指定<strong>用哪个标签查表</strong>（可填上方抽取的 <code>sss_ip</code>）。查出的列用 <code>{{labels.台账名.列名}}</code>。</p>
           </div>
-        </div>
-        <div id="enrich-lookup-fields" style="${isLookup ? "" : "display:none"}">
-          <div class="field"><label>Lookup 外表</label>
-            <select name="lookup_table_id" id="enrich-lookup-id">
-              <option value="">请选择外表</option>
-              ${lookups
-                .map(
-                  (t) =>
-                    `<option value="${esc(t.id)}" ${
-                      row?.lookup_table_id === t.id ? "selected" : ""
-                    }>${esc(t.name)}（键 ${esc(t.key_label || "instance")} · ${
-                      Object.keys(t.rows || {}).length
-                    } 行）${t.enabled ? "" : " [停用]"}</option>`
-                )
-                .join("")}
-            </select>
-            ${
-              lookups.length
-                ? ""
-                : `<div class="hint">还没有外表，请先点「新建 Lookup 外表」。</div>`
-            }
+          <div class="field">
+            <div class="lookup-bind-list" id="lookup-bind-list">
+              ${
+                lookups.length
+                  ? lookups
+                      .map((t) => {
+                        const checked = selectedIds.has(t.id);
+                        const override =
+                          (src?.lookup_match_keys && src.lookup_match_keys[t.id]) || "";
+                        const defKey = t.key_label || "ip";
+                        return `<div class="lookup-bind-row">
+                    <label class="check-row lookup-bind-check">
+                      <input type="checkbox" name="lookup_table_ids" value="${esc(t.id)}" ${
+                          checked ? "checked" : ""
+                        } data-default-key="${esc(defKey)}" />
+                      <span><b>${esc(t.name)}</b> · ${Object.keys(t.rows || {}).length} 行${
+                          t.enabled ? "" : " · 已停用"
+                        }</span>
+                    </label>
+                    <div class="lookup-bind-key">
+                      <span class="hint">用标签</span>
+                      <input name="lookup_key_${esc(t.id)}" class="mono" placeholder="${esc(
+                          defKey
+                        )}" value="${esc(override || defKey)}" ${checked ? "" : "disabled"} />
+                      <span class="hint">查本表</span>
+                    </div>
+                  </div>`;
+                      })
+                      .join("")
+                  : `<div class="enrich-inline-empty">
+                      还没有台账。
+                      <button type="button" class="ghost" id="btn-goto-lookup">去新建台账</button>
+                    </div>`
+              }
+            </div>
           </div>
-          <div class="field"><label>匹配标签键 match_key（可选）</label>
-            <input name="match_key_lookup" value="${esc(
-              isLookup ? row?.match_key || "" : ""
-            )}" placeholder="留空则用外表的 key_label" />
+          <div class="hint" style="margin-top:8px">例：抽取了 <code>sss_ip</code> → 此处填 <code>sss_ip</code> → 描述写 <code>{{labels.device_info_test.主机名}}</code>。</div>
+        </div>
+
+        <div class="enrich-step">
+          <div class="enrich-step-head">
+            <h4>写到告警卡片上</h4>
+            <p>用 <code>{{labels.台账名.列名}}</code> 或截取 <code>{{annotations.summary|between:为：: %}}</code>。点芯片插入，或拖到描述任意位置。</p>
           </div>
+          <div class="field"><label>告警描述</label>
+            <textarea name="ft_summary" id="summary-tpl" rows="3" class="chip-drop-target">${esc(summaryTpl)}</textarea>
+            <div class="hint" id="chip-hint" style="margin:8px 0 6px">先勾选台账；芯片可点击或拖入上方描述框。</div>
+            <div id="summary-chips" class="chip-groups"></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>告警 IP</label>
+              <input name="ft_ip" value="${esc(
+                ft.ip || ft.alertIp || "{{labels.ip}}"
+              )}" placeholder="{{labels.ip}} 或 {{labels.instance}}" />
+            </div>
+            <div class="field"><label>告警级别</label>
+              <input name="ft_severity" value="${esc(
+                ft.severity || ""
+              )}" placeholder="critical / 警告 / {{labels.级别}}" />
+            </div>
+          </div>
+          <div class="field"><label>告警名称（可选）</label>
+            <input name="ft_alertname" value="${esc(
+              ft.alertname || ""
+            )}" placeholder="{{labels.主机名}}-不可达，留空则不改" />
+          </div>
+          <div class="hint">级别可用 critical / warning / info，或中文 严重 / 警告 / 信息。</div>
         </div>
-        <div id="enrich-write-labels" style="${isMap || isLookup ? "" : "display:none"}">
-          <label class="check"><input type="checkbox" name="write_labels" ${
-            row?.write_labels ? "checked" : ""
-          } /> 同时写入 labels（不影响 fingerprint）</label>
-        </div>
-        <label class="check" style="margin-top:0.75rem"><input type="checkbox" name="enabled" ${
-          row?.enabled !== false ? "checked" : ""
-        } /> 启用</label>
-        <div class="field" style="margin-top:1rem">
-          <label>试跑预览（可选）</label>
-          <textarea name="preview_labels" rows="2" placeholder='示例 labels：{"instance":"10.0.0.1","job":"api"}'>{"instance":"10.0.0.1","job":"api"}</textarea>
-          <button type="button" class="ghost" id="m-preview" style="margin-top:0.5rem">预览结果</button>
-          <pre id="preview-out" class="mono" style="margin:0.5rem 0 0;font-size:0.8rem;white-space:pre-wrap;color:var(--muted)"></pre>
-        </div>
+
+        <details class="enrich-step enrich-advanced" ${hasAdvanced ? "open" : ""}>
+          <summary>高级选项（内联映射、优先级等）</summary>
+          <div class="enrich-advanced-body">
+            <div class="row">
+              <div class="field" style="flex:1;min-width:160px"><label>内联映射 · 用哪个标签匹配</label>
+                <input name="match_key" value="${esc(
+                  src?.match_key || ""
+                )}" placeholder="留空=各台账用自己的匹配标签" />
+                <div class="hint">只影响下方「内联映射表」，与已选台账无关。</div>
+              </div>
+              <div class="field" style="flex:0.6;min-width:100px"><label>优先级</label>
+                <input name="priority" type="number" value="${src?.priority ?? 100}" />
+                <div class="hint">数字越小越先执行</div>
+              </div>
+            </div>
+            <div class="field"><label>内联映射表（JSON，可选）</label>
+              <textarea name="mappings" rows="4" class="mono" placeholder='{"10.0.0.1":{"owner":"alice"}}'>${esc(
+                Object.keys(src?.mappings || {}).length
+                  ? JSON.stringify(src.mappings, null, 2)
+                  : ""
+              )}</textarea>
+              <div class="hint">无需台账时，可直接在规则里写一小段对照表。</div>
+            </div>
+            <div class="field"><label>其他注解模板（JSON，可选）</label>
+              <textarea name="templates_extra" rows="3" class="mono">${esc(otherTplJson)}</textarea>
+            </div>
+            <label class="check-row"><input type="checkbox" name="write_labels" ${
+              src?.write_labels !== false ? "checked" : ""
+            } /><span>台账 / 映射字段写入 labels（供描述模板引用）</span></label>
+          </div>
+        </details>
       </form>
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+        <button type="button" class="ghost" id="m-goto-preview">试跑预览</button>
+        <button class="primary" type="submit" form="f">保存规则</button>
+      </div>
+    `,
+      { xl: true }
+    );
 
-    const kindEl = document.getElementById("enrich-kind");
-    const syncKind = () => {
-      const k = kindEl.value;
-      document.getElementById("enrich-template-fields").style.display =
-        k === "annotation_template" ? "" : "none";
-      document.getElementById("enrich-map-fields").style.display =
-        k === "label_map" ? "" : "none";
-      document.getElementById("enrich-lookup-fields").style.display =
-        k === "lookup" ? "" : "none";
-      document.getElementById("enrich-write-labels").style.display =
-        k === "label_map" || k === "lookup" ? "" : "none";
-    };
-    kindEl.onchange = syncKind;
     document.getElementById("m-cancel").onclick = closeModal;
 
+    const gotoLookup = document.getElementById("btn-goto-lookup");
+    if (gotoLookup) {
+      gotoLookup.onclick = () => {
+        closeModal();
+        localStorage.setItem("eventide_enrich_tab", "lookups");
+        renderPage();
+        setTimeout(() => editLookup(), 50);
+      };
+    }
+
+    const matcherBox = document.getElementById("matcher-rows");
+    const bindMatcherRm = () => {
+      matcherBox.querySelectorAll("[data-rm-matcher]").forEach((btn) => {
+        btn.onclick = () => {
+          const rowEl = btn.closest(".matcher-row");
+          if (matcherBox.querySelectorAll(".matcher-row").length <= 1) {
+            rowEl.querySelector('[name="mk_key"]').value = "";
+            rowEl.querySelector('[name="mk_val"]').value = "";
+            return;
+          }
+          rowEl.remove();
+        };
+      });
+    };
+    bindMatcherRm();
+    document.getElementById("btn-add-matcher").onclick = () => {
+      if (matcherBox.querySelectorAll(".matcher-row").length >= 5) {
+        toast("最多 5 个条件", true);
+        return;
+      }
+      matcherBox.insertAdjacentHTML(
+        "beforeend",
+        `<div class="matcher-row">
+          <input name="mk_key" placeholder="标签名" value="" />
+          <span class="matcher-eq">=</span>
+          <input name="mk_val" placeholder="值" value="" />
+          <button type="button" class="ghost" data-rm-matcher title="删除">×</button>
+        </div>`
+      );
+      bindMatcherRm();
+    };
+
+    const extractBox = document.getElementById("extract-rows");
+    const extractPairs = Object.entries(src?.label_extracts || {}).map(([k, v]) => ({
+      k,
+      v,
+    }));
+    if (!extractPairs.length) extractPairs.push({ k: "", v: "" });
+    const extractRowHtml = (p) => `<div class="extract-row">
+      <input name="ex_key" placeholder="写入标签名，如 extract_ip" value="${esc(p.k)}" />
+      <input name="ex_tpl" placeholder="{{annotations.summary|before:_}}" value="${esc(p.v)}" />
+      <button type="button" class="ghost" data-rm-extract title="删除">×</button>
+    </div>`;
+    extractBox.innerHTML = extractPairs.map(extractRowHtml).join("");
+    const bindExtractRm = () => {
+      extractBox.querySelectorAll("[data-rm-extract]").forEach((btn) => {
+        btn.onclick = () => {
+          const rowEl = btn.closest(".extract-row");
+          if (extractBox.querySelectorAll(".extract-row").length <= 1) {
+            rowEl.querySelector('[name="ex_key"]').value = "";
+            rowEl.querySelector('[name="ex_tpl"]').value = "";
+            return;
+          }
+          rowEl.remove();
+        };
+      });
+    };
+    bindExtractRm();
+    document.getElementById("btn-add-extract").onclick = () => {
+      if (extractBox.querySelectorAll(".extract-row").length >= 8) {
+        toast("最多 8 条抽取", true);
+        return;
+      }
+      extractBox.insertAdjacentHTML("beforeend", extractRowHtml({ k: "", v: "" }));
+      bindExtractRm();
+    };
+
+    const summaryEl = document.getElementById("summary-tpl");
+    const chipsEl = document.getElementById("summary-chips");
+    const chipHint = document.getElementById("chip-hint");
+
+    const lookupNs = (name) => {
+      const s = String(name || "")
+        .split("")
+        .map((c) => (/[a-zA-Z0-9_\-\u4e00-\u9fff]/.test(c) ? c : "_"))
+        .join("");
+      return s || "lookup";
+    };
+
+    const insertChipInto = (el, chip, at) => {
+      if (!el || !chip) return;
+      const start =
+        at != null ? at : el.selectionStart ?? String(el.value || "").length;
+      const end = at != null ? at : el.selectionEnd ?? start;
+      const v = String(el.value || "");
+      el.value = v.slice(0, start) + chip + v.slice(end);
+      el.focus();
+      const caret = start + chip.length;
+      if (typeof el.setSelectionRange === "function") {
+        el.setSelectionRange(caret, caret);
+      }
+    };
+
+    /** Approximate caret index in a textarea from pointer coordinates. */
+    const textareaIndexFromPoint = (ta, clientX, clientY) => {
+      const text = String(ta.value || "");
+      if (!text.length) return 0;
+      const style = getComputedStyle(ta);
+      const rect = ta.getBoundingClientRect();
+      const mirror = document.createElement("div");
+      mirror.setAttribute("aria-hidden", "true");
+      mirror.style.cssText = [
+        "position:fixed",
+        `left:${rect.left}px`,
+        `top:${rect.top}px`,
+        `width:${ta.clientWidth}px`,
+        `height:${ta.clientHeight}px`,
+        "overflow:hidden",
+        "visibility:hidden",
+        "pointer-events:none",
+        "white-space:pre-wrap",
+        "word-wrap:break-word",
+        `font:${style.font}`,
+        `font-size:${style.fontSize}`,
+        `font-family:${style.fontFamily}`,
+        `font-weight:${style.fontWeight}`,
+        `line-height:${style.lineHeight}`,
+        `letter-spacing:${style.letterSpacing}`,
+        `padding:${style.padding}`,
+        `border:${style.border}`,
+        `box-sizing:${style.boxSizing}`,
+      ].join(";");
+      document.body.appendChild(mirror);
+      mirror.scrollTop = ta.scrollTop;
+      mirror.scrollLeft = ta.scrollLeft;
+
+      let best = text.length;
+      let bestDist = Infinity;
+      const marker = document.createElement("span");
+      marker.textContent = "\u200b";
+      // Templates are short; O(n) probe is fine.
+      for (let i = 0; i <= text.length; i++) {
+        mirror.textContent = "";
+        mirror.appendChild(document.createTextNode(text.slice(0, i)));
+        mirror.appendChild(marker);
+        mirror.appendChild(document.createTextNode(text.slice(i)));
+        mirror.scrollTop = ta.scrollTop;
+        mirror.scrollLeft = ta.scrollLeft;
+        const mr = marker.getBoundingClientRect();
+        const cx = mr.left;
+        const cy = mr.top + mr.height / 2;
+        const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      }
+      mirror.remove();
+      return best;
+    };
+
+    let chipDragActive = false;
+    let suppressChipClick = false;
+
+    const bindChips = () => {
+      chipsEl.querySelectorAll("[data-chip]").forEach((btn) => {
+        btn.draggable = true;
+        btn.ondragstart = (e) => {
+          chipDragActive = true;
+          suppressChipClick = false;
+          const chip = btn.dataset.chip || "";
+          e.dataTransfer.setData("text/plain", chip);
+          e.dataTransfer.setData("application/x-eventide-chip", chip);
+          e.dataTransfer.effectAllowed = "copy";
+          btn.classList.add("is-dragging");
+        };
+        btn.ondragend = () => {
+          chipDragActive = false;
+          btn.classList.remove("is-dragging");
+          // Avoid click-insert after a successful drag.
+          suppressChipClick = true;
+          setTimeout(() => {
+            suppressChipClick = false;
+          }, 0);
+        };
+        btn.onclick = () => {
+          if (suppressChipClick) return;
+          insertChipInto(summaryEl, btn.dataset.chip);
+        };
+      });
+    };
+
+    summaryEl.addEventListener("dragenter", (e) => {
+      const types = e.dataTransfer?.types
+        ? Array.from(e.dataTransfer.types)
+        : [];
+      if (
+        !chipDragActive &&
+        !types.includes("text/plain") &&
+        !types.includes("application/x-eventide-chip")
+      ) {
+        return;
+      }
+      e.preventDefault();
+      summaryEl.classList.add("is-chip-drag-over");
+    });
+    summaryEl.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      summaryEl.classList.add("is-chip-drag-over");
+      const idx = textareaIndexFromPoint(summaryEl, e.clientX, e.clientY);
+      summaryEl.focus();
+      summaryEl.setSelectionRange(idx, idx);
+    });
+    summaryEl.addEventListener("dragleave", (e) => {
+      if (e.target !== summaryEl) return;
+      summaryEl.classList.remove("is-chip-drag-over");
+    });
+    summaryEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      summaryEl.classList.remove("is-chip-drag-over");
+      const chip =
+        e.dataTransfer.getData("application/x-eventide-chip") ||
+        e.dataTransfer.getData("text/plain") ||
+        "";
+      if (!chip) return;
+      const idx = textareaIndexFromPoint(summaryEl, e.clientX, e.clientY);
+      insertChipInto(summaryEl, chip, idx);
+    });
+
+    const chipBtn = (labelKey, title, cls = "") =>
+      `<button type="button" class="ghost chip-tag ${cls}" draggable="true" data-chip="{{labels.${esc(
+        labelKey
+      )}}}" title="${esc(title)}（可拖入描述）">{{labels.${esc(labelKey)}}}</button>`;
+
+    const refreshChips = () => {
+      const checked = [
+        ...document.querySelectorAll('input[name="lookup_table_ids"]:checked'),
+      ].map((el) => el.value);
+
+      const parts = [];
+      parts.push(`<div class="chip-group">
+        <div class="chip-group-title">告警自带标签</div>
+        <div class="chip-row">${builtinChipFields
+          .map((k) => chipBtn(k, "告警自带，不依赖台账"))
+          .join("")}</div>
+      </div>`);
+
+      checked.forEach((id) => {
+        const t = lookups.find((x) => x.id === id);
+        if (!t) return;
+        const keyLabel = t.key_label || "ip";
+        const ns = lookupNs(t.name);
+        const cols = colsFromLookup(t);
+        const buttons = cols
+          .map((col) =>
+            chipBtn(
+              `${ns}.${col}`,
+              `台账「${t.name}」列「${col}」。匹配：告警 labels.${keyLabel} → 查本表`,
+              "chip-from-lookup"
+            )
+          )
+          .join("");
+        parts.push(`<div class="chip-group">
+          <div class="chip-group-title"><b>${esc(t.name)}</b> · 匹配键 <code class="mono">labels.${esc(
+            keyLabel
+          )}</code> → 写入 <code class="mono">labels.${esc(ns)}.*</code></div>
+          <div class="chip-row">${
+            buttons || `<span class="hint">该台账没有数据列</span>`
+          }</div>
+        </div>`);
+      });
+
+      chipsEl.innerHTML = parts.join("");
+      if (chipHint) {
+        chipHint.textContent = checked.length
+          ? "台账字段一律为 {{labels.台账名.列名}}；点选或拖入描述框任意位置。"
+          : "先勾选上方台账，才会列出可拖拽的 {{labels.台账名.列名}} 芯片。";
+      }
+      bindChips();
+    };
+
+    document.querySelectorAll('input[name="lookup_table_ids"]').forEach((el) => {
+      const syncKey = () => {
+        const row = el.closest(".lookup-bind-row");
+        const keyInput = row?.querySelector(`input[name="lookup_key_${el.value}"]`);
+        if (!keyInput) return;
+        keyInput.disabled = !el.checked;
+        if (el.checked && !String(keyInput.value || "").trim()) {
+          keyInput.value = el.dataset.defaultKey || "ip";
+        }
+      };
+      el.addEventListener("change", () => {
+        syncKey();
+        refreshChips();
+      });
+      syncKey();
+    });
+    refreshChips();
+
+    const collectMatchers = (form) => {
+      const matchers = {};
+      form.querySelectorAll(".matcher-row").forEach((rowEl) => {
+        const k = String(rowEl.querySelector('[name="mk_key"]')?.value || "").trim();
+        const v = String(rowEl.querySelector('[name="mk_val"]')?.value || "").trim();
+        if (k && v) matchers[k] = v;
+      });
+      return matchers;
+    };
+
+    const collectExtracts = (form) => {
+      const out = {};
+      form.querySelectorAll(".extract-row").forEach((rowEl) => {
+        const k = String(rowEl.querySelector('[name="ex_key"]')?.value || "").trim();
+        const v = String(rowEl.querySelector('[name="ex_tpl"]')?.value || "").trim();
+        if (k && v) out[k] = v;
+      });
+      return out;
+    };
+
     const buildDraft = (fd, form) => {
-      let matchers = {};
-      let templates = {};
       let mappings = {};
-      const rawM = String(fd.get("matchers") || "").trim();
-      if (rawM) matchers = JSON.parse(rawM);
-      const rawT = String(fd.get("templates") || "").trim();
-      if (rawT) templates = JSON.parse(rawT);
+      let extra = {};
       const rawMap = String(fd.get("mappings") || "").trim();
       if (rawMap) mappings = JSON.parse(rawMap);
-      const kind = fd.get("kind");
-      let match_key = "";
-      let lookup_table_id = null;
-      if (kind === "label_map") {
-        match_key = String(fd.get("match_key_map") || "").trim();
-      } else if (kind === "lookup") {
-        match_key = String(fd.get("match_key_lookup") || "").trim();
-        const tid = String(fd.get("lookup_table_id") || "").trim();
-        lookup_table_id = tid || null;
-      }
+      const rawExtra = String(fd.get("templates_extra") || "").trim();
+      if (rawExtra) extra = JSON.parse(rawExtra);
+      const summary = String(fd.get("ft_summary") || "").trim();
+      const templates = { ...extra };
+      if (summary) templates.summary = summary;
+      const field_templates = {};
+      if (summary) field_templates.summary = summary;
+      const ip = String(fd.get("ft_ip") || "").trim();
+      const severity = String(fd.get("ft_severity") || "").trim();
+      const alertname = String(fd.get("ft_alertname") || "").trim();
+      if (ip) field_templates.ip = ip;
+      if (severity) field_templates.severity = severity;
+      if (alertname) field_templates.alertname = alertname;
+      const lookup_table_ids = [
+        ...form.querySelectorAll('input[name="lookup_table_ids"]:checked'),
+      ].map((el) => el.value);
+      const lookup_match_keys = {};
+      lookup_table_ids.forEach((id) => {
+        const keyInput = form.querySelector(`input[name="lookup_key_${id}"]`);
+        const k = String(keyInput?.value || "").trim();
+        if (k) lookup_match_keys[id] = k;
+      });
       return {
         name: fd.get("name") || "preview",
-        kind,
-        matchers,
-        match_key,
+        kind: "auto",
+        matchers: collectMatchers(form),
+        match_key: String(fd.get("match_key") || "").trim(),
         templates,
         mappings,
-        lookup_table_id,
+        lookup_table_ids,
+        lookup_match_keys,
+        field_templates,
+        label_extracts: collectExtracts(form),
         write_labels: form.querySelector('[name="write_labels"]')?.checked || false,
         enabled: form.querySelector('[name="enabled"]')?.checked !== false,
         priority: Number(fd.get("priority") || 100),
       };
     };
 
-    document.getElementById("m-preview").onclick = async () => {
+    document.getElementById("m-goto-preview").onclick = () => {
       const form = document.getElementById("f");
       const fd = new FormData(form);
-      let draft;
-      let previewLabels = {};
+      let draftBody;
       try {
-        draft = buildDraft(fd, form);
-        previewLabels = JSON.parse(String(fd.get("preview_labels") || "{}"));
+        draftBody = buildDraft(fd, form);
+        draftBody.name = String(fd.get("name") || "").trim() || draftBody.name;
+        draftBody.enabled = form.querySelector('[name="enabled"]').checked;
       } catch (e) {
-        toast("JSON 无效：" + e.message, true);
+        toast("高级 JSON 无效：" + e.message, true);
         return;
       }
-      try {
-        const out = await api("/api/enrich/preview", {
-          method: "POST",
-          body: JSON.stringify({
-            rule: draft,
-            labels: previewLabels,
-            annotations: { summary: "CPU high on {{labels.instance}}" },
-            value: 95.5,
-            severity: "critical",
-            rule_name: "PreviewRule",
-          }),
-        });
-        document.getElementById("preview-out").textContent = JSON.stringify(out, null, 2);
-      } catch (e) {
-        toast(e.message, true);
-      }
+      openEnrichPreviewModal({
+        draft: draftBody,
+        ruleId: row?.id || null,
+        fromEditor: true,
+      });
     };
 
     document.getElementById("f").onsubmit = async (e) => {
@@ -2195,20 +3556,37 @@
         body.name = fd.get("name");
         body.enabled = form.querySelector('[name="enabled"]').checked;
       } catch (err) {
-        toast("JSON 无效：" + err.message, true);
+        toast("高级 JSON 无效：" + err.message, true);
         return;
       }
-      if (body.kind === "lookup" && !body.lookup_table_id) {
-        toast("请选择 Lookup 外表", true);
+      const hasAny =
+        (body.lookup_table_ids || []).length ||
+        Object.keys(body.mappings || {}).length ||
+        Object.keys(body.templates || {}).length ||
+        Object.keys(body.field_templates || {}).length ||
+        Object.keys(body.label_extracts || {}).length;
+      if (!hasAny) {
+        toast("请至少勾选台账，或配置描述 / IP / 级别", true);
         return;
       }
-      if (row) {
-        await api(`/api/enrich/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      } else {
-        await api("/api/enrich", { method: "POST", body: JSON.stringify(body) });
+      if (Object.keys(body.mappings || {}).length && !body.match_key) {
+        toast("使用内联映射时，请填写「用哪个标签匹配」", true);
+        return;
       }
+      try {
+        if (row) {
+          await api(`/api/enrich/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+        } else {
+          await api("/api/enrich", { method: "POST", body: JSON.stringify(body) });
+        }
+      } catch (err) {
+        toast(err.message || String(err), true);
+        return;
+      }
+      sessionStorage.removeItem("eventide_enrich_preview");
       closeModal();
       toast("已保存");
+      localStorage.setItem("eventide_enrich_tab", "rules");
       renderPage();
     };
   }
@@ -2250,7 +3628,7 @@
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
         <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
+      </div>`, { wide: true });
     document.getElementById("m-cancel").onclick = closeModal;
     document.getElementById("f").onsubmit = async (e) => {
       e.preventDefault();
@@ -2274,6 +3652,276 @@
       closeModal();
       toast("已保存");
       renderPage();
+    };
+  }
+
+  // ---------- IAM editors ----------
+  async function editUser(row) {
+    const [roles, depts] = await Promise.all([
+      state.cache.roles || api("/api/roles"),
+      state.cache.departments || api("/api/departments"),
+    ]);
+    state.cache.roles = roles;
+    state.cache.departments = depts;
+    const selectedRoles = new Set(row?.role_ids || []);
+    openModal(`
+      <div class="modal-head">
+        <h3>${row ? "编辑用户" : "新建用户"}</h3>
+        <p class="desc">分配部门与角色；角色权限在「权限管理」配置。</p>
+      </div>
+      <form id="f" class="modal-body">
+        <div class="row">
+          <div class="field"><label>用户名</label>
+            <input name="username" required value="${esc(row?.username || "")}" ${
+              row ? "readonly" : ""
+            } /></div>
+          <div class="field"><label>显示名</label>
+            <input name="display_name" value="${esc(row?.display_name || "")}" /></div>
+        </div>
+        <div class="field"><label>${row ? "新密码（留空不改）" : "初始密码"}</label>
+          <input name="password" type="password" autocomplete="new-password" ${
+            row ? "" : "required minlength=6"
+          } placeholder="${row ? "留空则不修改" : "至少 6 位"}" /></div>
+        <div class="field"><label>部门</label>
+          <select name="department_id">
+            <option value="">— 未分配 —</option>
+            ${depts
+              .map(
+                (d) =>
+                  `<option value="${esc(d.id)}" ${
+                    row?.department_id === d.id ? "selected" : ""
+                  }>${esc(d.name)}</option>`
+              )
+              .join("")}
+          </select>
+        </div>
+        <div class="field"><label>角色</label>
+          <div class="check-grid">${roles
+            .map(
+              (r) => `<label class="check-row"><input type="checkbox" name="role_ids" value="${esc(
+                r.id
+              )}" ${selectedRoles.has(r.id) ? "checked" : ""}/> <span>${esc(r.name)}${
+                r.is_system ? "（系统）" : ""
+              }</span></label>`
+            )
+            .join("")}</div>
+        </div>
+        <label class="check-row"><input type="checkbox" name="enabled" ${
+          !row || row.enabled ? "checked" : ""
+        }/> <span>启用</span></label>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">保存</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fd = new FormData(form);
+      const password = String(fd.get("password") || "").trim();
+      const body = {
+        username: String(fd.get("username") || "").trim(),
+        display_name: String(fd.get("display_name") || "").trim(),
+        department_id: String(fd.get("department_id") || "") || null,
+        role_ids: [...form.querySelectorAll('[name="role_ids"]:checked')].map((x) => x.value),
+        enabled: form.querySelector('[name="enabled"]').checked,
+      };
+      if (password) body.password = password;
+      try {
+        if (row) {
+          await api(`/api/users/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+        } else {
+          if (!password) {
+            toast("请设置初始密码", true);
+            return;
+          }
+          await api("/api/users", { method: "POST", body: JSON.stringify(body) });
+        }
+        closeModal();
+        toast("已保存");
+        renderPage();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  }
+
+  function resetUserPassword(id) {
+    openModal(`
+      <div class="modal-head"><h3>重置密码</h3></div>
+      <form id="f" class="modal-body">
+        <div class="field"><label>新密码</label>
+          <input name="password" type="password" required minlength="6" autocomplete="new-password" /></div>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">确定</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const pw = new FormData(e.target).get("password");
+      try {
+        await api(`/api/users/${id}/reset-password`, {
+          method: "POST",
+          body: JSON.stringify({ password: pw }),
+        });
+        closeModal();
+        toast("密码已重置");
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  }
+
+  async function editRole(row) {
+    let catalog = state.cache.permCatalog;
+    if (!catalog) catalog = await api("/api/permissions");
+    state.cache.permCatalog = catalog;
+    const selected = new Set(row?.permissions || []);
+    const groups = {};
+    (catalog || []).forEach((p) => {
+      (groups[p.group] || (groups[p.group] = [])).push(p);
+    });
+    const starOn = selected.has("*");
+    openModal(
+      `
+      <div class="modal-head">
+        <h3>${row ? "编辑角色" : "新建角色"}</h3>
+        <p class="desc">勾选权限码；含 <code>*</code> 表示全部权限。</p>
+      </div>
+      <form id="f" class="modal-body">
+        <div class="row">
+          <div class="field"><label>名称</label>
+            <input name="name" required value="${esc(row?.name || "")}" ${
+              row?.is_system ? "readonly" : ""
+            } /></div>
+          <div class="field"><label>说明</label>
+            <input name="description" value="${esc(row?.description || "")}" /></div>
+        </div>
+        <label class="check-row" style="margin-bottom:12px">
+          <input type="checkbox" name="perm_star" id="perm-star" ${starOn ? "checked" : ""}/>
+          <span><strong>全部权限 (*)</strong></span>
+        </label>
+        <div id="perm-list">${Object.keys(groups)
+          .map(
+            (g) => `<div class="seg" style="margin-bottom:12px">
+            <div class="hint" style="margin:0 0 6px;font-weight:600">${esc(g)}</div>
+            ${groups[g]
+              .map(
+                (p) => `<label class="check-row"><input type="checkbox" name="perms" value="${esc(
+                  p.code
+                )}" ${selected.has(p.code) ? "checked" : ""} ${
+                  starOn ? "disabled" : ""
+                }/> <span>${esc(p.label)} <code class="mono">${esc(p.code)}</code></span></label>`
+              )
+              .join("")}
+          </div>`
+          )
+          .join("")}</div>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">保存</button>
+      </div>`,
+      { xl: true }
+    );
+    const star = document.getElementById("perm-star");
+    const syncStar = () => {
+      document.querySelectorAll('#perm-list input[name="perms"]').forEach((el) => {
+        el.disabled = star.checked;
+      });
+    };
+    star.onchange = syncStar;
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fd = new FormData(form);
+      let permissions = [];
+      if (form.querySelector('[name="perm_star"]').checked) {
+        permissions = ["*"];
+      } else {
+        permissions = [...form.querySelectorAll('[name="perms"]:checked')].map((x) => x.value);
+      }
+      const body = {
+        name: String(fd.get("name") || "").trim(),
+        description: String(fd.get("description") || "").trim(),
+        permissions,
+      };
+      try {
+        if (row) {
+          await api(`/api/roles/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+        } else {
+          await api("/api/roles", { method: "POST", body: JSON.stringify(body) });
+        }
+        closeModal();
+        toast("已保存（相关用户需重新登录后权限生效）");
+        renderPage();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  }
+
+  async function editDepartment(row) {
+    const depts = state.cache.departments || (await api("/api/departments"));
+    state.cache.departments = depts;
+    openModal(`
+      <div class="modal-head">
+        <h3>${row ? "编辑部门" : "新建部门"}</h3>
+      </div>
+      <form id="f" class="modal-body">
+        <div class="field"><label>名称</label>
+          <input name="name" required value="${esc(row?.name || "")}" /></div>
+        <div class="field"><label>上级部门</label>
+          <select name="parent_id">
+            <option value="">— 无（根部门）—</option>
+            ${depts
+              .filter((d) => !row || d.id !== row.id)
+              .map(
+                (d) =>
+                  `<option value="${esc(d.id)}" ${
+                    row?.parent_id === d.id ? "selected" : ""
+                  }>${esc(d.name)}</option>`
+              )
+              .join("")}
+          </select>
+        </div>
+        <div class="field"><label>排序</label>
+          <input name="sort_order" type="number" value="${row?.sort_order ?? 0}" /></div>
+        <label class="check-row"><input type="checkbox" name="enabled" ${
+          !row || row.enabled ? "checked" : ""
+        }/> <span>启用</span></label>
+      </form>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+        <button class="primary" type="submit" form="f">保存</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.getElementById("f").onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fd = new FormData(form);
+      const body = {
+        name: String(fd.get("name") || "").trim(),
+        parent_id: String(fd.get("parent_id") || "") || null,
+        sort_order: Number(fd.get("sort_order") || 0),
+        enabled: form.querySelector('[name="enabled"]').checked,
+      };
+      try {
+        if (row) {
+          await api(`/api/departments/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+        } else {
+          await api("/api/departments", { method: "POST", body: JSON.stringify(body) });
+        }
+        closeModal();
+        toast("已保存");
+        renderPage();
+      } catch (err) {
+        toast(err.message, true);
+      }
     };
   }
 

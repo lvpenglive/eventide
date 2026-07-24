@@ -84,6 +84,7 @@ foreach ($r in $seed.rules) {
 
 Write-Host "Seeding ingress..."
 $ingressIds = @()
+$ingressMap = @{}
 foreach ($i in $seed.ingress) {
   $chIds = @($i._channels | ForEach-Object { $chMap[$_] })
   $created = ApiPost '/api/ingress' @{
@@ -92,6 +93,7 @@ foreach ($i in $seed.ingress) {
     channel_ids = $chIds; enabled = [bool]$i.enabled
   }
   $ingressIds += $created.id
+  $ingressMap[$i.name] = @{ id = $created.id; token = $i.token }
 }
 
 Write-Host "Seeding enrich..."
@@ -120,6 +122,42 @@ foreach ($id in $ingressIds) {
     ApiPost "/api/ingress/$id/test" @{ scenario = 'firing' } | Out-Null
   } catch {
     Write-Host "  ingress test $id failed: $($_.Exception.Message)"
+  }
+}
+
+if ($seed.sample_alerts) {
+  Write-Host "Pushing custom sample alerts..."
+  foreach ($a in $seed.sample_alerts) {
+    $ingName = [string]$a._ingress
+    $ing = $ingressMap[$ingName]
+    if (-not $ing) {
+      Write-Host "  skip sample: ingress '$ingName' not found"
+      continue
+    }
+    # Prefer UTF-8 sample file when present (Windows PowerShell JSON encoding).
+    $sampleFile = Join-Path $PSScriptRoot 'sample-zabbix-alert.json'
+    if ((Test-Path $sampleFile) -and $ingName -eq 'Demo Zabbix Kafka') {
+      $bytes = [System.IO.File]::ReadAllBytes($sampleFile)
+      if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        $bytes = $bytes[3..($bytes.Length - 1)]
+      }
+    } else {
+      $payload = @{}
+      $a.PSObject.Properties | ForEach-Object {
+        if ($_.Name -ne '_ingress') { $payload[$_.Name] = $_.Value }
+      }
+      $json = $payload | ConvertTo-Json -Depth 12 -Compress
+      $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    }
+    try {
+      Invoke-RestMethod -Uri "$base/api/ingress/$($ing.id)/push" -Method POST -Headers (@{
+        Authorization = "Bearer $($ing.token)"
+        'Content-Type' = 'application/json; charset=utf-8'
+      }) -Body $bytes | Out-Null
+      Write-Host "  pushed sample via $ingName"
+    } catch {
+      Write-Host "  sample push failed ($ingName): $($_.Exception.Message)"
+    }
   }
 }
 

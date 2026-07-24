@@ -423,7 +423,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, name, kind, matchers_json, match_key, templates_json, mappings_json,
                     write_labels, enabled, priority, created_at, updated_at,
-                    lookup_table_id
+                    lookup_table_id, lookup_table_ids_json, field_templates_json, label_extracts_json, lookup_match_keys_json
              FROM enrich_rules ORDER BY priority ASC, name ASC",
         )?;
         let rows = stmt.query_map([], map_enrich)?;
@@ -436,7 +436,7 @@ impl Db {
         conn.query_row(
             "SELECT id, name, kind, matchers_json, match_key, templates_json, mappings_json,
                     write_labels, enabled, priority, created_at, updated_at,
-                    lookup_table_id
+                    lookup_table_id, lookup_table_ids_json, field_templates_json, label_extracts_json, lookup_match_keys_json
              FROM enrich_rules WHERE id=?1",
             params![id.to_string()],
             map_enrich,
@@ -447,17 +447,25 @@ impl Db {
 
     pub fn upsert_enrich_rule(&self, r: &EnrichRule) -> Result<()> {
         let conn = self.lock()?;
+        let ids_json = serde_json::to_string(&r.lookup_table_ids)?;
+        let legacy_id = r.lookup_table_ids.first().map(|u| u.to_string());
         conn.execute(
             "INSERT INTO enrich_rules (
                 id, name, kind, matchers_json, match_key, templates_json, mappings_json,
-                write_labels, enabled, priority, created_at, updated_at, lookup_table_id
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                write_labels, enabled, priority, created_at, updated_at,
+                lookup_table_id, lookup_table_ids_json, field_templates_json, label_extracts_json,
+                lookup_match_keys_json
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, kind=excluded.kind, matchers_json=excluded.matchers_json,
                match_key=excluded.match_key, templates_json=excluded.templates_json,
                mappings_json=excluded.mappings_json, write_labels=excluded.write_labels,
                enabled=excluded.enabled, priority=excluded.priority,
-               updated_at=excluded.updated_at, lookup_table_id=excluded.lookup_table_id",
+               updated_at=excluded.updated_at, lookup_table_id=excluded.lookup_table_id,
+               lookup_table_ids_json=excluded.lookup_table_ids_json,
+               field_templates_json=excluded.field_templates_json,
+               label_extracts_json=excluded.label_extracts_json,
+               lookup_match_keys_json=excluded.lookup_match_keys_json",
             params![
                 r.id.to_string(),
                 r.name,
@@ -471,7 +479,11 @@ impl Db {
                 r.priority,
                 fmt_dt(r.created_at),
                 fmt_dt(r.updated_at),
-                r.lookup_table_id.map(|u| u.to_string()),
+                legacy_id,
+                ids_json,
+                serde_json::to_string(&r.field_templates)?,
+                serde_json::to_string(&r.label_extracts)?,
+                serde_json::to_string(&r.lookup_match_keys)?,
             ],
         )?;
         Ok(())
@@ -776,8 +788,26 @@ fn map_enrich(row: &Row<'_>) -> rusqlite::Result<EnrichRule> {
     let created: String = row.get(10)?;
     let updated: String = row.get(11)?;
     let lookup_table_id: Option<String> = row.get(12).unwrap_or(None);
+    let lookup_table_ids_json: String = row.get(13).unwrap_or_else(|_| "[]".into());
+    let field_templates_json: String = row.get(14).unwrap_or_else(|_| "{}".into());
+    let label_extracts_json: String = row.get(15).unwrap_or_else(|_| "{}".into());
+    let lookup_match_keys_json: String = row.get(16).unwrap_or_else(|_| "{}".into());
     let mappings: BTreeMap<String, Labels> =
         serde_json::from_str(&mappings_json).unwrap_or_default();
+    let mut lookup_table_ids: Vec<Uuid> = serde_json::from_str::<Vec<String>>(&lookup_table_ids_json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| Uuid::parse_str(&s).ok())
+        .collect();
+    if lookup_table_ids.is_empty() {
+        if let Some(s) = lookup_table_id {
+            if let Ok(u) = Uuid::parse_str(&s) {
+                lookup_table_ids.push(u);
+            }
+        }
+    }
+    let lookup_match_keys: BTreeMap<String, String> =
+        serde_json::from_str(&lookup_match_keys_json).unwrap_or_default();
     Ok(EnrichRule {
         id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -788,7 +818,10 @@ fn map_enrich(row: &Row<'_>) -> rusqlite::Result<EnrichRule> {
         match_key: row.get(4)?,
         templates: labels_from_json(&templates_json).unwrap_or_default(),
         mappings,
-        lookup_table_id: lookup_table_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        lookup_table_ids,
+        lookup_match_keys,
+        field_templates: labels_from_json(&field_templates_json).unwrap_or_default(),
+        label_extracts: labels_from_json(&label_extracts_json).unwrap_or_default(),
         write_labels: row.get::<_, i64>(7)? != 0,
         enabled: row.get::<_, i64>(8)? != 0,
         priority: row.get(9)?,

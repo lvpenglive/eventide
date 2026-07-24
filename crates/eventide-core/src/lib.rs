@@ -7,7 +7,10 @@ mod ingress;
 mod models;
 mod template;
 
-pub use enrich::{enrich_alert, matchers_match, EnrichKind, EnrichRule, LookupTable};
+pub use enrich::{
+    enrich_alert, format_lookup_text, matchers_match, parse_lookup_rows_auto, parse_lookup_text,
+    EnrichKind, EnrichRule, LookupTable,
+};
 pub use eval::{
     alert_title, apply_evaluation, compare, evaluate_rule, evaluate_sample, merge_labels,
     EvaluateResult, MetricSample,
@@ -20,4 +23,6 @@ pub use ingress::{
     GenericWebhook,
 };
 pub use models::*;
-pub use template::{render_map, render_template, TemplateContext};
+pub use template::{
+    apply_string_transform, render_map, render_template, split_path_transform, TemplateContext,
+};

@@ -1,15 +1,16 @@
 //! REST API for Eventide.
 
+mod iam;
 mod overview;
 
-use crate::auth::{self, require_auth};
+use crate::auth::{self, require_auth, require_route_perm};
 use crate::scheduler;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use eventide_core::*;
@@ -79,6 +80,32 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(get_ingress).put(update_ingress).delete(delete_ingress),
         )
         .route("/api/ingress/{id}/test", post(test_ingress))
+        // IAM
+        .route("/api/permissions", get(iam::list_permissions))
+        .route(
+            "/api/departments",
+            get(iam::list_departments).post(iam::create_department),
+        )
+        .route(
+            "/api/departments/{id}",
+            put(iam::update_department).delete(iam::delete_department),
+        )
+        .route("/api/roles", get(iam::list_roles).post(iam::create_role))
+        .route(
+            "/api/roles/{id}",
+            put(iam::update_role).delete(iam::delete_role),
+        )
+        .route("/api/users", get(iam::list_users).post(iam::create_user))
+        .route(
+            "/api/users/{id}",
+            put(iam::update_user).delete(iam::delete_user),
+        )
+        .route(
+            "/api/users/{id}/reset-password",
+            post(iam::reset_password),
+        )
+        // Inner: perm check; Outer: JWT auth (last layer = outermost)
+        .layer(middleware::from_fn(require_route_perm))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state);
 
@@ -624,6 +651,34 @@ fn sample_ingress_payload(route: &IngressRoute, scenario: &str) -> String {
     let now_s = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let fp = format!("test-{}", route.id);
     let probe_id = format!("test-probe-{}", route.id);
+    // Zabbix / custom field-mapping sample (matches Demo Zabbix Kafka options).
+    let mapped = route.options.get("map_name").map(|s| s.as_str()) == Some("sourcealertkey")
+        || route
+            .options
+            .get("map_ip")
+            .map(|s| s.contains("sourceciname"))
+            .unwrap_or(false);
+    if mapped {
+        let status = match scenario {
+            "recover" | "probe_recover" => 0,
+            _ => 2,
+        };
+        return serde_json::json!({
+            "severity": 4,
+            "summary": "麒麟主机当前系统磁盘[vdb] IO使用百分比为: 97.49 %, 已超过90%阈值",
+            "lastoccurrence": now_s,
+            "status": status,
+            "sourceid": 1,
+            "sourceeventid": "71978",
+            "sourceciname": "82.12.161.32_kylin",
+            "sourcealertkey": "vfs.dev.util[vdb]",
+            "sourceseverity": "High",
+            "sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]_Application:Disk vdb",
+            "ciinstance": "Application:Disk vdb",
+            "eventtypeid": "*UNKNOWN*"
+        })
+        .to_string();
+    }
     match scenario {
         "recover" => serde_json::json!({
             "alerts": [{
@@ -745,6 +800,8 @@ async fn delete_silence(
 #[derive(Deserialize)]
 struct EnrichInput {
     name: String,
+    #[serde(default = "default_enrich_kind")]
+    #[allow(dead_code)]
     kind: String,
     #[serde(default)]
     matchers: BTreeMap<String, String>,
@@ -754,14 +811,31 @@ struct EnrichInput {
     templates: BTreeMap<String, String>,
     #[serde(default)]
     mappings: BTreeMap<String, BTreeMap<String, String>>,
+    /// Preferred: one rule may reference many lookup tables.
+    #[serde(default)]
+    lookup_table_ids: Vec<Uuid>,
+    /// Legacy single-id field; merged into `lookup_table_ids` when present.
     #[serde(default)]
     lookup_table_id: Option<Uuid>,
+    /// Per-table match label for this rule: table uuid → label name (e.g. sss_ip).
+    #[serde(default)]
+    lookup_match_keys: BTreeMap<String, String>,
+    /// First-class field overrides: severity / ip / alertname / summary.
+    #[serde(default)]
+    field_templates: BTreeMap<String, String>,
+    /// Before lookup: write labels from templates (supports `|before:` etc.).
+    #[serde(default)]
+    label_extracts: BTreeMap<String, String>,
     #[serde(default)]
     write_labels: bool,
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default = "default_priority")]
     priority: i32,
+}
+
+fn default_enrich_kind() -> String {
+    "auto".into()
 }
 
 fn default_priority() -> i32 {
@@ -773,16 +847,38 @@ fn enrich_from_input(
     input: EnrichInput,
     created_at: DateTime<Utc>,
 ) -> ApiResult<EnrichRule> {
-    let kind = EnrichKind::parse(&input.kind).ok_or_else(|| ApiError::bad("bad enrich kind"))?;
-    if kind == EnrichKind::LabelMap && input.match_key.trim().is_empty() {
-        return Err(ApiError::bad("label_map requires match_key"));
+    let mut lookup_table_ids = input.lookup_table_ids;
+    if let Some(tid) = input.lookup_table_id {
+        if !lookup_table_ids.contains(&tid) {
+            lookup_table_ids.push(tid);
+        }
     }
-    if kind == EnrichKind::AnnotationTemplate && input.templates.is_empty() {
-        return Err(ApiError::bad("annotation_template requires templates"));
+    let mut seen = std::collections::HashSet::new();
+    lookup_table_ids.retain(|u| seen.insert(*u));
+
+    let has_tpl = !input.templates.is_empty();
+    let has_fields = !input.field_templates.is_empty();
+    let has_extracts = !input.label_extracts.is_empty();
+    let has_map = !input.match_key.trim().is_empty() && !input.mappings.is_empty();
+    let has_lookup = !lookup_table_ids.is_empty();
+    if !has_tpl && !has_fields && !has_extracts && !has_map && !has_lookup {
+        return Err(ApiError::bad(
+            "enrich rule needs at least one of: templates, field_templates, label_extracts, mappings(+match_key), or lookup_table_ids",
+        ));
     }
-    if kind == EnrichKind::Lookup && input.lookup_table_id.is_none() {
-        return Err(ApiError::bad("lookup requires lookup_table_id"));
+    if !input.mappings.is_empty() && input.match_key.trim().is_empty() {
+        return Err(ApiError::bad("mappings require match_key"));
     }
+
+    let kind = EnrichRule::infer_kind(
+        &input.templates,
+        &input.mappings,
+        &lookup_table_ids,
+        &input.match_key,
+        &input.field_templates,
+        &input.label_extracts,
+    );
+
     Ok(EnrichRule {
         id,
         name: input.name,
@@ -791,7 +887,10 @@ fn enrich_from_input(
         match_key: input.match_key,
         templates: input.templates,
         mappings: input.mappings,
-        lookup_table_id: input.lookup_table_id,
+        lookup_table_ids,
+        lookup_match_keys: input.lookup_match_keys,
+        field_templates: input.field_templates,
+        label_extracts: input.label_extracts,
         write_labels: input.write_labels,
         enabled: input.enabled,
         priority: input.priority,
@@ -876,6 +975,7 @@ struct EnrichPreviewInput {
     /// Or apply all saved rules when `rule` is omitted.
     #[serde(default)]
     use_saved: bool,
+    /// Flat labels (legacy). Ignored when `payload` is set.
     #[serde(default)]
     labels: BTreeMap<String, String>,
     #[serde(default)]
@@ -886,33 +986,25 @@ struct EnrichPreviewInput {
     severity: Option<String>,
     #[serde(default)]
     rule_name: Option<String>,
+    /// Raw ingress JSON (Kafka / Generic / Alertmanager). Preferred for preview.
+    #[serde(default)]
+    payload: Option<serde_json::Value>,
+    /// Use this ingress route's field mapping to parse `payload`.
+    #[serde(default)]
+    ingress_id: Option<Uuid>,
 }
 
 async fn preview_enrich(
     State(state): State<Arc<AppState>>,
     Json(input): Json<EnrichPreviewInput>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let severity = input
-        .severity
-        .as_deref()
-        .and_then(Severity::parse)
-        .unwrap_or(Severity::Warning);
-    let mut event = AlertEvent {
-        id: Uuid::nil(),
-        rule_id: Uuid::nil(),
-        fingerprint: "preview".into(),
-        status: AlertStatus::Firing,
-        severity,
-        labels: input.labels,
-        annotations: input.annotations,
-        value: input.value,
-        starts_at: Utc::now(),
-        ends_at: None,
-        pending_since: None,
-        last_evaluated_at: Utc::now(),
-        notified_firing: false,
-        notified_resolved: false,
-    };
+    let (mut event, parsed_via) = preview_event_from_input(state.as_ref(), &input)?;
+
+    let before = serde_json::json!({
+        "labels": event.labels.clone(),
+        "annotations": event.annotations.clone(),
+        "severity": event.severity.as_str(),
+    });
 
     let mut rules = Vec::new();
     if let Some(draft) = input.rule {
@@ -926,7 +1018,165 @@ async fn preview_enrich(
     Ok(Json(serde_json::json!({
         "labels": event.labels,
         "annotations": event.annotations,
+        "severity": event.severity.as_str(),
+        "parsed_via": parsed_via,
+        "before": before,
     })))
+}
+
+fn preview_event_from_input(
+    state: &AppState,
+    input: &EnrichPreviewInput,
+) -> ApiResult<(AlertEvent, String)> {
+    if let Some(payload) = &input.payload {
+        let options = if let Some(id) = input.ingress_id {
+            let route = state
+                .db
+                .get_ingress_route(id)
+                .map_err(ApiError::internal)?
+                .ok_or_else(|| ApiError::not_found("ingress route not found"))?;
+            route.options
+        } else {
+            BTreeMap::new()
+        };
+        let raw = serde_json::to_vec(payload).map_err(|e| ApiError::bad(e.to_string()))?;
+        match parse_ingress_payload_with_options(&raw, &options) {
+            Ok(alerts) => {
+                let incoming = alerts.into_iter().next().ok_or_else(|| {
+                    ApiError::bad("payload produced no alerts (check JSON / 字段映射)")
+                })?;
+                let via = if input.ingress_id.is_some() {
+                    "ingress_mapping"
+                } else {
+                    "builtin_parser"
+                };
+                return Ok((alert_event_from_ingress(&incoming), via.into()));
+            }
+            Err(parse_err) => {
+                // Fallback: flat labels object {"ip":"...","alertname":"..."}
+                if looks_like_external_alert(payload) {
+                    return Err(ApiError::bad(format!(
+                        "{parse_err}（这是接入原始 JSON，请在试跑里选择对应的「字段映射接入」）"
+                    )));
+                }
+                if let Some(labels) = flat_string_map(payload) {
+                    let severity = input
+                        .severity
+                        .as_deref()
+                        .and_then(Severity::parse)
+                        .or_else(|| labels.get("severity").and_then(|s| Severity::parse(s)))
+                        .unwrap_or(Severity::Warning);
+                    return Ok((
+                        AlertEvent {
+                            id: Uuid::nil(),
+                            rule_id: Uuid::nil(),
+                            fingerprint: "preview".into(),
+                            status: AlertStatus::Firing,
+                            severity,
+                            labels,
+                            annotations: input.annotations.clone(),
+                            value: input.value,
+                            starts_at: Utc::now(),
+                            ends_at: None,
+                            pending_since: None,
+                            last_evaluated_at: Utc::now(),
+                            notified_firing: false,
+                            notified_resolved: false,
+                        },
+                        "labels".into(),
+                    ));
+                }
+                return Err(ApiError::bad(format!(
+                    "{parse_err}（Kafka/自定义 JSON 请选择带字段映射的接入）"
+                )));
+            }
+        }
+    }
+
+    let severity = input
+        .severity
+        .as_deref()
+        .and_then(Severity::parse)
+        .unwrap_or(Severity::Warning);
+    Ok((
+        AlertEvent {
+            id: Uuid::nil(),
+            rule_id: Uuid::nil(),
+            fingerprint: "preview".into(),
+            status: AlertStatus::Firing,
+            severity,
+            labels: input.labels.clone(),
+            annotations: input.annotations.clone(),
+            value: input.value,
+            starts_at: Utc::now(),
+            ends_at: None,
+            pending_since: None,
+            last_evaluated_at: Utc::now(),
+            notified_firing: false,
+            notified_resolved: false,
+        },
+        "labels".into(),
+    ))
+}
+
+fn flat_string_map(v: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+    let obj = v.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut out = BTreeMap::new();
+    for (k, val) in obj {
+        let s = match val {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => continue,
+            _ => return None,
+        };
+        out.insert(k.clone(), s);
+    }
+    Some(out)
+}
+
+fn looks_like_external_alert(v: &serde_json::Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return v.get("alerts").is_some();
+    };
+    [
+        "sourcealertkey",
+        "sourceidentifier",
+        "sourceciname",
+        "eventType",
+        "alerts",
+        "status",
+        "summary",
+    ]
+    .iter()
+    .filter(|k| obj.contains_key(**k))
+    .count()
+        >= 2
+}
+
+fn alert_event_from_ingress(incoming: &IngressAlert) -> AlertEvent {
+    AlertEvent {
+        id: Uuid::nil(),
+        rule_id: Uuid::nil(),
+        fingerprint: incoming
+            .fingerprint
+            .clone()
+            .unwrap_or_else(|| "preview".into()),
+        status: incoming.status,
+        severity: incoming.severity,
+        labels: incoming.labels.clone(),
+        annotations: incoming.annotations.clone(),
+        value: incoming.value,
+        starts_at: incoming.starts_at.unwrap_or_else(Utc::now),
+        ends_at: incoming.ends_at,
+        pending_since: None,
+        last_evaluated_at: Utc::now(),
+        notified_firing: false,
+        notified_resolved: false,
+    }
 }
 
 // ---- lookup tables ----
@@ -938,8 +1188,15 @@ struct LookupInput {
     description: String,
     #[serde(default = "default_lookup_key")]
     key_label: String,
+    /// Structured rows (JSON object). Preferred when non-empty.
     #[serde(default)]
     rows: BTreeMap<String, BTreeMap<String, String>>,
+    /// Omnibus / `.lookup` 原文，或 JSON 对象字符串；仅在 `rows` 为空时解析。
+    #[serde(default)]
+    text: Option<String>,
+    /// When true and `text` is `.lookup` format, override `key_label` from header.
+    #[serde(default)]
+    sync_key_from_text: bool,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -956,15 +1213,39 @@ fn lookup_from_input(
     if input.name.trim().is_empty() {
         return Err(ApiError::bad("name required"));
     }
-    if input.key_label.trim().is_empty() {
+    let mut key_label = input.key_label;
+    // Prefer structured rows from the client when present (avoids empty saves when
+    // the browser already parsed .lookup text, or the server binary is stale).
+    let rows = if !input.rows.is_empty() {
+        input.rows
+    } else if let Some(text) = input.text.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let (parsed_key, rows) =
+            parse_lookup_rows_auto(text).map_err(|e| ApiError::bad(e))?;
+        if input.sync_key_from_text {
+            if let Some(k) = parsed_key {
+                if !k.is_empty() {
+                    key_label = k;
+                }
+            }
+        }
+        rows
+    } else {
+        BTreeMap::new()
+    };
+    if rows.is_empty() {
+        return Err(ApiError::bad(
+            "lookup rows empty：请检查外表内容是否已正确解析（列需用空格或 Tab 分隔）",
+        ));
+    }
+    if key_label.trim().is_empty() {
         return Err(ApiError::bad("key_label required"));
     }
     Ok(LookupTable {
         id,
         name: input.name,
         description: input.description,
-        key_label: input.key_label,
-        rows: input.rows,
+        key_label,
+        rows,
         enabled: input.enabled,
         created_at,
         updated_at: Utc::now(),

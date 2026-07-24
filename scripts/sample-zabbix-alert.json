@@ -1,0 +1,14 @@
+{
+  "severity": 4,
+  "summary": "麒麟主机当前系统磁盘[vdb] IO使用百分比为: 97.49 %, 已超过90%阈值",
+  "lastoccurrence": "2026-07-18 08:39:33",
+  "status": 2,
+  "sourceid": 1,
+  "sourceeventid": "71978",
+  "sourceciname": "82.12.161.32_kylin",
+  "sourcealertkey": "vfs.dev.util[vdb]",
+  "sourceseverity": "High",
+  "sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]_Application:Disk vdb",
+  "ciinstance": "Application:Disk vdb",
+  "eventtypeid": "*UNKNOWN*"
+}

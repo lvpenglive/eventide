@@ -4,6 +4,7 @@ use crate::fingerprint::alert_fingerprint;
 use crate::models::{
     AlertEvent, AlertStatus, AlertTransition, IngressAlert, IngressRoute, Labels, Severity,
 };
+use crate::template::{apply_string_transform, split_path_transform};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -523,21 +524,22 @@ fn path_as_string(root: &serde_json::Value, path: &str) -> Option<String> {
     if path.trim().is_empty() {
         return None;
     }
-    let v = json_path_value(root, path)?;
-    match v {
-        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Null => None,
+    let (json_path, transform) = split_path_transform(path);
+    let v = json_path_value(root, &json_path)?;
+    let raw = match v {
+        serde_json::Value::String(s) if !s.is_empty() => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => return None,
         other => {
             let s = other.to_string();
             if s == "null" || s.is_empty() {
-                None
-            } else {
-                Some(s.trim_matches('"').to_string())
+                return None;
             }
+            s.trim_matches('"').to_string()
         }
-    }
+    };
+    Some(apply_string_transform(&raw, transform.as_deref()))
 }
 
 fn path_as_f64(root: &serde_json::Value, path: &str) -> Option<f64> {
@@ -608,6 +610,8 @@ pub fn parse_mapped_alert(v: &serde_json::Value, m: &FieldMapping) -> Option<Ing
     let mut labels: Labels = BTreeMap::new();
     labels.insert("alertname".into(), name);
     if !ip.is_empty() {
+        // Keep ip / alertIp / instance in sync — enrich lookups usually match on `ip`.
+        labels.insert("ip".into(), ip.clone());
         labels.insert("alertIp".into(), ip.clone());
         labels.insert("instance".into(), ip);
     }
@@ -908,6 +912,43 @@ mod tests {
             .get("description")
             .unwrap()
             .contains("disk"));
+    }
+
+    #[test]
+    fn parse_field_mapping_ip_before_underscore() {
+        let raw = r#"{
+            "status": 2,
+            "summary": "disk high",
+            "sourceciname": "82.12.161.32_kylin",
+            "sourcealertkey": "vfs.dev.util[vdb]",
+            "sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]",
+            "sourceseverity": "High"
+        }"#;
+        let mut opts = BTreeMap::new();
+        opts.insert("map_status".into(), "status".into());
+        opts.insert("map_fire".into(), "1,2".into());
+        opts.insert("map_resolve".into(), "0".into());
+        opts.insert("map_name".into(), "sourcealertkey".into());
+        opts.insert("map_description".into(), "summary".into());
+        opts.insert("map_ip".into(), "sourceciname|before:_".into());
+        opts.insert("map_fingerprint".into(), "sourceidentifier".into());
+        opts.insert("map_severity".into(), "sourceseverity".into());
+        opts.insert("map_critical".into(), "High,Disaster,Critical".into());
+
+        let alerts = parse_ingress_payload_with_options(raw.as_bytes(), &opts).unwrap();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(
+            alerts[0].labels.get("alertIp").map(|s| s.as_str()),
+            Some("82.12.161.32")
+        );
+        assert_eq!(
+            alerts[0].labels.get("ip").map(|s| s.as_str()),
+            Some("82.12.161.32")
+        );
+        assert_eq!(
+            alerts[0].labels.get("instance").map(|s| s.as_str()),
+            Some("82.12.161.32")
+        );
     }
 
     #[test]
