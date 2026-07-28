@@ -145,6 +145,12 @@ pub enum ChannelKind {
     DingTalk,
     WeCom,
     Feishu,
+    /// Slack Incoming Webhook.
+    Slack,
+    /// Telegram Bot API (`sendMessage`).
+    Telegram,
+    /// Custom HTTP JSON POST/PUT (user-defined body template).
+    Http,
 }
 
 impl ChannelKind {
@@ -154,6 +160,9 @@ impl ChannelKind {
             Self::DingTalk => "dingtalk",
             Self::WeCom => "wecom",
             Self::Feishu => "feishu",
+            Self::Slack => "slack",
+            Self::Telegram => "telegram",
+            Self::Http => "http",
         }
     }
 
@@ -163,6 +172,9 @@ impl ChannelKind {
             "dingtalk" | "ding" => Some(Self::DingTalk),
             "wecom" | "wechat" | "qywx" | "企业微信" => Some(Self::WeCom),
             "feishu" | "lark" | "飞书" => Some(Self::Feishu),
+            "slack" => Some(Self::Slack),
+            "telegram" | "tg" => Some(Self::Telegram),
+            "http" | "custom" | "http_json" | "json" => Some(Self::Http),
             _ => None,
         }
     }
@@ -288,9 +300,47 @@ pub struct NotifyChannel {
     pub url: String,
     /// Optional secret for signed robots (DingTalk / Feishu).
     pub secret: Option<String>,
+    /// Channel options (e.g. `template_firing` / `template_resolved` / `template`).
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl NotifyChannel {
+    /// Resolve notify body template for a transition.
+    /// Prefers `template_firing` / `template_resolved`; falls back to `template`.
+    pub fn notify_template(&self, transition: AlertTransition) -> Option<&str> {
+        let specific = match transition {
+            AlertTransition::BecameFiring => self.options.get("template_firing"),
+            AlertTransition::BecameResolved => self.options.get("template_resolved"),
+            AlertTransition::Unchanged => self
+                .options
+                .get("template_firing")
+                .or_else(|| self.options.get("template")),
+        };
+        specific
+            .or_else(|| self.options.get("template"))
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    /// Custom HTTP JSON body template (`json_firing` / `json_resolved` / `json_body`).
+    pub fn json_template(&self, transition: AlertTransition) -> Option<&str> {
+        let specific = match transition {
+            AlertTransition::BecameFiring => self.options.get("json_firing"),
+            AlertTransition::BecameResolved => self.options.get("json_resolved"),
+            AlertTransition::Unchanged => self
+                .options
+                .get("json_firing")
+                .or_else(|| self.options.get("json_body")),
+        };
+        specific
+            .or_else(|| self.options.get("json_body"))
+            .map(|s| s.as_str())
+            .filter(|s| !s.trim().is_empty())
+    }
 }
 
 /// Push-alert ingress route (Alertmanager / generic webhook / Kafka).
@@ -334,6 +384,9 @@ pub struct NotifyLog {
     pub transition: AlertTransition,
     pub success: bool,
     pub error: Option<String>,
+    /// Plain-text (or JSON) payload that was / would be sent.
+    #[serde(default)]
+    pub body: String,
     pub created_at: DateTime<Utc>,
 }
 

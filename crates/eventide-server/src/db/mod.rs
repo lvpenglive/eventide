@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS notify_channels (
     kind TEXT NOT NULL,
     url TEXT NOT NULL,
     secret TEXT,
+    options_json TEXT NOT NULL DEFAULT '{}',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS notify_logs (
     transition TEXT NOT NULL,
     success INTEGER NOT NULL,
     error TEXT,
+    body TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -418,6 +420,50 @@ INSERT INTO schema_meta(key, value) VALUES('version', '9')
             conn.execute_batch(
                 r#"
 INSERT INTO schema_meta(key, value) VALUES('version', '10')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v11: notify_logs.body for message content query
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 11 {
+            let _ = conn.execute(
+                "ALTER TABLE notify_logs ADD COLUMN body TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+CREATE INDEX IF NOT EXISTS idx_notify_logs_created ON notify_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_notify_logs_channel ON notify_logs(channel_id);
+INSERT INTO schema_meta(key, value) VALUES('version', '11')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+"#,
+            )?;
+        }
+
+        // v12: notify channel options (message templates)
+        let ver: i64 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key='version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if ver < 12 {
+            let _ = conn.execute(
+                "ALTER TABLE notify_channels ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+INSERT INTO schema_meta(key, value) VALUES('version', '12')
   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 "#,
             )?;

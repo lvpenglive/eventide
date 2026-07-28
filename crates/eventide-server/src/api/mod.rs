@@ -52,6 +52,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/channels/{id}",
             get(get_channel).put(update_channel).delete(delete_channel),
         )
+        .route("/api/channels/{id}/test", post(test_channel))
+        .route("/api/notifies", get(list_notifies))
         .route("/api/rules", get(list_rules).post(create_rule))
         .route(
             "/api/rules/{id}",
@@ -269,6 +271,8 @@ struct ChannelInput {
     kind: String,
     url: String,
     secret: Option<String>,
+    #[serde(default)]
+    options: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -303,6 +307,7 @@ async fn create_channel(
         kind,
         url: input.url,
         secret: input.secret,
+        options: input.options,
         enabled: input.enabled,
         created_at: now,
         updated_at: now,
@@ -330,6 +335,7 @@ async fn update_channel(
         kind,
         url: input.url,
         secret: input.secret,
+        options: input.options,
         enabled: input.enabled,
         created_at: existing.created_at,
         updated_at: Utc::now(),
@@ -349,6 +355,108 @@ async fn delete_channel(
     } else {
         Err(ApiError::not_found("channel not found"))
     }
+}
+
+async fn test_channel(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let id = parse_id(&id)?;
+    let ch = state
+        .db
+        .get_channel(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("channel not found"))?;
+    let text = format!(
+        "[Eventide 渠道测试]\n渠道: {}\n类型: {}\n时间: {}\n若收到此消息，说明通知渠道配置正常。",
+        ch.name,
+        ch.kind.as_str(),
+        Utc::now().to_rfc3339()
+    );
+    let report = state.notifier.send_text_report(&ch, &text).await;
+    let now = Utc::now();
+    let _ = state.db.insert_notify_log(&NotifyLog {
+        id: Uuid::new_v4(),
+        alert_id: Uuid::nil(),
+        channel_id: ch.id,
+        transition: AlertTransition::Unchanged,
+        success: report.ok,
+        error: report
+            .error
+            .clone()
+            .or_else(|| Some("test".into())),
+        body: text.clone(),
+        created_at: now,
+    });
+    Ok(Json(serde_json::json!({
+        "ok": report.ok,
+        "hint": if report.ok {
+            "测试消息已发送，请到对应群 / Webhook 查收"
+        } else {
+            "发送失败，请查看下方请求与返回"
+        },
+        "text": text,
+        "kind": report.kind,
+        "request_url": report.request_url,
+        "request_body": report.request_body,
+        "http_status": report.http_status,
+        "response_body": report.response_body,
+        "error": report.error,
+    })))
+}
+
+#[derive(Deserialize)]
+struct NotifyListQuery {
+    channel_id: Option<String>,
+    /// true | false | 1 | 0
+    success: Option<String>,
+    q: Option<String>,
+    #[serde(default = "default_notify_limit")]
+    limit: usize,
+}
+
+fn default_notify_limit() -> usize {
+    100
+}
+
+async fn list_notifies(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<NotifyListQuery>,
+) -> ApiResult<Json<Vec<serde_json::Value>>> {
+    let channel_id = match q.channel_id.as_deref() {
+        Some(s) if !s.is_empty() => Some(parse_id(s)?),
+        _ => None,
+    };
+    let success = match q.success.as_deref() {
+        Some("1") | Some("true") | Some("ok") => Some(true),
+        Some("0") | Some("false") | Some("fail") => Some(false),
+        _ => None,
+    };
+    let logs = state
+        .db
+        .list_notify_logs(channel_id, success, q.q.as_deref(), q.limit)
+        .map_err(ApiError::internal)?;
+    let channels = state.db.list_channels().map_err(ApiError::internal)?;
+    let ch_map: BTreeMap<_, _> = channels.into_iter().map(|c| (c.id, c)).collect();
+    let out: Vec<serde_json::Value> = logs
+        .into_iter()
+        .map(|log| {
+            let ch = ch_map.get(&log.channel_id);
+            serde_json::json!({
+                "id": log.id,
+                "alert_id": log.alert_id,
+                "channel_id": log.channel_id,
+                "channel_name": ch.map(|c| c.name.as_str()).unwrap_or(""),
+                "channel_kind": ch.map(|c| c.kind.as_str()).unwrap_or(""),
+                "transition": log.transition,
+                "success": log.success,
+                "error": log.error,
+                "body": log.body,
+                "created_at": log.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 // ---- rules ----

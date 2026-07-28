@@ -26,9 +26,10 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
 - [9. 快速开始](#9-快速开始)
 - [10. 配置说明](#10-配置说明)
 - [11. 使用指南](#11-使用指南)
+  - [11.8 抗告警风暴](#118-抗告警风暴怎么用)
 - [12. 容量与边界](#12-容量与边界)
 - [13. 路线图](#13-路线图)
-  - [13.1 下一步：抗告警风暴](#131-下一步优先抗告警风暴--开工清单)
+  - [13.1 抗告警风暴实现清单](#131-下一步优先抗告警风暴--开工清单)
 - [14. 开发与构建](#14-开发与构建)
 
 ---
@@ -49,9 +50,10 @@ Eventide 定位为 **团队级告警中枢**：
 | 多数据源 | Prometheus、VictoriaMetrics、Kafka、Log(Loki) |
 | 告警接入 | Alertmanager / Generic Webhook / Kafka；支持自定义字段映射 |
 | 告警丰富 | 台账查表、标签抽取、模板改写描述 / IP / 级别 |
+| 抗风暴 | 通知节流、时间窗聚合、接入 429 / 降级（`[storm]`，见 §11.8） |
 | 去重 | 规则 + 标签生成的告警标识（fingerprint） |
 | 静默 | 按规则 ID / 标签匹配 |
-| 通知 | Webhook、钉钉、企微、飞书（内容为丰富后的告警） |
+| 通知 | Webhook、自定义 HTTP JSON、钉钉、企微、飞书、Slack、Telegram |
 | 控制台 | 登录、侧栏菜单、CRUD 配置 |
 
 ---
@@ -222,12 +224,49 @@ Ingress 场景会再带上 `route_id` 前缀，避免不同接入互相覆盖。
 
 | kind | 说明 |
 |------|------|
-| `webhook` | POST JSON |
-| `dingtalk` | 钉钉机器人（可签名） |
-| `wecom` | 企业微信机器人 |
-| `feishu` | 飞书机器人（可签名） |
+| `webhook` | POST 固定 Eventide JSON（结构化字段 + text） |
+| `http` | **自定义 HTTP JSON**：可配报文模板、方法、请求头、Bearer |
+| `dingtalk` | 钉钉机器人（可签名；text / markdown；可 @） |
+| `wecom` | 企业微信机器人（text / markdown；text 可 @） |
+| `feishu` | 飞书机器人（可签名；text / interactive 卡片） |
+| `slack` | Slack Incoming Webhook（text / mrkdwn blocks） |
+| `telegram` | Telegram Bot `sendMessage`（需 `options.chat_id`） |
 
 仅在状态边沿（变为 firing / 变为 resolved）发送，避免刷屏。
+
+渠道可配置 **通知正文模板**（`options.template_firing` / `template_resolved`，控制台编辑）。留空则用默认纯文本。变量与丰富规则相同，并额外支持：
+
+| 变量 | 含义 |
+|------|------|
+| `{{title}}` | 默认标题（级别 + 规则名 + 阈值 + 当前值） |
+| `{{transition}}` | 边沿：`firing` / `resolved` |
+| `{{labels}}` / `{{annotations}}` | 全部标签 / 注解的 JSON |
+| `{{labels.x}}` / `{{annotations.x}}` | 单个字段（可接 `\|before:` 等变换） |
+| `{{severity}}` `{{status}}` `{{value}}` `{{fingerprint}}` `{{rule.name}}` | 内置字段 |
+
+其它常用 `options`：
+
+| 键 | 说明 |
+|----|------|
+| `msg_type` | `text`（默认）或 `markdown` |
+| `at_all` | `1`/`true`：钉钉/企微 text 模式 @所有人 |
+| `at_mobiles` | 逗号分隔手机号（钉钉/企微 text） |
+| `chat_id` | Telegram 会话 ID（必填） |
+| `json_firing` / `json_resolved` | 自定义 HTTP 渠道的 JSON 报文模板 |
+| `http_method` | `POST`（默认）/ `PUT` / `PATCH` |
+| `headers_json` | 自定义请求头，如 `{"X-Token":"abc"}` |
+
+`http` 渠道示例模板：
+
+```json
+{
+  "msg": {{annotations.summary|json}},
+  "severity": {{severity|json}},
+  "labels": {{labels}}
+}
+```
+
+`|json` 会输出带引号的 JSON 字符串字面量，避免描述里的引号弄破报文。
 
 ### 5.7 告警丰富 Enrich 与台账 Lookup
 
@@ -406,6 +445,10 @@ username = "admin"
 password = "admin123"
 jwt_secret = "eventide-dev-secret-change-me"
 token_ttl_hours = 24
+
+# 抗风暴见 §11.8；完整字段见仓库内 eventide.toml 示例
+# [storm]
+# ...
 ```
 
 | 字段 | 含义 |
@@ -415,6 +458,7 @@ token_ttl_hours = 24
 | `static_dir` | 控制台静态资源目录 |
 | `scheduler_tick_seconds` | 调度与 Kafka Ingress 轮询基准间隔 |
 | `auth.*` | 登录账号、JWT 密钥与有效期 |
+| `[storm]` | 通知节流 / 聚合 / 接入削峰（**改后需重启**；用法见 [§11.8](#118-抗告警风暴怎么用)） |
 
 启动时可指定配置路径：
 
@@ -439,7 +483,7 @@ cargo run -p eventide-server -- /path/to/eventide.toml
 | 告警事件 | 按状态筛选、详情（含丰富后 labels） |
 | 静默策略 | 时间窗 + 标签匹配 |
 | 用户 / 部门 / 角色 | 账号与权限（按部署启用） |
-| 系统设置 | 只读运行信息（改密码改 toml 后重启） |
+| 系统设置 | 只读运行信息（改密码 / `[storm]` 改 toml 后重启） |
 
 ### 11.2 数据源配置示例
 
@@ -680,6 +724,78 @@ curl -s http://127.0.0.1:8080/api/overview \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+### 11.8 抗告警风暴怎么用
+
+短时间涌入大量相似告警时，靠 **节流 → 聚合 → 接入削峰** 保护通知渠道与进程。  
+配置写在 `eventide.toml` 的 `[storm]`（**控制台暂不可改**；修改后必须重启服务）。
+
+#### 推荐默认（仓库 `eventide.toml` 已接近此配置）
+
+```toml
+[storm]
+# —— 通知节流（P0）——
+throttle_enabled = true
+min_interval_seconds = 60      # 同一 key 最短间隔（秒）
+max_per_window = 20            # 滑动窗口内最多发送条数
+window_seconds = 60
+# fingerprint = 按单条告警限流
+# labels:alertname     = 同名告警共用额度（多主机风暴更有效）
+# labels:alertname,ip  = 按名称+IP
+throttle_key = "fingerprint"
+
+# —— 时间窗聚合（P1）——
+aggregate_enabled = true
+aggregate_window_seconds = 30
+group_by = "alertname"         # 可写 alertname,severity
+aggregate_mode = "head+summary"  # 或 summary_only
+aggregate_sample_labels = "ip,instance,alertIp"
+aggregate_sample_limit = 10
+
+# —— 接入削峰（P2）——
+ingress_max_inflight = 100     # 并发接入上限；0=不限制
+degrade_skip_notify = false    # true=高压时只落库不发通知
+degrade_notify_per_sec = 50    # 通知尝试速率阈值（配合 degrade）
+```
+
+#### 各能力说明
+
+| 能力 | 作用 | 告警事件 | 通知 |
+|------|------|----------|------|
+| **节流** | 同渠道+同 key 限制发送频率 | 正常入库 | 超限跳过，日志 `throttled` |
+| **聚合** | 窗口内同 `group_by` 多条触发合成 | 仍按 fingerprint 多行 | 首条可立即发；窗口结束发摘要；中间记 `aggregated` |
+| **削峰** | HTTP 接入并发过高 | — | 返回 **429** `ingress overloaded` |
+| **降级** | `degrade_skip_notify=true` 且高压 | 正常入库 | 跳过发送，日志 `degraded` |
+
+聚合模式：
+
+- `head+summary`：窗口内第一条立刻通知，结束时若 count>1 再发一条 `[聚合告警]` 摘要  
+- `summary_only`：窗口内不发单条，只在结束时发摘要  
+
+#### 典型场景怎么配
+
+| 场景 | 建议 |
+|------|------|
+| 单机反复抖动刷屏 | `throttle_key = "fingerprint"`，保持默认节流即可 |
+| 上百台主机同一 `alertname` 同时炸 | `throttle_key = "labels:alertname"`，并打开 `aggregate_enabled` |
+| Webhook 被压测打爆 | 调低 `ingress_max_inflight`；必要时 `degrade_skip_notify = true` |
+
+#### 如何确认生效
+
+1. 重启后日志可见：`storm throttle enabled` / `storm aggregate enabled` / `storm ingress pressure configured`  
+2. 通知记录（`notify_logs`）中：  
+   - `error=throttled`：被节流  
+   - `error=aggregated`：计入聚合窗口、未单发  
+   - `error` 含 `aggregate:...`：摘要已发送  
+   - `error=degraded`：高压降级跳过通知  
+3. 控制台 **告警事件** 仍应按 fingerprint 逐条可见（聚合不合并库内事件）  
+4. 压测接入：超限时 HTTP 状态码 **429**
+
+#### 注意
+
+- 节流/聚合状态在**进程内存**，重启清空（可接受）。  
+- 多实例部署时各进程各自计数，共享限流需后续 Redis（见路线图）。  
+- 实现细节与验收清单见 [§13.1](#131-下一步优先抗告警风暴--开工清单)。
+
 ---
 
 ## 12. 容量与边界
@@ -694,7 +810,7 @@ curl -s http://127.0.0.1:8080/api/overview \
 
 - 海量日志/指标长期存储（应仍在 Loki / Prometheus）  
 - 多实例高可用争抢调度（无 Redis 选主）  
-- 超高 QPS 告警风暴（无独立消息队列削峰）—— **正在按 [§13.1](#131-下一步优先抗告警风暴--开工清单) 用节流/聚合补齐**  
+- 超高 QPS 且无队列削峰的极端风暴——可先用 [§11.8](#118-抗告警风暴怎么用) 的节流/聚合/429；更重的削峰需外置 Kafka 等  
 
 瓶颈主要在 **SQLite 写并发** 与 **单进程算力**，不在 Rust 语言本身。
 
@@ -716,9 +832,13 @@ curl -s http://127.0.0.1:8080/api/overview \
 - [x] 告警丰富：台账查表、标签抽取、字段模板、试跑预览  
 - [x] 告警标识去重、静默、多通道通知（通知前先丰富）  
 - [x] JWT 登录与管理控制台  
+- [x] 抗风暴 P0：通知节流（`[storm]` + `ThrottleGate`）  
+- [x] 抗风暴 P1：时间窗聚合通知（`AggregateBuffer` + summary flush）  
+- [x] 抗风暴 P2：接入 inflight 429 + notify degrade  
 
-### 13.1 下一步（优先）：抗告警风暴 —— 开工清单
+### 13.1 抗告警风暴 —— 实现清单（开发用）
 
+> **运维使用说明**请看 [§11.8](#118-抗告警风暴怎么用)。本节保留实现落点与验收，便于二次开发。  
 > **目标**：短时间涌入大量相似告警时，进程不挂、渠道不被刷爆、值班收到的是可消化的摘要。  
 > **原则**：接得住（削峰）→ 合得住（聚合）→ 发得住（节流）。指纹去重已有，风暴缺口在 **通知节流 + 时间窗聚合**；队列为可选项。  
 > **主落点**：`crates/eventide-server/src/notify_pipeline.rs` 的 `persist_and_notify`（enrich → silence → **此处插入 storm 门闸** → notify → upsert）。拉数评估与 Ingress 都走此函数，一处改两边生效。
@@ -756,9 +876,11 @@ throttle_key = "fingerprint"
 
 **验收**
 
-- [ ] 脚本/单测：1 分钟内同 fingerprint 触发 100 次 BecameFiring，实际 `send` ≤ `max_per_window`，且 alert 状态仍为 firing。  
-- [ ] 渠道（webhook mock）收到的条数符合限额。  
-- [ ] README / 帮助里一句话说明「风暴节流已启用」。
+- [x] 脚本/单测：窗口限额 / 最小间隔 / 滚窗放行（`eventide-core` `storm` 单测）  
+- [x] 被节流时 `notify_logs.error=throttled`，告警仍 upsert  
+- [x] `eventide.toml` `[storm]` + 启动日志 `storm throttle enabled`  
+
+#### P0 状态：已落地（2026-07）
 
 #### P1 — 时间窗聚合通知（减少「要发的条数」）
 
@@ -791,8 +913,10 @@ aggregate_sample_limit = 10
 
 **验收**
 
-- [ ] 风暴模拟：100 台主机同 alertname，通知 ≪ 100（head+summary 约为数条级）。  
-- [ ] 控制台告警事件仍能逐条看到各 fingerprint。
+- [x] 单测：head+summary / summary_only / 仅 1 条跳过摘要（`storm` aggregate 测试）  
+- [x] 聚合只影响通知；告警仍按 fingerprint upsert；`notify_logs` 记 `aggregated` / 摘要  
+
+#### P1 状态：已落地（2026-07）
 
 #### P2 — 接入侧削峰 / 背压（可选，偏运维）
 
@@ -811,27 +935,34 @@ degrade_skip_notify = false
 
 **验收**
 
-- [ ] 压测推送时进程存活；开启 degrade 时 notify_logs 出现大量 skip，CPU/句柄不炸。
+- [x] HTTP 超 `ingress_max_inflight` 返回 **429** `ingress overloaded`  
+- [x] `degrade_skip_notify=true` 且高压时 `notify_logs.error=degraded`，告警仍 upsert  
+- [x] 单测：inflight 容量拒绝、notify rate 触发 degrade  
+
+#### P2 状态：已落地（2026-07）
 
 #### 明确不做（本阶段）
 
 - 根因抑制树（host down 压掉上层探测）—— 单独立项。  
 - ClickHouse / 海量历史仓库 —— 与风暴正交，见架构讨论，不阻塞 P0/P1。  
-- 多实例共享节流状态（Redis）—— 等「SQLite → Postgres + Redis」一起做；P0 单机内存即可。
+- 多实例共享节流状态（Redis）—— 等「SQLite → MySQL + Redis」一起做；P0 单机内存即可。
 
 #### 推荐开工顺序（给下次直接开干）
 
-1. 新建 `crates/eventide-core/src/storm.rs`（纯逻辑：ThrottleGate + 单测）。  
-2. `eventide.toml` / 配置结构加 `[storm]`，`main` 注入 `AppState`。  
-3. 改 `notify_pipeline.rs` 接上 ThrottleGate（P0 完成可合并）。  
-4. 再做 AggregateBuffer + notify 文案（P1）。  
-5. 最后视需要做 Ingress 429 / degrade（P2）。
+1. ~~新建 `crates/eventide-core/src/storm.rs`（ThrottleGate + 单测）~~ **已完成**  
+2. ~~`eventide.toml` / 配置结构加 `[storm]`，`main` 注入 `AppState`~~ **已完成**  
+3. ~~改 `notify_pipeline.rs` 接上 ThrottleGate~~ **已完成（P0）**  
+4. ~~再做 AggregateBuffer + notify 文案（P1）~~ **已完成**  
+5. ~~Ingress 429 / degrade（P2）~~ **已完成**  
+
+抗告警风暴 P0–P2 已齐；更后见 §13.2。
 
 ### 13.2 更后可演进
 
-- [ ] 企微/飞书以外渠道与更丰富的通知模板  
+- [x] 企微/飞书以外渠道与更丰富的通知模板（Slack / Telegram；markdown / @）  
+- [x] 通知渠道可配置正文模板（`template_firing` / `template_resolved`）  
 - [ ] 值班、升级、认领；根因抑制  
-- [ ] SQLite → Postgres；多实例 + Redis（含共享风暴状态）  
+- [ ] SQLite → MySQL；多实例 + Redis（含共享风暴状态）  
 - [ ] 告警历史仓库（Kafka → ClickHouse/ES，与热路径分离）  
 - [ ] 更多日志后端（ES 等）  
 - [ ] Ingress 更多平台适配器（开箱预设）  

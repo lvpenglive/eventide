@@ -1,21 +1,10 @@
-//! WeCom (企业微信) group robot notifier.
+//! WeCom (企业微信) group robot notifier (text / markdown + @).
 
-use crate::{build_text, NotifyError};
+use crate::channel_opts::{at_all, at_mobiles, is_markdown};
+use crate::{build_text_for_channel, NotifyError};
 use eventide_core::{AlertEvent, AlertTransition, NotifyChannel, Rule};
-use serde::Serialize;
 
 pub struct WeComNotifier;
-
-#[derive(Serialize)]
-struct WeText {
-    content: String,
-}
-
-#[derive(Serialize)]
-struct WeBody {
-    msgtype: &'static str,
-    text: WeText,
-}
 
 impl WeComNotifier {
     pub async fn send(
@@ -25,25 +14,61 @@ impl WeComNotifier {
         event: &AlertEvent,
         transition: AlertTransition,
     ) -> Result<(), NotifyError> {
-        let body = WeBody {
-            msgtype: "text",
-            text: WeText {
-                content: build_text(rule, event, transition),
-            },
-        };
-        let resp = http.post(&channel.url).json(&body).send().await?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(NotifyError::Channel(format!("wecom http {status}: {text}")));
+        let content = build_text_for_channel(channel, rule, event, transition);
+        let report = Self::send_text_report(http, channel, &content).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "wecom failed".into()),
+            ))
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(code) = v.get("errcode").and_then(|c| c.as_i64()) {
-                if code != 0 {
-                    return Err(NotifyError::Channel(format!("wecom err: {text}")));
-                }
+    }
+
+    pub async fn send_text(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        content: &str,
+    ) -> Result<(), NotifyError> {
+        let report = Self::send_text_report(http, channel, content).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "wecom failed".into()),
+            ))
+        }
+    }
+
+    pub async fn send_text_report(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        content: &str,
+    ) -> crate::NotifySendReport {
+        let body = build_body(channel, content);
+        crate::post_json_report(http, "wecom", channel.url.clone(), body, |t| {
+            crate::errcode_nonzero(t, "errcode", "wecom")
+        })
+        .await
+    }
+}
+
+fn build_body(channel: &NotifyChannel, content: &str) -> serde_json::Value {
+    if is_markdown(channel) {
+        // Markdown 模式：企微 markdown 不支持 mentioned_*，可在正文写 `<@userid>` / `@all`。
+        serde_json::json!({
+            "msgtype": "markdown",
+            "markdown": { "content": content },
+        })
+    } else {
+        let mobiles = at_mobiles(channel);
+        serde_json::json!({
+            "msgtype": "text",
+            "text": {
+                "content": content,
+                "mentioned_list": if at_all(channel) { vec!["@all".to_string()] } else { Vec::<String>::new() },
+                "mentioned_mobile_list": mobiles,
             }
-        }
-        Ok(())
+        })
     }
 }

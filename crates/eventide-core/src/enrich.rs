@@ -181,6 +181,10 @@ fn template_ctx<'a>(
         status: event.status.as_str(),
         fingerprint: &event.fingerprint,
         rule_name,
+        title: None,
+        transition: None,
+        labels_json: None,
+        annotations_json: None,
     }
 }
 

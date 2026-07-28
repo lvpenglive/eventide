@@ -52,14 +52,45 @@ async fn main() -> anyhow::Result<()> {
     db.seed_iam_if_empty(&config.auth.username, &config.auth.password)
         .context("seed IAM")?;
 
+    let throttle = eventide_core::ThrottleGate::new(config.storm.throttle_config());
+    let aggregate = eventide_core::AggregateBuffer::new(config.storm.aggregate_config());
+    let pressure = eventide_core::IngressPressure::new(config.storm.pressure_config());
+    if config.storm.throttle_enabled {
+        tracing::info!(
+            min_interval = config.storm.min_interval_seconds,
+            max_per_window = config.storm.max_per_window,
+            window = config.storm.window_seconds,
+            key = %config.storm.throttle_key,
+            "storm throttle enabled"
+        );
+    }
+    if config.storm.aggregate_enabled {
+        tracing::info!(
+            window = config.storm.aggregate_window_seconds,
+            group_by = %config.storm.group_by,
+            mode = %config.storm.aggregate_mode,
+            "storm aggregate enabled"
+        );
+    }
+    tracing::info!(
+        max_inflight = config.storm.ingress_max_inflight,
+        degrade_skip_notify = config.storm.degrade_skip_notify,
+        degrade_notify_per_sec = config.storm.degrade_notify_per_sec,
+        "storm ingress pressure configured"
+    );
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
         notifier: eventide_notify::Notifier::new(),
+        throttle,
+        aggregate,
+        pressure,
     });
 
     spawn_scheduler(state.clone());
     crate::kafka_ingress::spawn_kafka_ingress(state.clone());
+    crate::notify_pipeline::spawn_aggregate_flusher(state.clone());
 
     let static_dir = config.static_dir.clone();
     let app = Router::new()

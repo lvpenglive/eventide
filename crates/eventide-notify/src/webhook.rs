@@ -1,6 +1,6 @@
 //! Generic JSON webhook notifier.
 
-use crate::{build_text, transition_label, NotifyError};
+use crate::{build_text_for_channel, transition_label, NotifyError};
 use eventide_core::{AlertEvent, AlertTransition, NotifyChannel, Rule};
 use serde::Serialize;
 
@@ -40,7 +40,7 @@ impl WebhookNotifier {
             value: event.value,
             labels: &event.labels,
             annotations: &event.annotations,
-            text: build_text(rule, event, transition),
+            text: build_text_for_channel(channel, rule, event, transition),
         };
 
         let resp = http
@@ -57,5 +57,32 @@ impl WebhookNotifier {
             )));
         }
         Ok(())
+    }
+
+    pub async fn send_text(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        text: &str,
+    ) -> Result<(), NotifyError> {
+        let report = Self::send_text_report(http, channel, text).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "webhook failed".into()),
+            ))
+        }
+    }
+
+    pub async fn send_text_report(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        text: &str,
+    ) -> crate::NotifySendReport {
+        let body = serde_json::json!({
+            "transition": "aggregate",
+            "text": text,
+        });
+        crate::post_json_report(http, "webhook", channel.url.clone(), body, |_| None).await
     }
 }

@@ -8,3 +8,26 @@ username = "admin"
 password = "admin123"
 jwt_secret = "eventide-dev-secret-change-me"
 token_ttl_hours = 24
+
+# Alert-storm (README §13.1)
+[storm]
+throttle_enabled = true
+min_interval_seconds = 60
+max_per_window = 20
+window_seconds = 60
+# fingerprint | labels:alertname,ip
+throttle_key = "fingerprint"
+
+# P1: time-window aggregation (default off; set true to enable)
+aggregate_enabled = true
+aggregate_window_seconds = 30
+group_by = "alertname"
+aggregate_mode = "head+summary"
+aggregate_sample_labels = "ip,instance,alertIp"
+aggregate_sample_limit = 10
+
+# P2: ingress backpressure
+ingress_max_inflight = 100
+# when true: under load skip notify (still persist); triggers at ~80% inflight or notify rate
+degrade_skip_notify = false
+degrade_notify_per_sec = 50

@@ -15,6 +15,7 @@
     rules: "config",
     ingress: "config",
     channels: "notify",
+    notifies: "notify",
     enrich: "notify",
     users: "system",
     roles: "system",
@@ -30,6 +31,7 @@
     rules: "rules:read",
     ingress: "ingress:read",
     channels: "channels:read",
+    notifies: "channels:read",
     enrich: "enrich:read",
     users: "users:read",
     roles: "roles:read",
@@ -45,6 +47,7 @@
     "rules",
     "ingress",
     "channels",
+    "notifies",
     "enrich",
     "users",
     "roles",
@@ -62,7 +65,8 @@
     overview: ["总览", "系统运行状态与近期告警"],
     datasources: ["数据源", "Prometheus / VictoriaMetrics"],
     rules: ["告警规则", "阈值评估与通知绑定"],
-    channels: ["通知渠道", "Webhook · 钉钉 · 企微 · 飞书"],
+    channels: ["通知渠道", "Webhook · 自定义 HTTP · 钉钉 · 企微 · 飞书 · Slack · TG"],
+    notifies: ["通知日志", "发送记录 · 可查正文"],
     ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
     alerts: ["告警事件", "按状态浏览 · 点开看详情"],
     enrich: ["告警丰富", "台账补字段 · 写描述 / IP / 级别"],
@@ -354,10 +358,19 @@
     });
   });
 
+  let overviewTimer = null;
+  function stopOverviewTimer() {
+    if (overviewTimer) {
+      clearInterval(overviewTimer);
+      overviewTimer = null;
+    }
+  }
+
   function navigate(page) {
     if (!canPage(page)) {
       page = firstAllowedPage();
     }
+    if (page !== "overview") stopOverviewTimer();
     state.page = page;
     applyNavPermissions();
     document.querySelectorAll(".nav-item").forEach((b) => {
@@ -439,27 +452,149 @@
   // ---------- Pages ----------
   const pages = {
     async overview(root) {
-      setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
-      document.getElementById("btn-refresh").onclick = () => renderPage();
-      const d = await api("/api/overview");
-      const ingressRows = await api("/api/ingress").catch(() => []);
-      const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
-      root.innerHTML = `
-        <div class="stats">
-          <div class="stat firing"><div class="n">${d.alerts_firing}</div><div class="l">正在告警</div></div>
-          <div class="stat"><div class="n">${d.alerts_pending}</div><div class="l">等待中</div></div>
-          <div class="stat ok"><div class="n">${d.alerts_resolved}</div><div class="l">已恢复</div></div>
-          <div class="stat accent"><div class="n">${d.enabled_rules}/${d.rules}</div><div class="l">启用规则</div></div>
-          <div class="stat"><div class="n">${d.datasources}</div><div class="l">数据源</div></div>
-          <div class="stat"><div class="n">${d.channels}</div><div class="l">通知渠道</div></div>
-          <div class="stat"><div class="n">${d.ingress_routes}</div><div class="l">告警接入</div></div>
-          <div class="stat"><div class="n">${d.active_silences}</div><div class="l">生效静默</div></div>
-        </div>
-        <div class="panel">
-          <h3 style="margin:0 0 0.75rem;font-size:1rem">最近告警</h3>
-          ${alertTable(d.recent_alerts || [], { compact: true, ingressMap })}
-        </div>`;
-      bindAlertTable(root, d.recent_alerts || [], ingressMap);
+      setActions(
+        `<span class="overview-refresh-hint" id="ov-hint"></span><button class="ghost" id="btn-refresh">刷新</button>`
+      );
+      document.getElementById("btn-refresh").onclick = () => paint();
+
+      const goAlerts = (status) => {
+        state.alertFilters = {
+          status: status || "",
+          severity: "",
+          source: "",
+          q: "",
+        };
+        navigate("alerts");
+      };
+
+      const paint = async () => {
+        const d = await api("/api/overview");
+        const ingressMap = Object.fromEntries(
+          (d.ingress || []).map((r) => [r.id, r])
+        );
+        const firing = d.alerts_firing || 0;
+        const pending = d.alerts_pending || 0;
+        const resolved = d.alerts_resolved || 0;
+        const recent = d.recent_alerts || [];
+        const skips = d.notify_skips || [];
+        const needsSetup =
+          !d.datasources || !d.enabled_rules || !d.channels || !d.ingress_routes;
+
+        const hint = document.getElementById("ov-hint");
+        if (hint) {
+          hint.textContent = "每 30 秒自动刷新";
+        }
+
+        root.innerHTML = `
+          <div class="overview-health ${firing ? "is-firing" : "is-ok"}">
+            <div class="overview-health-main">${esc(d.health || "—")}</div>
+            <div class="overview-health-actions">
+              ${
+                firing
+                  ? `<button type="button" class="primary" data-go-alerts="firing">查看正在告警</button>`
+                  : `<button type="button" class="ghost" data-go-alerts="">打开告警事件</button>`
+              }
+            </div>
+          </div>
+
+          <div class="stats overview-stats-primary">
+            <button type="button" class="stat firing clickable" data-go-alerts="firing">
+              <div class="n">${firing}</div><div class="l">正在告警</div>
+            </button>
+            <button type="button" class="stat clickable" data-go-alerts="pending">
+              <div class="n">${pending}</div><div class="l">等待中</div>
+            </button>
+            <button type="button" class="stat ok clickable" data-go-alerts="resolved">
+              <div class="n">${resolved}</div><div class="l">已恢复</div>
+            </button>
+            <button type="button" class="stat accent clickable" data-go-page="silences">
+              <div class="n">${d.active_silences || 0}</div><div class="l">生效静默</div>
+            </button>
+          </div>
+
+          <div class="stats overview-stats-meta">
+            <button type="button" class="stat clickable" data-go-page="rules">
+              <div class="n">${d.enabled_rules || 0}/${d.rules || 0}</div><div class="l">启用规则</div>
+            </button>
+            <button type="button" class="stat clickable" data-go-page="datasources">
+              <div class="n">${d.datasources || 0}</div><div class="l">数据源</div>
+            </button>
+            <button type="button" class="stat clickable" data-go-page="channels">
+              <div class="n">${d.channels || 0}</div><div class="l">通知渠道</div>
+            </button>
+            <button type="button" class="stat clickable" data-go-page="ingress">
+              <div class="n">${d.ingress_routes || 0}</div><div class="l">告警接入</div>
+            </button>
+          </div>
+
+          ${
+            needsSetup
+              ? `<div class="panel overview-setup">
+                  <strong>尚未完成最小闭环</strong>
+                  <p class="hint">建议先准备数据源或告警接入、通知渠道，再配置规则 / 丰富。</p>
+                  <div class="overview-setup-actions">
+                    ${!d.datasources ? `<button type="button" class="ghost" data-go-page="datasources">新建数据源</button>` : ""}
+                    ${!d.ingress_routes ? `<button type="button" class="ghost" data-go-page="ingress">配置告警接入</button>` : ""}
+                    ${!d.channels ? `<button type="button" class="ghost" data-go-page="channels">新建通知渠道</button>` : ""}
+                    ${!d.enabled_rules ? `<button type="button" class="ghost" data-go-page="rules">新建规则</button>` : ""}
+                  </div>
+                </div>`
+              : ""
+          }
+
+          <div class="overview-grid">
+            <div class="panel">
+              <div class="overview-panel-head">
+                <h3>关注中的告警</h3>
+                <button type="button" class="ghost" data-go-alerts="firing">全部告警中</button>
+              </div>
+              ${
+                recent.length
+                  ? alertTable(recent, { compact: true, ingressMap })
+                  : `<div class="empty">暂无告警。可去「告警接入」试推送，或等待规则触发。
+                      <div style="margin-top:12px"><button type="button" class="primary" data-go-page="ingress">去告警接入</button></div>
+                    </div>`
+              }
+            </div>
+            <div class="panel">
+              <div class="overview-panel-head">
+                <h3>最近通知跳过</h3>
+                <span class="hint">节流 / 聚合 / 降级</span>
+              </div>
+              ${
+                skips.length
+                  ? `<ul class="overview-skip-list">${skips
+                      .map(
+                        (s) =>
+                          `<li><code class="mono">${esc(s.error || "—")}</code>
+                            <span class="hint">${esc(s.transition || "")} · ${esc(
+                            (s.created_at || "").replace("T", " ").slice(0, 19)
+                          )}</span></li>`
+                      )
+                      .join("")}</ul>`
+                  : `<div class="empty hint">暂无跳过记录。风暴节流生效时会出现 throttled / aggregated / degraded。</div>`
+              }
+            </div>
+          </div>`;
+
+        root.querySelectorAll("[data-go-alerts]").forEach((el) => {
+          el.onclick = () => goAlerts(el.dataset.goAlerts || "");
+        });
+        root.querySelectorAll("[data-go-page]").forEach((el) => {
+          el.onclick = () => navigate(el.dataset.goPage);
+        });
+        if (recent.length) bindAlertTable(root, recent, ingressMap);
+      };
+
+      await paint();
+      stopOverviewTimer();
+      overviewTimer = setInterval(() => {
+        if (state.page !== "overview") {
+          stopOverviewTimer();
+          return;
+        }
+        paint().catch(() => {});
+      }, 30000);
     },
 
     async datasources(root) {
@@ -569,13 +704,17 @@
               <td class="mono">${esc(c.url)}</td>
               <td><span class="badge ${c.enabled ? "on" : "off"}">${c.enabled ? "启用" : "停用"}</span></td>
               <td class="actions">
+                <button data-test="${c.id}">测试</button>
                 <button data-edit="${c.id}">编辑</button>
                 <button class="danger" data-del="${c.id}">删除</button>
               </td></tr>`
               )
               .join("")}</tbody></table>`
-          : `<div class="empty">还没有通知渠道。支持 webhook / dingtalk / wecom / feishu。</div>`
+          : `<div class="empty">还没有通知渠道。支持 webhook / http / dingtalk / wecom / feishu / slack / telegram。</div>`
       }</div>`;
+      root.querySelectorAll("[data-test]").forEach((b) => {
+        b.onclick = () => testChannel(b.dataset.test, b);
+      });
       root.querySelectorAll("[data-edit]").forEach((b) => {
         b.onclick = () => editChannel(rows.find((x) => x.id === b.dataset.edit));
       });
@@ -587,6 +726,110 @@
           renderPage();
         };
       });
+    },
+
+    async notifies(root) {
+      const f = state.notifyFilters || { channel_id: "", success: "", q: "" };
+      setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
+
+      const load = async () => {
+        const channel_id =
+          root.querySelector("#nf-channel")?.value ?? state.notifyFilters?.channel_id ?? "";
+        const success =
+          root.querySelector("#nf-success")?.value ?? state.notifyFilters?.success ?? "";
+        const q = (root.querySelector("#nf-q")?.value ?? state.notifyFilters?.q ?? "").trim();
+        state.notifyFilters = { channel_id, success, q };
+
+        const params = new URLSearchParams();
+        if (channel_id) params.set("channel_id", channel_id);
+        if (success) params.set("success", success);
+        if (q) params.set("q", q);
+        params.set("limit", "200");
+
+        const [rows, chs] = await Promise.all([
+          api("/api/notifies?" + params.toString()),
+          api("/api/channels").catch(() => state.cache.channels || []),
+        ]);
+        state.cache.channels = chs;
+
+        const preview = (body) => {
+          const s = String(body || "").replace(/\s+/g, " ").trim();
+          if (!s) return "—";
+          return s.length > 72 ? s.slice(0, 72) + "…" : s;
+        };
+        const edgeLabel = (t, err) => {
+          if (t === "became_firing") return "触发";
+          if (t === "became_resolved") return "恢复";
+          if (err === "test" || String(err || "").startsWith("test")) return "测试";
+          return t || "其他";
+        };
+
+        root.innerHTML = `
+          <div class="panel">
+            <div class="alert-toolbar">
+              <div class="alert-filters">
+                <select id="nf-channel">
+                  <option value="">全部渠道</option>
+                  ${(chs || [])
+                    .map(
+                      (c) =>
+                        `<option value="${esc(c.id)}" ${
+                          channel_id === c.id ? "selected" : ""
+                        }>${esc(c.name)} (${esc(c.kind)})</option>`
+                    )
+                    .join("")}
+                </select>
+                <select id="nf-success">
+                  <option value="" ${!success ? "selected" : ""}>全部结果</option>
+                  <option value="true" ${success === "true" ? "selected" : ""}>成功</option>
+                  <option value="false" ${success === "false" ? "selected" : ""}>失败</option>
+                </select>
+                <input id="nf-q" type="search" placeholder="搜索正文 / 错误 / 告警 ID" value="${esc(
+                  q
+                )}" />
+              </div>
+            </div>
+            ${
+              rows.length
+                ? `<table class="data"><thead><tr>
+                    <th>时间</th><th>渠道</th><th>边沿</th><th>结果</th><th>内容摘要</th><th>错误</th><th></th>
+                  </tr></thead><tbody>${rows
+                    .map(
+                      (n, i) => `<tr>
+                    <td>${esc(fmtTime(n.created_at))}</td>
+                    <td>${esc(n.channel_name || n.channel_id?.slice?.(0, 8) || "—")}<div class="hint" style="margin:0">${esc(
+                      n.channel_kind || ""
+                    )}</div></td>
+                    <td>${esc(edgeLabel(n.transition, n.error))}</td>
+                    <td><span class="badge ${n.success ? "on" : "firing"}">${
+                      n.success ? "成功" : "失败"
+                    }</span></td>
+                    <td class="mono" title="${esc(n.body || "")}">${esc(preview(n.body))}</td>
+                    <td class="mono">${esc(n.error || "—")}</td>
+                    <td class="actions"><button data-body-idx="${i}">查看内容</button></td>
+                  </tr>`
+                    )
+                    .join("")}</tbody></table>`
+                : `<div class="empty">暂无通知记录。告警边沿通知或渠道测试后会出现在这里。</div>`
+            }
+          </div>`;
+
+        root.querySelector("#nf-channel").onchange = () => load();
+        root.querySelector("#nf-success").onchange = () => load();
+        const qEl = root.querySelector("#nf-q");
+        let t;
+        qEl.oninput = () => {
+          clearTimeout(t);
+          t = setTimeout(() => load(), 280);
+        };
+        root.querySelectorAll("[data-body-idx]").forEach((b) => {
+          b.onclick = () => showNotifyLogDetail(rows[Number(b.dataset.bodyIdx)]);
+        });
+      };
+
+      document.getElementById("btn-refresh").onclick = () => load();
+      state.notifyFilters = { ...f };
+      await load();
     },
 
     async ingress(root) {
@@ -1499,10 +1742,10 @@
       notifies = [];
     }
     const notifyHtml = notifies.length
-      ? `<table class="data"><thead><tr><th>时间</th><th>边沿</th><th>结果</th><th>错误</th></tr></thead>
+      ? `<table class="data"><thead><tr><th>时间</th><th>边沿</th><th>结果</th><th>内容摘要</th><th>错误</th><th></th></tr></thead>
          <tbody>${notifies
            .map(
-             (n) => `<tr>
+             (n, i) => `<tr>
            <td>${esc(fmtTime(n.created_at))}</td>
            <td>${esc(
              n.transition === "became_firing"
@@ -1514,7 +1757,14 @@
            <td><span class="badge ${n.success ? "on" : "firing"}">${
              n.success ? "成功" : "失败"
            }</span></td>
+           <td class="mono">${esc(
+             String(n.body || "")
+               .replace(/\s+/g, " ")
+               .trim()
+               .slice(0, 48) || "—"
+           )}${String(n.body || "").length > 48 ? "…" : ""}</td>
            <td class="mono">${esc(n.error || "—")}</td>
+           <td class="actions"><button type="button" data-nlog="${i}">查看</button></td>
          </tr>`
            )
            .join("")}</tbody></table>`
@@ -1573,6 +1823,16 @@
         <button type="button" class="primary" id="m-close">关闭</button>
       </div>`, { xl: true });
     document.getElementById("m-close").onclick = closeModal;
+    document.querySelectorAll("[data-nlog]").forEach((b) => {
+      b.onclick = () => {
+        const n = notifies[Number(b.dataset.nlog)];
+        if (!n) return;
+        showNotifyLogDetail({
+          ...n,
+          channel_name: n.channel_name || "",
+        });
+      };
+    });
     document.getElementById("m-silence").onclick = () => {
       closeModal();
       const matchers = { ...(a.labels || {}) };
@@ -1637,19 +1897,75 @@
   }
 
   // ---------- Editors ----------
-  function editDatasource(row) {
-    const kind = row?.kind || "prometheus";
+  const DATASOURCE_TYPES = [
+    {
+      id: "prometheus",
+      name: "Prometheus",
+      desc: "PromQL 指标查询",
+      icon: "PM",
+      tone: "orange",
+    },
+    {
+      id: "victoriametrics",
+      name: "VictoriaMetrics",
+      desc: "兼容 PromQL",
+      icon: "VM",
+      tone: "blue",
+    },
+    {
+      id: "kafka",
+      name: "Kafka",
+      desc: "消息管道 · JSON 字段告警",
+      icon: "K",
+      tone: "amber",
+    },
+    {
+      id: "log",
+      name: "Loki 日志",
+      desc: "LogQL 日志统计",
+      icon: "Lo",
+      tone: "teal",
+    },
+  ];
+
+  function pickDatasourceKind() {
+    openModal(`
+      <div class="modal-head">
+        <h3>选择数据源类型</h3>
+        <p class="desc">先选类型，再填写连接信息；规则评估会按类型自动拉数。</p>
+      </div>
+      <div class="modal-body">
+        <div class="type-pick-grid">
+          ${DATASOURCE_TYPES.map(
+            (t) => `<button type="button" class="type-pick-card" data-kind="${esc(t.id)}">
+              <span class="type-pick-ico tone-${esc(t.tone)}" aria-hidden="true">${esc(t.icon)}</span>
+              <span class="type-pick-name">${esc(t.name)}</span>
+              <span class="type-pick-desc">${esc(t.desc)}</span>
+            </button>`
+          ).join("")}
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.querySelectorAll(".type-pick-card").forEach((btn) => {
+      btn.onclick = () => editDatasource(null, { kind: btn.dataset.kind });
+    });
+  }
+
+  function editDatasource(row, opts = {}) {
+    if (!row && !opts.kind) {
+      pickDatasourceKind();
+      return;
+    }
+    const kind = row?.kind || opts.kind || "prometheus";
+    const typeMeta = DATASOURCE_TYPES.find((t) => t.id === kind) || DATASOURCE_TYPES[0];
     const opt = row?.options || {};
-    const types = [
-      { id: "prometheus", name: "Prometheus", desc: "PromQL 指标查询" },
-      { id: "victoriametrics", name: "VictoriaMetrics", desc: "兼容 PromQL" },
-      { id: "kafka", name: "Kafka", desc: "消息管道：解析 JSON 字段告警" },
-      { id: "log", name: "Loki 日志", desc: "LogQL 日志统计" },
-    ];
     openModal(`
       <div class="modal-head">
         <h3>${row ? "编辑数据源" : "新建数据源"}</h3>
-        <p class="desc">选择类型后填写连接信息，规则评估会按类型自动拉数。</p>
+        <p class="desc">填写连接信息，规则评估会按类型自动拉数。</p>
       </div>
       <form id="f" class="modal-body">
         <div class="field">
@@ -1658,18 +1974,20 @@
         </div>
         <div class="field">
           <label>类型</label>
-          <div class="type-list">
-            ${types
-              .map(
-                (t) => `<label class="type-row">
-              <input type="radio" name="kind" value="${t.id}" ${kind === t.id ? "checked" : ""} />
-              <span class="t-main">
-                <span class="t-name">${t.name}</span>
-                <span class="t-desc">${t.desc}</span>
-              </span>
-            </label>`
-              )
-              .join("")}
+          <input type="hidden" name="kind" value="${esc(kind)}" />
+          <div class="type-picked">
+            <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
+              typeMeta.icon
+            )}</span>
+            <div class="type-picked-text">
+              <div class="t-name">${esc(typeMeta.name)}</div>
+              <div class="t-desc">${esc(typeMeta.desc)}</div>
+            </div>
+            ${
+              row
+                ? ""
+                : `<button type="button" class="ghost" id="ds-repick">重选类型</button>`
+            }
           </div>
         </div>
         <div class="field">
@@ -1700,7 +2018,7 @@
           <div class="row">
             <div class="field">
               <label>Topic</label>
-              <input name="topic" placeholder="orders" value="${esc(opt.topic || "")}" required />
+              <input name="topic" placeholder="orders" value="${esc(opt.topic || "")}" />
             </div>
             <div class="field">
               <label>数值字段（JSON 路径）</label>
@@ -1742,19 +2060,19 @@
 
     const form = document.getElementById("f");
     const syncKind = () => {
-      const k = form.querySelector('input[name="kind"]:checked')?.value || "prometheus";
       form.querySelectorAll(".kind-panel").forEach((p) => {
         const kinds = (p.dataset.kinds || "").split(",");
-        p.hidden = !kinds.includes(k);
+        p.hidden = !kinds.includes(kind);
       });
       const urlLabel = document.getElementById("url-label");
       const urlHint = document.getElementById("url-hint");
       const httpInput = form.querySelector('[name="url_http"]');
-      if (k === "log") {
+      if (!urlLabel || !httpInput) return;
+      if (kind === "log") {
         urlLabel.textContent = "Loki 地址";
         httpInput.placeholder = "http://127.0.0.1:3100";
         urlHint.textContent = "填写 Loki 根地址。规则表达式使用 LogQL。";
-      } else if (k === "victoriametrics") {
+      } else if (kind === "victoriametrics") {
         urlLabel.textContent = "VictoriaMetrics 地址";
         httpInput.placeholder = "http://127.0.0.1:8428";
         urlHint.textContent = "兼容 PromQL 的查询入口。";
@@ -1764,16 +2082,15 @@
         urlHint.textContent = "填写 Prometheus 查询 API 根地址。";
       }
     };
-    form.querySelectorAll('input[name="kind"]').forEach((el) => {
-      el.addEventListener("change", syncKind);
-    });
     syncKind();
 
     document.getElementById("m-cancel").onclick = closeModal;
+    const repick = document.getElementById("ds-repick");
+    if (repick) repick.onclick = () => pickDatasourceKind();
     form.onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(form);
-      const k = String(fd.get("kind") || "prometheus");
+      const k = String(fd.get("kind") || kind || "prometheus");
       const options = {};
       let url = "";
       if (k === "kafka") {
@@ -1815,54 +2132,474 @@
     };
   }
 
+  function showNotifyLogDetail(n) {
+    if (!n) return;
+    const edge =
+      n.transition === "became_firing"
+        ? "触发通知"
+        : n.transition === "became_resolved"
+        ? "恢复通知"
+        : n.error === "test"
+        ? "渠道测试"
+        : n.transition || "其他";
+    openModal(`
+      <div class="modal-head">
+        <h3>通知内容</h3>
+        <p class="desc">
+          <span class="badge ${n.success ? "on" : "firing"}">${n.success ? "成功" : "失败"}</span>
+          <span style="margin-left:8px">${esc(edge)}</span>
+          <span style="margin-left:8px">${esc(n.channel_name || "")}</span>
+          <span class="hint" style="margin-left:8px">${esc(fmtTime(n.created_at))}</span>
+        </p>
+      </div>
+      <div class="modal-body">
+        ${
+          n.error
+            ? `<div class="field"><label>状态 / 错误</label><div class="summary-box mono">${esc(
+                n.error
+              )}</div></div>`
+            : ""
+        }
+        <div class="field">
+          <label>告警 ID</label>
+          <div class="summary-box mono">${esc(
+            n.alert_id && n.alert_id !== "00000000-0000-0000-0000-000000000000"
+              ? n.alert_id
+              : "—"
+          )}</div>
+        </div>
+        <div class="field">
+          <label>发送正文</label>
+          <pre class="summary-box mono">${esc(n.body || "(无正文)")}</pre>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="primary" id="m-close">关闭</button>
+      </div>`);
+    document.getElementById("m-close").onclick = closeModal;
+  }
+
+  function prettyJson(v) {
+    try {
+      if (typeof v === "string") {
+        const t = v.trim();
+        if (!t) return "(空)";
+        try {
+          return JSON.stringify(JSON.parse(t), null, 2);
+        } catch {
+          return v;
+        }
+      }
+      return JSON.stringify(v ?? null, null, 2);
+    } catch {
+      return String(v ?? "");
+    }
+  }
+
+  function showChannelTestResult(res) {
+    const ok = !!res.ok;
+    openModal(`
+      <div class="modal-head">
+        <h3>渠道测试${ok ? "成功" : "失败"}</h3>
+        <p class="desc">${esc(res.hint || "")}</p>
+      </div>
+      <div class="modal-body">
+        ${
+          res.error
+            ? `<div class="field"><label>错误</label><div class="summary-box" style="color:var(--crit)">${esc(
+                res.error
+              )}</div></div>`
+            : ""
+        }
+        <div class="field">
+          <label>发送正文</label>
+          <pre class="summary-box mono">${esc(res.text || "")}</pre>
+        </div>
+        <div class="field">
+          <label>请求 URL</label>
+          <pre class="summary-box mono">${esc(res.request_url || "")}</pre>
+        </div>
+        <div class="field">
+          <label>请求报文</label>
+          <pre class="summary-box mono">${esc(prettyJson(res.request_body))}</pre>
+        </div>
+        <div class="field">
+          <label>HTTP 状态</label>
+          <div class="summary-box mono">${esc(
+            res.http_status != null ? String(res.http_status) : "(无响应)"
+          )}</div>
+        </div>
+        <div class="field">
+          <label>返回内容</label>
+          <pre class="summary-box mono">${esc(prettyJson(res.response_body))}</pre>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="primary" id="m-close">关闭</button>
+      </div>`);
+    document.getElementById("m-close").onclick = closeModal;
+  }
+
+  async function testChannel(id, btn) {
+    if (!id) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await api(`/api/channels/${id}/test`, { method: "POST" });
+      toast(res.ok ? res.hint || "测试成功" : res.error || "测试失败", !res.ok);
+      showChannelTestResult(res);
+    } catch (e) {
+      toast(e.message || "测试失败", true);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function editChannel(row) {
+    const opt = row?.options || {};
+    const tplFire = opt.template_firing || "";
+    const tplResolve = opt.template_resolved || "";
+    const jsonFire = opt.json_firing || "";
+    const jsonResolve = opt.json_resolved || "";
+    const kindOpts = [
+      { id: "webhook", label: "Webhook（固定 Eventide JSON）" },
+      { id: "http", label: "自定义 HTTP JSON" },
+      { id: "dingtalk", label: "钉钉" },
+      { id: "wecom", label: "企业微信" },
+      { id: "feishu", label: "飞书" },
+      { id: "slack", label: "Slack" },
+      { id: "telegram", label: "Telegram" },
+    ];
+    const chips = [
+      "title",
+      "transition",
+      "severity",
+      "status",
+      "value",
+      "rule.name",
+      "fingerprint",
+      "labels",
+      "annotations",
+      "annotations.summary",
+      "annotations.summary|json",
+      "labels.instance",
+      "labels.alertname",
+    ];
     openModal(`
       <div class="modal-head">
         <h3>${row ? "编辑渠道" : "新建通知渠道"}</h3>
-        <p class="desc">告警边沿触发时，向所选渠道发送通知。</p>
+        <p class="desc">告警边沿触发时，向所选渠道发送通知。可自定义正文模板与消息格式。</p>
       </div>
       <form id="f" class="modal-body">
         <div class="field"><label>名称</label><input name="name" required placeholder="例如：值班钉钉群" value="${esc(
           row?.name || ""
         )}" /></div>
         <div class="field"><label>类型</label>
-          <select name="kind">
-            ${["webhook", "dingtalk", "wecom", "feishu"]
+          <select name="kind" id="ch-kind">
+            ${kindOpts
               .map(
                 (k) =>
-                  `<option value="${k}" ${row?.kind === k || (!row && k === "webhook") ? "selected" : ""}>${k}</option>`
+                  `<option value="${k.id}" ${
+                    row?.kind === k.id || (!row && k.id === "webhook") ? "selected" : ""
+                  }>${k.label}</option>`
               )
               .join("")}
           </select>
         </div>
-        <div class="field"><label>Webhook / 机器人 URL</label><input name="url" required value="${esc(
-          row?.url || ""
-        )}" placeholder="https://..." /></div>
-        <div class="field"><label>签名密钥（可选）</label><input name="secret" value="${esc(
-          row?.secret || ""
-        )}" placeholder="钉钉 / 飞书 secret" /></div>
+        <div class="field" id="ch-url-field">
+          <label id="ch-url-label">Webhook / 机器人 URL</label>
+          <input name="url" required value="${esc(row?.url || "")}" placeholder="https://..." />
+          <div class="hint" id="ch-url-hint"></div>
+        </div>
+        <div class="field" id="ch-method-field" hidden>
+          <label>HTTP 方法</label>
+          <select name="http_method">
+            ${["POST", "PUT", "PATCH"]
+              .map(
+                (m) =>
+                  `<option value="${m}" ${
+                    (opt.http_method || "POST").toUpperCase() === m ? "selected" : ""
+                  }>${m}</option>`
+              )
+              .join("")}
+          </select>
+        </div>
+        <div class="field" id="ch-secret-field">
+          <label id="ch-secret-label">签名密钥（可选）</label>
+          <input name="secret" value="${esc(row?.secret || "")}" placeholder="钉钉 / 飞书 secret" />
+          <div class="hint" id="ch-secret-hint"></div>
+        </div>
+        <div class="field" id="ch-headers-field" hidden>
+          <label>自定义请求头（JSON 对象）</label>
+          <textarea name="headers_json" rows="3" placeholder='{"X-Token":"xxx","Content-Type":"application/json"}'>${esc(
+            opt.headers_json || ""
+          )}</textarea>
+        </div>
+        <div class="field" id="ch-chat-field" hidden>
+          <label>Telegram chat_id</label>
+          <input name="chat_id" value="${esc(opt.chat_id || "")}" placeholder="群/用户 ID，如 -100123... 或 123456" />
+        </div>
+        <div class="field" id="ch-msg-field">
+          <label>消息格式</label>
+          <select name="msg_type" id="ch-msg-type">
+            <option value="text" ${!opt.msg_type || opt.msg_type === "text" ? "selected" : ""}>纯文本 text</option>
+            <option value="markdown" ${opt.msg_type === "markdown" ? "selected" : ""}>Markdown（钉钉/企微/飞书卡片/Slack）</option>
+          </select>
+          <div class="hint">企微 Markdown 可用 <code>&lt;font&gt;</code>；飞书为卡片 lark_md；Telegram Markdown 按 HTML 解析。</div>
+        </div>
+        <div class="field" id="ch-at-field">
+          <label class="check-row">
+            <input type="checkbox" name="at_all" ${
+              opt.at_all === "1" || opt.at_all === "true" ? "checked" : ""
+            } />
+            <span>@所有人（钉钉 / 企微 text）</span>
+          </label>
+          <input name="at_mobiles" style="margin-top:8px" value="${esc(
+            opt.at_mobiles || ""
+          )}" placeholder="艾特手机号，逗号分隔（钉钉 / 企微 text）" />
+        </div>
         <div class="field">
           <label class="check-row">
             <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
             <span>启用此渠道</span>
           </label>
         </div>
+        <div class="seg" id="seg-text-tpl">
+          <div class="seg-title">通知模板</div>
+          <div class="hint" style="margin-bottom:10px">留空则用默认正文。语法与丰富规则相同。点芯片可插入到当前模板框。</div>
+          <div class="chip-row tpl-chips" style="margin-bottom:12px">
+            ${chips
+              .map(
+                (c) =>
+                  `<button type="button" class="chip-tag" data-chip="${esc(c)}">{{${esc(
+                    c
+                  )}}}</button>`
+              )
+              .join("")}
+          </div>
+          <div class="field">
+            <label>触发通知模板（firing）</label>
+            <textarea name="template_firing" rows="6" placeholder="[{{severity}}] {{rule.name}}&#10;状态: {{transition}}&#10;{{annotations.summary}}&#10;值: {{value}}">${esc(
+              tplFire
+            )}</textarea>
+          </div>
+          <div class="field">
+            <label>恢复通知模板（resolved）</label>
+            <textarea name="template_resolved" rows="5" placeholder="[恢复] {{rule.name}}&#10;{{annotations.summary}}">${esc(
+              tplResolve
+            )}</textarea>
+          </div>
+        </div>
+        <div class="seg" id="seg-json-tpl" hidden>
+          <div class="seg-title">自定义 JSON 报文</div>
+          <div class="hint" style="margin-bottom:10px">
+            必须是合法 JSON。字符串字段请用 <code>{{annotations.summary|json}}</code>（自带引号与转义）；
+            对象可用 <code>{{labels}}</code> / <code>{{annotations}}</code>。留空则发送默认 Eventide 结构。
+          </div>
+          <div class="chip-row tpl-chips" style="margin-bottom:12px">
+            ${chips
+              .map(
+                (c) =>
+                  `<button type="button" class="chip-tag" data-chip="${esc(c)}">{{${esc(
+                    c
+                  )}}}</button>`
+              )
+              .join("")}
+          </div>
+          <div class="field">
+            <label>触发 JSON（firing）</label>
+            <textarea name="json_firing" rows="8" class="mono" placeholder='{"msg": {{annotations.summary|json}}, "severity": {{severity|json}}, "labels": {{labels}}}'>${esc(
+              jsonFire
+            )}</textarea>
+          </div>
+          <div class="field">
+            <label>恢复 JSON（resolved）</label>
+            <textarea name="json_resolved" rows="6" class="mono" placeholder='{"msg": {{annotations.summary|json}}, "status": "resolved"}'>${esc(
+              jsonResolve
+            )}</textarea>
+          </div>
+        </div>
       </form>
       <div class="modal-actions">
         <button type="button" class="ghost" id="m-cancel">取消</button>
+        ${
+          row
+            ? `<button type="button" class="ghost" id="m-test">测试发送</button>`
+            : ""
+        }
         <button class="primary" type="submit" form="f">保存</button>
       </div>`, { wide: true });
     document.getElementById("m-cancel").onclick = closeModal;
+    const testBtn = document.getElementById("m-test");
+    if (testBtn) testBtn.onclick = () => testChannel(row.id, testBtn);
+
+    const syncKindUi = () => {
+      const k = document.getElementById("ch-kind")?.value || "webhook";
+      const urlLabel = document.getElementById("ch-url-label");
+      const urlHint = document.getElementById("ch-url-hint");
+      const urlInput = document.querySelector('[name="url"]');
+      const secretField = document.getElementById("ch-secret-field");
+      const secretLabel = document.getElementById("ch-secret-label");
+      const secretHint = document.getElementById("ch-secret-hint");
+      const chatField = document.getElementById("ch-chat-field");
+      const msgField = document.getElementById("ch-msg-field");
+      const atField = document.getElementById("ch-at-field");
+      const methodField = document.getElementById("ch-method-field");
+      const headersField = document.getElementById("ch-headers-field");
+      const textSeg = document.getElementById("seg-text-tpl");
+      const jsonSeg = document.getElementById("seg-json-tpl");
+
+      const isHttp = k === "http";
+      secretField.hidden = !(k === "dingtalk" || k === "feishu" || isHttp);
+      chatField.hidden = k !== "telegram";
+      msgField.hidden = k === "webhook" || isHttp;
+      atField.hidden = !(k === "dingtalk" || k === "wecom");
+      methodField.hidden = !isHttp;
+      headersField.hidden = !isHttp;
+      textSeg.hidden = isHttp;
+      jsonSeg.hidden = !isHttp;
+
+      if (k === "telegram") {
+        urlLabel.textContent = "Bot API 基址";
+        urlInput.placeholder = "https://api.telegram.org/bot<token>";
+        urlHint.textContent = "填 Bot Token 基址即可，会自动追加 /sendMessage；chat_id 必填。";
+      } else if (k === "slack") {
+        urlLabel.textContent = "Slack Incoming Webhook";
+        urlInput.placeholder = "https://hooks.slack.com/services/...";
+        urlHint.textContent = "Slack 应用 Incoming Webhooks 生成的 URL。";
+      } else if (isHttp) {
+        urlLabel.textContent = "HTTP 接口地址";
+        urlInput.placeholder = "https://example.com/hooks/alert";
+        urlHint.textContent = "向该地址发送 JSON；可用自定义请求头与 Bearer Token。";
+        secretLabel.textContent = "Bearer Token（可选）";
+        document.querySelector('[name="secret"]').placeholder = "Authorization: Bearer …";
+        secretHint.textContent = "若填写，将自动加 Authorization: Bearer &lt;secret&gt;。";
+      } else {
+        urlLabel.textContent = "Webhook / 机器人 URL";
+        urlInput.placeholder = "https://...";
+        urlHint.textContent = "";
+        secretLabel.textContent = "签名密钥（可选）";
+        document.querySelector('[name="secret"]').placeholder = "钉钉 / 飞书 secret";
+        secretHint.textContent = "";
+      }
+    };
+    document.getElementById("ch-kind").onchange = syncKindUi;
+    syncKindUi();
+
+    let lastTpl = document.querySelector('[name="template_firing"],[name="json_firing"]');
+    document
+      .querySelectorAll(
+        '[name="template_firing"],[name="template_resolved"],[name="json_firing"],[name="json_resolved"]'
+      )
+      .forEach((el) => {
+        el.addEventListener("focus", () => {
+          lastTpl = el;
+        });
+      });
+    document.querySelectorAll(".tpl-chips [data-chip]").forEach((b) => {
+      b.onclick = () => {
+        const el =
+          lastTpl ||
+          document.querySelector(
+            document.getElementById("seg-json-tpl")?.hidden
+              ? '[name="template_firing"]'
+              : '[name="json_firing"]'
+          );
+        if (!el) return;
+        const token = `{{${b.dataset.chip}}}`;
+        const start = el.selectionStart ?? el.value.length;
+        const end = el.selectionEnd ?? start;
+        el.value = el.value.slice(0, start) + token + el.value.slice(end);
+        el.focus();
+        const pos = start + token.length;
+        el.setSelectionRange(pos, pos);
+      };
+    });
+
     document.getElementById("f").onsubmit = async (e) => {
       e.preventDefault();
       const form = e.target;
       const fd = new FormData(form);
       const secret = String(fd.get("secret") || "").trim();
+      const kind = String(fd.get("kind") || "webhook");
+      const options = { ...(row?.options || {}) };
+      const fire = String(fd.get("template_firing") || "");
+      const resolved = String(fd.get("template_resolved") || "");
+      if (kind !== "http") {
+        if (fire.trim()) options.template_firing = fire;
+        else delete options.template_firing;
+        if (resolved.trim()) options.template_resolved = resolved;
+        else delete options.template_resolved;
+        delete options.json_firing;
+        delete options.json_resolved;
+        delete options.http_method;
+        delete options.headers_json;
+      } else {
+        delete options.template_firing;
+        delete options.template_resolved;
+        const jf = String(fd.get("json_firing") || "");
+        const jr = String(fd.get("json_resolved") || "");
+        if (jf.trim()) {
+          try {
+            JSON.parse(jf.replace(/\{\{[^}]+\}\}/g, "null"));
+          } catch {
+            // allow templates that aren't valid until rendered; only warn soft
+          }
+          options.json_firing = jf;
+        } else delete options.json_firing;
+        if (jr.trim()) options.json_resolved = jr;
+        else delete options.json_resolved;
+        const method = String(fd.get("http_method") || "POST").toUpperCase();
+        if (method && method !== "POST") options.http_method = method;
+        else delete options.http_method;
+        const headers = String(fd.get("headers_json") || "").trim();
+        if (headers) {
+          try {
+            const obj = JSON.parse(headers);
+            if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+              toast("请求头必须是 JSON 对象", true);
+              return;
+            }
+            options.headers_json = JSON.stringify(obj);
+          } catch {
+            toast("请求头 JSON 无效", true);
+            return;
+          }
+        } else delete options.headers_json;
+      }
+
+      const msgType = String(fd.get("msg_type") || "text");
+      if (kind !== "webhook" && kind !== "http" && msgType && msgType !== "text")
+        options.msg_type = msgType;
+      else delete options.msg_type;
+
+      if (kind === "dingtalk" || kind === "wecom") {
+        if (form.querySelector('[name="at_all"]')?.checked) options.at_all = "1";
+        else delete options.at_all;
+        const mobiles = String(fd.get("at_mobiles") || "").trim();
+        if (mobiles) options.at_mobiles = mobiles;
+        else delete options.at_mobiles;
+      } else {
+        delete options.at_all;
+        delete options.at_mobiles;
+      }
+
+      if (kind === "telegram") {
+        const chatId = String(fd.get("chat_id") || "").trim();
+        if (!chatId) {
+          toast("Telegram 请填写 chat_id", true);
+          return;
+        }
+        options.chat_id = chatId;
+      } else {
+        delete options.chat_id;
+      }
+
       const body = {
         name: fd.get("name"),
-        kind: fd.get("kind"),
+        kind,
         url: fd.get("url"),
         secret: secret || null,
+        options,
         enabled: form.querySelector('[name="enabled"]').checked,
       };
       if (row) await api(`/api/channels/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
@@ -2037,15 +2774,65 @@
     };
   }
 
-  async function editIngress(row) {
+  const INGRESS_TYPES = [
+    {
+      id: "alertmanager",
+      name: "Alertmanager",
+      desc: "Prometheus 告警 Webhook",
+      icon: "AM",
+      tone: "orange",
+    },
+    {
+      id: "generic",
+      name: "Generic / 拨测",
+      desc: "通用 JSON · 自定义字段映射",
+      icon: "{}",
+      tone: "blue",
+    },
+    {
+      id: "kafka",
+      name: "Kafka",
+      desc: "告警总线 Topic 消费",
+      icon: "K",
+      tone: "amber",
+    },
+  ];
+
+  function pickIngressKind() {
+    openModal(`
+      <div class="modal-head">
+        <h3>选择接入类型</h3>
+        <p class="desc">先选来源类型，再填写连接与字段映射。</p>
+      </div>
+      <div class="modal-body">
+        <div class="type-pick-grid">
+          ${INGRESS_TYPES.map(
+            (t) => `<button type="button" class="type-pick-card" data-kind="${esc(t.id)}">
+              <span class="type-pick-ico tone-${esc(t.tone)}" aria-hidden="true">${esc(t.icon)}</span>
+              <span class="type-pick-name">${esc(t.name)}</span>
+              <span class="type-pick-desc">${esc(t.desc)}</span>
+            </button>`
+          ).join("")}
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="m-cancel">取消</button>
+      </div>`);
+    document.getElementById("m-cancel").onclick = closeModal;
+    document.querySelectorAll(".type-pick-card").forEach((btn) => {
+      btn.onclick = () => editIngress(null, { kind: btn.dataset.kind });
+    });
+  }
+
+  async function editIngress(row, opts = {}) {
+    if (!row && !opts.kind) {
+      pickIngressKind();
+      return;
+    }
     const chs = state.cache.channels || (await api("/api/channels"));
-    const kind = row?.kind || "alertmanager";
+    const kind = row?.kind || opts.kind || "alertmanager";
+    const typeMeta = INGRESS_TYPES.find((t) => t.id === kind) || INGRESS_TYPES[0];
     const opt = row?.options || {};
-    const types = [
-      { id: "alertmanager", name: "Alertmanager", desc: "Prometheus 告警 Webhook" },
-      { id: "generic", name: "Generic", desc: "通用 JSON / 拨测 / 自定义字段映射" },
-      { id: "kafka", name: "Kafka", desc: "Topic 消费；可配字段映射" },
-    ];
     const mapOn = !!(
       opt.map_status ||
       opt.map_name ||
@@ -2068,18 +2855,20 @@
         </div>
         <div class="field">
           <label>类型</label>
-          <div class="type-list">
-            ${types
-              .map(
-                (t) => `<label class="type-row">
-              <input type="radio" name="kind" value="${t.id}" ${kind === t.id ? "checked" : ""} />
-              <span class="t-main">
-                <span class="t-name">${t.name}</span>
-                <span class="t-desc">${t.desc}</span>
-              </span>
-            </label>`
-              )
-              .join("")}
+          <input type="hidden" name="kind" value="${esc(kind)}" />
+          <div class="type-picked">
+            <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
+              typeMeta.icon
+            )}</span>
+            <div class="type-picked-text">
+              <div class="t-name">${esc(typeMeta.name)}</div>
+              <div class="t-desc">${esc(typeMeta.desc)}</div>
+            </div>
+            ${
+              row
+                ? ""
+                : `<button type="button" class="ghost" id="ing-repick">重选类型</button>`
+            }
           </div>
         </div>
         <div class="field">
@@ -2263,7 +3052,7 @@
 
     const form = document.getElementById("f");
     const syncKind = () => {
-      const k = form.querySelector('input[name="kind"]:checked')?.value || "alertmanager";
+      const k = form.querySelector('input[name="kind"]')?.value || "alertmanager";
       form.querySelectorAll(".kind-panel").forEach((p) => {
         const kinds = (p.dataset.kinds || "").split(",");
         p.hidden = !kinds.includes(k);
@@ -2280,8 +3069,9 @@
         hint.textContent = "";
       }
     };
-    form.querySelectorAll('input[name="kind"]').forEach((el) => el.addEventListener("change", syncKind));
     syncKind();
+    const repick = document.getElementById("ing-repick");
+    if (repick) repick.onclick = () => pickIngressKind();
 
     document.getElementById("m-cancel").onclick = closeModal;
     form.onsubmit = async (e) => {

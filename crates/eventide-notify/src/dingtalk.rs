@@ -1,23 +1,12 @@
-//! DingTalk custom robot notifier (text message).
+//! DingTalk custom robot notifier (text / markdown + @).
 
-use crate::{build_text, NotifyError};
+use crate::channel_opts::{at_all, at_mobiles, first_line_title, is_markdown};
+use crate::{build_text_for_channel, NotifyError};
 use eventide_core::{AlertEvent, AlertTransition, NotifyChannel, Rule};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct DingTalkNotifier;
-
-#[derive(Serialize)]
-struct DingText {
-    content: String,
-}
-
-#[derive(Serialize)]
-struct DingBody {
-    msgtype: &'static str,
-    text: DingText,
-}
 
 impl DingTalkNotifier {
     pub async fn send(
@@ -27,31 +16,80 @@ impl DingTalkNotifier {
         event: &AlertEvent,
         transition: AlertTransition,
     ) -> Result<(), NotifyError> {
-        let url = signed_url(&channel.url, channel.secret.as_deref())?;
-        let body = DingBody {
-            msgtype: "text",
-            text: DingText {
-                content: build_text(rule, event, transition),
-            },
-        };
+        let content = build_text_for_channel(channel, rule, event, transition);
+        let report = Self::send_text_report(http, channel, &content).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "dingtalk failed".into()),
+            ))
+        }
+    }
 
-        let resp = http.post(&url).json(&body).send().await?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(NotifyError::Channel(format!(
-                "dingtalk http {status}: {text}"
-            )));
+    pub async fn send_text(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        content: &str,
+    ) -> Result<(), NotifyError> {
+        let report = Self::send_text_report(http, channel, content).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "dingtalk failed".into()),
+            ))
         }
-        // DingTalk returns {"errcode":0,...} on success
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(code) = v.get("errcode").and_then(|c| c.as_i64()) {
-                if code != 0 {
-                    return Err(NotifyError::Channel(format!("dingtalk err: {text}")));
-                }
+    }
+
+    pub async fn send_text_report(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        content: &str,
+    ) -> crate::NotifySendReport {
+        let url = match signed_url(&channel.url, channel.secret.as_deref()) {
+            Ok(u) => u,
+            Err(e) => {
+                return crate::NotifySendReport {
+                    ok: false,
+                    kind: "dingtalk".into(),
+                    request_url: channel.url.clone(),
+                    request_body: build_body(channel, content),
+                    http_status: None,
+                    response_body: String::new(),
+                    error: Some(e.to_string()),
+                };
             }
-        }
-        Ok(())
+        };
+        let body = build_body(channel, content);
+        crate::post_json_report(http, "dingtalk", url, body, |t| {
+            crate::errcode_nonzero(t, "errcode", "dingtalk")
+        })
+        .await
+    }
+}
+
+fn build_body(channel: &NotifyChannel, content: &str) -> serde_json::Value {
+    let mobiles = at_mobiles(channel);
+    let at = serde_json::json!({
+        "atMobiles": mobiles,
+        "isAtAll": at_all(channel),
+    });
+    if is_markdown(channel) {
+        serde_json::json!({
+            "msgtype": "markdown",
+            "markdown": {
+                "title": first_line_title(content),
+                "text": content,
+            },
+            "at": at,
+        })
+    } else {
+        serde_json::json!({
+            "msgtype": "text",
+            "text": { "content": content },
+            "at": at,
+        })
     }
 }
 
@@ -65,9 +103,6 @@ fn signed_url(base: &str, secret: Option<&str>) -> Result<String, NotifyError> {
         .map_err(|e| NotifyError::Channel(e.to_string()))?
         .as_millis() as i64;
 
-    // DingTalk sign: HmacSHA256(timestamp\nsecret, secret) then base64 + url-encode.
-    // We implement HMAC-SHA256 manually via sha2 + simple HMAC to avoid extra deps,
-    // or use a minimal implementation.
     let string_to_sign = format!("{timestamp}\n{secret}");
     let sign = hmac_sha256(secret.as_bytes(), string_to_sign.as_bytes());
     let sign_b64 = base64_encode(&sign);

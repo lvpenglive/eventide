@@ -251,6 +251,177 @@ pub fn alert_title(rule: &Rule, event: &AlertEvent) -> String {
     )
 }
 
+/// Plain-text body used by notification channels (and stored in notify_logs).
+pub fn format_notify_text(rule: &Rule, event: &AlertEvent, transition: AlertTransition) -> String {
+    let status = match transition {
+        AlertTransition::BecameFiring => "firing",
+        AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Unchanged => "unchanged",
+    };
+    format!(
+        "{}\nstatus: {}\nfingerprint: {}\nlabels: {}\n",
+        alert_title(rule, event),
+        status,
+        event.fingerprint,
+        serde_json::to_string(&event.labels).unwrap_or_else(|_| "{}".into())
+    )
+}
+
+/// Render notify body using an optional channel template; empty → default text.
+pub fn format_notify_body(
+    template: Option<&str>,
+    rule: &Rule,
+    event: &AlertEvent,
+    transition: AlertTransition,
+) -> String {
+    let Some(tpl) = template.map(str::trim).filter(|s| !s.is_empty()) else {
+        return format_notify_text(rule, event, transition);
+    };
+    let title = alert_title(rule, event);
+    let transition_label = match transition {
+        AlertTransition::BecameFiring => "firing",
+        AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Unchanged => "unchanged",
+    };
+    let labels_json = serde_json::to_string(&event.labels).unwrap_or_else(|_| "{}".into());
+    let annotations_json =
+        serde_json::to_string(&event.annotations).unwrap_or_else(|_| "{}".into());
+    let ctx = crate::template::TemplateContext {
+        labels: &event.labels,
+        annotations: &event.annotations,
+        value: event.value,
+        severity: event.severity.as_str(),
+        status: event.status.as_str(),
+        fingerprint: &event.fingerprint,
+        rule_name: Some(rule.name.as_str()),
+        title: Some(title.as_str()),
+        transition: Some(transition_label),
+        labels_json: Some(labels_json.as_str()),
+        annotations_json: Some(annotations_json.as_str()),
+    };
+    crate::template::render_template(tpl, &ctx)
+}
+
+/// Channel-aware notify body (uses `template_firing` / `template_resolved` / `template`).
+pub fn format_notify_text_for_channel(
+    channel: &crate::models::NotifyChannel,
+    rule: &Rule,
+    event: &AlertEvent,
+    transition: AlertTransition,
+) -> String {
+    format_notify_body(channel.notify_template(transition), rule, event, transition)
+}
+
+fn notify_template_ctx<'a>(
+    rule: &'a Rule,
+    event: &'a AlertEvent,
+    title: &'a str,
+    transition_label: &'a str,
+    labels_json: &'a str,
+    annotations_json: &'a str,
+) -> crate::template::TemplateContext<'a> {
+    crate::template::TemplateContext {
+        labels: &event.labels,
+        annotations: &event.annotations,
+        value: event.value,
+        severity: event.severity.as_str(),
+        status: event.status.as_str(),
+        fingerprint: &event.fingerprint,
+        rule_name: Some(rule.name.as_str()),
+        title: Some(title),
+        transition: Some(transition_label),
+        labels_json: Some(labels_json),
+        annotations_json: Some(annotations_json),
+    }
+}
+
+fn transition_str(transition: AlertTransition) -> &'static str {
+    match transition {
+        AlertTransition::BecameFiring => "firing",
+        AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Unchanged => "unchanged",
+    }
+}
+
+/// Default JSON payload for custom HTTP channel when no template is set.
+pub fn default_http_json_payload(
+    rule: &Rule,
+    event: &AlertEvent,
+    transition: AlertTransition,
+) -> serde_json::Value {
+    serde_json::json!({
+        "transition": transition_str(transition),
+        "rule_name": rule.name,
+        "rule_id": rule.id.to_string(),
+        "alert_id": event.id.to_string(),
+        "fingerprint": event.fingerprint,
+        "status": event.status.as_str(),
+        "severity": event.severity.as_str(),
+        "value": event.value,
+        "labels": event.labels,
+        "annotations": event.annotations,
+        "text": format_notify_text(rule, event, transition),
+    })
+}
+
+/// Render custom HTTP JSON body from template; empty template → default payload.
+pub fn format_notify_json(
+    template: Option<&str>,
+    rule: &Rule,
+    event: &AlertEvent,
+    transition: AlertTransition,
+) -> Result<serde_json::Value, String> {
+    let Some(tpl) = template.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(default_http_json_payload(rule, event, transition));
+    };
+    let title = alert_title(rule, event);
+    let transition_label = transition_str(transition);
+    let labels_json = serde_json::to_string(&event.labels).unwrap_or_else(|_| "{}".into());
+    let annotations_json =
+        serde_json::to_string(&event.annotations).unwrap_or_else(|_| "{}".into());
+    let ctx = notify_template_ctx(
+        rule,
+        event,
+        &title,
+        transition_label,
+        &labels_json,
+        &annotations_json,
+    );
+    let rendered = crate::template::render_template(tpl, &ctx);
+    serde_json::from_str(&rendered).map_err(|e| {
+        format!("自定义 JSON 模板解析失败: {e}；渲染结果前 200 字: {}", {
+            let s: String = rendered.chars().take(200).collect();
+            s
+        })
+    })
+}
+
+pub fn format_notify_json_for_channel(
+    channel: &crate::models::NotifyChannel,
+    rule: &Rule,
+    event: &AlertEvent,
+    transition: AlertTransition,
+) -> Result<serde_json::Value, String> {
+    format_notify_json(channel.json_template(transition), rule, event, transition)
+}
+
+/// Body stored in notify_logs (text or JSON string).
+pub fn format_notify_log_body(
+    channel: &crate::models::NotifyChannel,
+    rule: &Rule,
+    event: &AlertEvent,
+    transition: AlertTransition,
+) -> String {
+    if channel.kind == crate::models::ChannelKind::Http {
+        match format_notify_json_for_channel(channel, rule, event, transition) {
+            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),
+            Err(e) => format!("(json template error) {e}"),
+        }
+    } else {
+        format_notify_text_for_channel(channel, rule, event, transition)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +497,51 @@ mod tests {
         let (resolved, t) = apply_evaluation(&rule, &sample(10.0), Some(firing), now);
         assert_eq!(resolved.status, AlertStatus::Resolved);
         assert_eq!(t, AlertTransition::BecameResolved);
+    }
+
+    #[test]
+    fn notify_template_renders_custom_body() {
+        let rule = sample_rule(0);
+        let now = Utc::now();
+        let (event, _) = apply_evaluation(&rule, &sample(90.0), None, now);
+        let body = format_notify_body(
+            Some("[{{severity}}] {{rule.name}} val={{value}} edge={{transition}}"),
+            &rule,
+            &event,
+            AlertTransition::BecameFiring,
+        );
+        assert!(body.contains("[critical]"));
+        assert!(body.contains("high_cpu"));
+        assert!(body.contains("val=90"));
+        assert!(body.contains("edge=firing"));
+    }
+
+    #[test]
+    fn notify_template_empty_falls_back() {
+        let rule = sample_rule(0);
+        let now = Utc::now();
+        let (event, _) = apply_evaluation(&rule, &sample(90.0), None, now);
+        let body = format_notify_body(Some("  "), &rule, &event, AlertTransition::BecameFiring);
+        let default = format_notify_text(&rule, &event, AlertTransition::BecameFiring);
+        assert_eq!(body, default);
+    }
+
+    #[test]
+    fn notify_json_template_and_json_escape() {
+        let rule = sample_rule(0);
+        let now = Utc::now();
+        let (mut event, _) = apply_evaluation(&rule, &sample(90.0), None, now);
+        event
+            .annotations
+            .insert("summary".into(), r#"disk "C:" full"#.into());
+        let v = format_notify_json(
+            Some(r#"{"msg": {{annotations.summary|json}}, "sev": {{severity|json}}}"#),
+            &rule,
+            &event,
+            AlertTransition::BecameFiring,
+        )
+        .expect("json ok");
+        assert_eq!(v["msg"], "disk \"C:\" full");
+        assert_eq!(v["sev"], "critical");
     }
 }

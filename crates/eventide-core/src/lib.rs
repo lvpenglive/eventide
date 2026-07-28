@@ -5,6 +5,7 @@ mod eval;
 mod fingerprint;
 mod ingress;
 mod models;
+mod storm;
 mod template;
 
 pub use enrich::{
@@ -12,7 +13,9 @@ pub use enrich::{
     EnrichKind, EnrichRule, LookupTable,
 };
 pub use eval::{
-    alert_title, apply_evaluation, compare, evaluate_rule, evaluate_sample, merge_labels,
+    alert_title, apply_evaluation, compare, default_http_json_payload, evaluate_rule,
+    evaluate_sample, format_notify_body, format_notify_json, format_notify_json_for_channel,
+    format_notify_log_body, format_notify_text, format_notify_text_for_channel, merge_labels,
     EvaluateResult, MetricSample,
 };
 pub use fingerprint::alert_fingerprint;
@@ -23,6 +26,12 @@ pub use ingress::{
     GenericWebhook,
 };
 pub use models::*;
+pub use storm::{
+    build_group_key, build_throttle_key, format_aggregate_sample, format_aggregate_text,
+    AggregateBuffer, AggregateConfig, AggregateMode, AggregatePushResult, AggregateSummary,
+    IngressPermit, IngressPressure, IngressPressureConfig, ThrottleConfig, ThrottleDecision,
+    ThrottleGate,
+};
 pub use template::{
     apply_string_transform, render_map, render_template, split_path_transform, TemplateContext,
 };

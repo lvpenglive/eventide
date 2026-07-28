@@ -1,23 +1,12 @@
-//! Feishu / Lark custom bot notifier.
+//! Feishu / Lark custom bot notifier (text / markdown card + optional sign).
 
-use crate::{build_text, NotifyError};
+use crate::channel_opts::is_markdown;
+use crate::{build_text_for_channel, NotifyError};
 use eventide_core::{AlertEvent, AlertTransition, NotifyChannel, Rule};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct FeishuNotifier;
-
-#[derive(Serialize)]
-struct FsContent {
-    text: String,
-}
-
-#[derive(Serialize)]
-struct FsBody {
-    msg_type: &'static str,
-    content: FsContent,
-}
 
 impl FeishuNotifier {
     pub async fn send(
@@ -27,31 +16,80 @@ impl FeishuNotifier {
         event: &AlertEvent,
         transition: AlertTransition,
     ) -> Result<(), NotifyError> {
-        let url = signed_url(&channel.url, channel.secret.as_deref())?;
-        let body = FsBody {
-            msg_type: "text",
-            content: FsContent {
-                text: build_text(rule, event, transition),
-            },
-        };
+        let content = build_text_for_channel(channel, rule, event, transition);
+        let report = Self::send_text_report(http, channel, &content).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "feishu failed".into()),
+            ))
+        }
+    }
 
-        let resp = http.post(&url).json(&body).send().await?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(NotifyError::Channel(format!(
-                "feishu http {status}: {text}"
-            )));
+    pub async fn send_text(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        content: &str,
+    ) -> Result<(), NotifyError> {
+        let report = Self::send_text_report(http, channel, content).await;
+        if report.ok {
+            Ok(())
+        } else {
+            Err(NotifyError::Channel(
+                report.error.unwrap_or_else(|| "feishu failed".into()),
+            ))
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            // Feishu returns code==0 on success
-            if let Some(code) = v.get("code").and_then(|c| c.as_i64()) {
-                if code != 0 {
-                    return Err(NotifyError::Channel(format!("feishu err: {text}")));
-                }
+    }
+
+    pub async fn send_text_report(
+        http: &reqwest::Client,
+        channel: &NotifyChannel,
+        content: &str,
+    ) -> crate::NotifySendReport {
+        let url = match signed_url(&channel.url, channel.secret.as_deref()) {
+            Ok(u) => u,
+            Err(e) => {
+                return crate::NotifySendReport {
+                    ok: false,
+                    kind: "feishu".into(),
+                    request_url: channel.url.clone(),
+                    request_body: build_body(channel, content),
+                    http_status: None,
+                    response_body: String::new(),
+                    error: Some(e.to_string()),
+                };
             }
-        }
-        Ok(())
+        };
+        let body = build_body(channel, content);
+        crate::post_json_report(http, "feishu", url, body, |t| {
+            crate::errcode_nonzero(t, "code", "feishu")
+        })
+        .await
+    }
+}
+
+fn build_body(channel: &NotifyChannel, content: &str) -> serde_json::Value {
+    if is_markdown(channel) {
+        // Interactive card with lark_md element.
+        serde_json::json!({
+            "msg_type": "interactive",
+            "card": {
+                "config": { "wide_screen_mode": true },
+                "elements": [{
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": content
+                    }
+                }]
+            }
+        })
+    } else {
+        serde_json::json!({
+            "msg_type": "text",
+            "content": { "text": content },
+        })
     }
 }
 
@@ -65,7 +103,6 @@ fn signed_url(base: &str, secret: Option<&str>) -> Result<String, NotifyError> {
         .map_err(|e| NotifyError::Channel(e.to_string()))?
         .as_secs() as i64;
 
-    // Feishu: string_to_sign = "{timestamp}\n{secret}", then HMAC-SHA256, base64
     let string_to_sign = format!("{timestamp}\n{secret}");
     let sign = hmac_sha256(secret.as_bytes(), string_to_sign.as_bytes());
     let sign_b64 = base64_encode(&sign);

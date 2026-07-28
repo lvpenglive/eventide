@@ -95,7 +95,9 @@ impl Db {
     pub fn list_channels(&self) -> Result<Vec<NotifyChannel>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, kind, url, secret, enabled, created_at, updated_at FROM notify_channels ORDER BY name",
+            "SELECT id, name, kind, url, secret, enabled, created_at, updated_at,
+                    COALESCE(options_json, '{}')
+             FROM notify_channels ORDER BY name",
         )?;
         let rows = stmt.query_map([], map_channel)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -105,7 +107,9 @@ impl Db {
     pub fn get_channel(&self, id: Uuid) -> Result<Option<NotifyChannel>> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, name, kind, url, secret, enabled, created_at, updated_at FROM notify_channels WHERE id=?1",
+            "SELECT id, name, kind, url, secret, enabled, created_at, updated_at,
+                    COALESCE(options_json, '{}')
+             FROM notify_channels WHERE id=?1",
             params![id.to_string()],
             map_channel,
         )
@@ -115,12 +119,14 @@ impl Db {
 
     pub fn upsert_channel(&self, ch: &NotifyChannel) -> Result<()> {
         let conn = self.lock()?;
+        let options_json = serde_json::to_string(&ch.options)?;
         conn.execute(
-            "INSERT INTO notify_channels (id, name, kind, url, secret, enabled, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            "INSERT INTO notify_channels (id, name, kind, url, secret, enabled, created_at, updated_at, options_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, kind=excluded.kind, url=excluded.url, secret=excluded.secret,
-               enabled=excluded.enabled, updated_at=excluded.updated_at",
+               enabled=excluded.enabled, updated_at=excluded.updated_at,
+               options_json=excluded.options_json",
             params![
                 ch.id.to_string(),
                 ch.name,
@@ -130,6 +136,7 @@ impl Db {
                 ch.enabled as i64,
                 fmt_dt(ch.created_at),
                 fmt_dt(ch.updated_at),
+                options_json,
             ],
         )?;
         Ok(())
@@ -279,6 +286,103 @@ impl Db {
         }
     }
 
+    /// Counts by status without loading full alert rows.
+    pub fn alert_status_counts(&self) -> Result<(usize, usize, usize, usize)> {
+        let conn = self.lock()?;
+        let mut firing = 0usize;
+        let mut pending = 0usize;
+        let mut resolved = 0usize;
+        let mut stmt = conn.prepare(
+            "SELECT status, COUNT(*) FROM alert_events GROUP BY status",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let status: String = row.get(0)?;
+            let n: i64 = row.get(1)?;
+            Ok((status, n as usize))
+        })?;
+        for row in rows {
+            let (status, n) = row?;
+            match status.as_str() {
+                "firing" => firing = n,
+                "pending" => pending = n,
+                "resolved" => resolved = n,
+                _ => {}
+            }
+        }
+        Ok((firing, pending, resolved, firing + pending + resolved))
+    }
+
+    /// Recent alerts for dashboard: firing/pending first, then resolved.
+    pub fn list_recent_alerts_overview(&self, limit: usize) -> Result<Vec<AlertEvent>> {
+        let conn = self.lock()?;
+        let lim = limit.max(1) as i64;
+        let mut stmt = conn.prepare(
+            "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
+                    value, starts_at, ends_at, pending_since, last_evaluated_at,
+                    notified_firing, notified_resolved
+             FROM alert_events
+             ORDER BY CASE status
+                 WHEN 'firing' THEN 0
+                 WHEN 'pending' THEN 1
+                 ELSE 2
+             END,
+             last_evaluated_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![lim], map_alert)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn count_table(&self, table: &str) -> Result<usize> {
+        let allowed = [
+            "datasources",
+            "rules",
+            "notify_channels",
+            "ingress_routes",
+            "lookup_tables",
+            "enrich_rules",
+        ];
+        if !allowed.contains(&table) {
+            anyhow::bail!("count_table: unsupported table");
+        }
+        let conn = self.lock()?;
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        let n: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+        Ok(n as usize)
+    }
+
+    pub fn count_enabled_rules(&self) -> Result<usize> {
+        let conn = self.lock()?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM rules WHERE enabled=1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    pub fn list_recent_notify_skips(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
+        let conn = self.lock()?;
+        let lim = limit.max(1) as i64;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(error, ''), transition, created_at
+             FROM notify_logs
+             WHERE success=0 AND error IS NOT NULL AND error != ''
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![lim], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn get_alert_by_fingerprint(&self, fp: &str) -> Result<Option<AlertEvent>> {
         let conn = self.lock()?;
         conn.query_row(
@@ -310,10 +414,52 @@ impl Db {
     pub fn list_notify_logs_for_alert(&self, alert_id: Uuid) -> Result<Vec<NotifyLog>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, alert_id, channel_id, transition, success, error, created_at
+            "SELECT id, alert_id, channel_id, transition, success, error, created_at,
+                    COALESCE(body, '')
              FROM notify_logs WHERE alert_id=?1 ORDER BY created_at DESC LIMIT 100",
         )?;
         let rows = stmt.query_map(params![alert_id.to_string()], map_notify_log)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn list_notify_logs(
+        &self,
+        channel_id: Option<Uuid>,
+        success: Option<bool>,
+        q: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<NotifyLog>> {
+        let conn = self.lock()?;
+        let lim = limit.clamp(1, 500) as i64;
+        let mut sql = String::from(
+            "SELECT id, alert_id, channel_id, transition, success, error, created_at,
+                    COALESCE(body, '')
+             FROM notify_logs WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(cid) = channel_id {
+            sql.push_str(" AND channel_id=?");
+            params_vec.push(Box::new(cid.to_string()));
+        }
+        if let Some(ok) = success {
+            sql.push_str(" AND success=?");
+            params_vec.push(Box::new(if ok { 1i64 } else { 0i64 }));
+        }
+        if let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) {
+            sql.push_str(" AND (body LIKE ? OR IFNULL(error,'') LIKE ? OR alert_id LIKE ?)");
+            let pat = format!("%{q}%");
+            params_vec.push(Box::new(pat.clone()));
+            params_vec.push(Box::new(pat.clone()));
+            params_vec.push(Box::new(pat));
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+        params_vec.push(Box::new(lim));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), map_notify_log)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -572,8 +718,8 @@ impl Db {
             AlertTransition::Unchanged => "unchanged",
         };
         conn.execute(
-            "INSERT INTO notify_logs (id, alert_id, channel_id, transition, success, error, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO notify_logs (id, alert_id, channel_id, transition, success, error, body, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 log.id.to_string(),
                 log.alert_id.to_string(),
@@ -581,6 +727,7 @@ impl Db {
                 transition,
                 log.success as i64,
                 log.error,
+                log.body,
                 fmt_dt(log.created_at),
             ],
         )?;
@@ -702,6 +849,7 @@ fn map_channel(row: &Row<'_>) -> rusqlite::Result<NotifyChannel> {
     let kind = ChannelKind::parse(&kind_s).unwrap_or(ChannelKind::Webhook);
     let created: String = row.get(6)?;
     let updated: String = row.get(7)?;
+    let options_json: String = row.get(8).unwrap_or_else(|_| "{}".into());
     Ok(NotifyChannel {
         id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -710,6 +858,7 @@ fn map_channel(row: &Row<'_>) -> rusqlite::Result<NotifyChannel> {
         kind,
         url: row.get(3)?,
         secret: row.get(4)?,
+        options: labels_from_json(&options_json).unwrap_or_default(),
         enabled: row.get::<_, i64>(5)? != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
@@ -894,6 +1043,7 @@ fn map_ingress(row: &Row<'_>) -> rusqlite::Result<IngressRoute> {
 fn map_notify_log(row: &Row<'_>) -> rusqlite::Result<NotifyLog> {
     let transition_s: String = row.get(3)?;
     let created: String = row.get(6)?;
+    let body: String = row.get(7).unwrap_or_default();
     let transition = match transition_s.as_str() {
         "became_firing" => AlertTransition::BecameFiring,
         "became_resolved" => AlertTransition::BecameResolved,
@@ -912,6 +1062,7 @@ fn map_notify_log(row: &Row<'_>) -> rusqlite::Result<NotifyLog> {
         transition,
         success: row.get::<_, i64>(4)? != 0,
         error: row.get(5)?,
+        body,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
     })
 }

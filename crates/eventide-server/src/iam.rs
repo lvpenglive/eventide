@@ -203,6 +203,9 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
             "channels:read"
         });
     }
+    if path.starts_with("/api/notifies") {
+        return Some("channels:read");
+    }
     if path.starts_with("/api/enrich") || path.starts_with("/api/lookups") {
         return Some(if write { "enrich:write" } else { "enrich:read" });
     }

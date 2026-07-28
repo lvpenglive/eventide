@@ -55,6 +55,9 @@ pub async fn receive_auto(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let Some(_permit) = state.pressure.try_enter() else {
+        return too_many_requests();
+    };
     let id = match Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
@@ -132,6 +135,9 @@ async fn process_ingress<F>(
 where
     F: FnOnce(IngressRoute) -> Result<(IngressRoute, Vec<eventide_core::IngressAlert>), String>,
 {
+    let Some(_permit) = state.pressure.try_enter() else {
+        return Err(too_many_requests());
+    };
     let id = Uuid::parse_str(id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -193,6 +199,17 @@ where
         )
             .into_response()
     })
+}
+
+fn too_many_requests() -> axum::response::Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+            "error": "ingress overloaded",
+            "hint": "storm.ingress_max_inflight limit reached; retry later"
+        })),
+    )
+        .into_response()
 }
 
 fn check_auth(route: &IngressRoute, headers: &HeaderMap) -> Result<(), axum::response::Response> {

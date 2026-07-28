@@ -13,10 +13,19 @@ pub struct TemplateContext<'a> {
     pub status: &'a str,
     pub fingerprint: &'a str,
     pub rule_name: Option<&'a str>,
+    /// Optional preformatted title (notify templates).
+    pub title: Option<&'a str>,
+    /// Notify edge label: firing / resolved / unchanged.
+    pub transition: Option<&'a str>,
+    /// JSON dump of all labels.
+    pub labels_json: Option<&'a str>,
+    /// JSON dump of all annotations.
+    pub annotations_json: Option<&'a str>,
 }
 
 /// Expand `{{labels.x}}` / `{{annotations.x}}` / `{{value}}` / `{{severity}}` /
-/// `{{status}}` / `{{fingerprint}}` / `{{rule.name}}` placeholders.
+/// `{{status}}` / `{{fingerprint}}` / `{{rule.name}}` / `{{title}}` /
+/// `{{transition}}` / `{{labels}}` / `{{annotations}}` placeholders.
 ///
 /// Path transforms (same as ingress mapping):
 /// `{{annotations.summary|before:：}}`, `|after:`, `|split:SEP:INDEX`, `|between:START:END`.
@@ -72,10 +81,14 @@ pub fn split_path_transform(path: &str) -> (String, Option<String>) {
 /// - `after:SEP` — substring after first SEP
 /// - `split:SEP:INDEX` — split by SEP, take INDEX (0-based)
 /// - `between:START:END` — from first START to next END（起点/终点可为空，空=串首/串尾）
+/// - `json` — JSON string literal（含引号与转义，便于嵌入自定义 JSON 模板）
 pub fn apply_string_transform(raw: &str, transform: Option<&str>) -> String {
     let Some(t) = transform.map(|s| s.trim_start()).filter(|s| !s.is_empty()) else {
         return raw.to_string();
     };
+    if t == "json" {
+        return serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into());
+    }
     if let Some(sep) = t.strip_prefix("before:") {
         return raw
             .split_once(sep)
@@ -141,6 +154,10 @@ fn resolve(key: &str, ctx: &TemplateContext<'_>) -> String {
             "status" => ctx.status.to_string(),
             "fingerprint" => ctx.fingerprint.to_string(),
             "rule.name" | "rule" => ctx.rule_name.unwrap_or("").to_string(),
+            "title" => ctx.title.unwrap_or("").to_string(),
+            "transition" => ctx.transition.unwrap_or("").to_string(),
+            "labels" => ctx.labels_json.unwrap_or("").to_string(),
+            "annotations" => ctx.annotations_json.unwrap_or("").to_string(),
             _ => String::new(),
         }
     };
@@ -161,6 +178,10 @@ mod tests {
             status: "firing",
             fingerprint: "abc",
             rule_name: Some("HighCPU"),
+            title: None,
+            transition: None,
+            labels_json: None,
+            annotations_json: None,
         }
     }
 
