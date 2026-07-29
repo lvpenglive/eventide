@@ -1,12 +1,11 @@
 //! Kafka ingress: consume alert JSON from topics.
 
-use crate::notify_pipeline::{persist_and_notify, synthetic_rule_for_ingress};
+use crate::notify_pipeline::{persist_and_queue_notify, synthetic_rule_for_ingress};
 use crate::state::AppState;
 use chrono::Utc;
-use eventide_core::{
-    apply_ingress, IngressKind, IngressRoute,
-};
+use eventide_core::{apply_ingress, IngressKind, IngressRoute};
 use eventide_sources::{earliest_offset, fetch_records_from, latest_offset};
+use futures::future::join_all;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +15,9 @@ pub fn spawn_kafka_ingress(state: Arc<AppState>) {
         let mut interval = tokio::time::interval(Duration::from_secs(tick));
         loop {
             interval.tick().await;
+            if !state.leader.is_leader() {
+                continue;
+            }
             if let Err(e) = poll_once(state.clone()).await {
                 tracing::warn!("kafka ingress poll failed: {e:#}");
             }
@@ -59,40 +61,64 @@ async fn poll_route(state: Arc<AppState>, route: &IngressRoute) -> anyhow::Resul
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
 
+    let start_at = route
+        .options
+        .get("start")
+        .map(|s| s.as_str())
+        .unwrap_or("latest");
+
+    let client = state.kafka_pool.get(&brokers).await?;
+
+    // Resolve start offsets (DB + optional first-time watermark). Stop at first
+    // missing partition when we have no stored offset (topic shorter than max).
+    let mut jobs: Vec<(i32, i64)> = Vec::new();
     for partition in 0..max_partitions {
         let start = match state.db.get_kafka_offset(route.id, partition)? {
             Some(o) => o,
             None => {
-                // Default: start at latest (only new alerts). Use earliest if options.start=earliest
-                let start_at = route
-                    .options
-                    .get("start")
-                    .map(|s| s.as_str())
-                    .unwrap_or("latest");
-                if start_at == "earliest" {
-                    match earliest_offset(&brokers, &topic, partition).await {
-                        Ok(o) => o,
-                        Err(_) if partition > 0 => break,
-                        Err(e) => return Err(e.into()),
-                    }
+                let offset_res = if start_at == "earliest" {
+                    earliest_offset(client.as_ref(), &topic, partition).await
                 } else {
-                    match latest_offset(&brokers, &topic, partition).await {
-                        Ok(o) => o,
-                        Err(_) if partition > 0 => break,
-                        Err(e) => return Err(e.into()),
-                    }
+                    latest_offset(client.as_ref(), &topic, partition).await
+                };
+                match offset_res {
+                    Ok(o) => o,
+                    Err(_) if partition > 0 => break,
+                    Err(e) => return Err(e.into()),
                 }
             }
         };
+        jobs.push((partition, start));
+    }
 
-        let (payloads, high) =
-            match fetch_records_from(&brokers, &topic, partition, start).await {
-                Ok(v) => v,
-                Err(_) if partition > 0 && state.db.get_kafka_offset(route.id, partition)?.is_none() => {
-                    break;
-                }
-                Err(e) => return Err(e.into()),
-            };
+    // Parallel fetch across partitions; ingest stays sequential for quieter DB/notify.
+    let topic_owned = topic.clone();
+    let fetches = join_all(jobs.iter().map(|(partition, start)| {
+        let client = Arc::clone(&client);
+        let topic = topic_owned.clone();
+        let partition = *partition;
+        let start = *start;
+        async move {
+            let result = fetch_records_from(client.as_ref(), &topic, partition, start).await;
+            (partition, start, result)
+        }
+    }))
+    .await;
+
+    for (partition, start, result) in fetches {
+        let (payloads, high) = match result {
+            Ok(v) => v,
+            Err(_)
+                if partition > 0
+                    && state
+                        .db
+                        .get_kafka_offset(route.id, partition)?
+                        .is_none() =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         for raw in payloads {
             if let Err(e) = ingest_payload(state.clone(), route, &raw).await {
@@ -100,7 +126,6 @@ async fn poll_route(state: Arc<AppState>, route: &IngressRoute) -> anyhow::Resul
             }
         }
 
-        // Advance to high watermark (or keep start if nothing new).
         let next = high.max(start);
         state.db.set_kafka_offset(route.id, partition, next)?;
     }
@@ -127,7 +152,7 @@ async fn ingest_payload(
         let had = existing.is_some();
         let (event, transition) = apply_ingress(route, &incoming, existing, now);
         let rule = synthetic_rule_for_ingress(route, &event);
-        persist_and_notify(
+        persist_and_queue_notify(
             &state,
             &rule,
             &route.channel_ids,

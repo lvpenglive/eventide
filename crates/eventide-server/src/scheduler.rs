@@ -14,6 +14,9 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
         let mut interval = tokio::time::interval(Duration::from_secs(tick));
         loop {
             interval.tick().await;
+            if !state.leader.is_leader() {
+                continue;
+            }
             if let Err(e) = run_once(state.clone()).await {
                 tracing::error!("scheduler tick failed: {e:#}");
             }

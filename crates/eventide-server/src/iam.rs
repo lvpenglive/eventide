@@ -122,6 +122,11 @@ pub const PERMISSION_CATALOG: &[PermDef] = &[
         label: "查看系统设置",
         group: "系统",
     },
+    PermDef {
+        code: "settings:write",
+        label: "修改系统设置",
+        group: "系统",
+    },
 ];
 
 pub fn catalog_json() -> serde_json::Value {
@@ -208,6 +213,13 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
     }
     if path.starts_with("/api/enrich") || path.starts_with("/api/lookups") {
         return Some(if write { "enrich:write" } else { "enrich:read" });
+    }
+    if path.starts_with("/api/settings") {
+        return Some(if write {
+            "settings:write"
+        } else {
+            "settings:read"
+        });
     }
     // Unknown protected route: require login only
     None

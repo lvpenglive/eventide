@@ -945,6 +945,9 @@ code, .mono {
 .alert-filters select {
   width: 110px;
 }
+.alert-filters select#alert-store {
+  width: 112px;
+}
 .alert-feed {
   display: flex;
   flex-direction: column;

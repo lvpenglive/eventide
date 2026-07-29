@@ -74,7 +74,7 @@
     users: ["用户管理", "账号 · 部门 · 角色"],
     roles: ["权限管理", "角色与权限码"],
     departments: ["部门管理", "组织架构"],
-    settings: ["系统设置", "外观主题 · 运行信息"],
+    settings: ["系统设置", "外观 · 告警历史 · 运行信息"],
   };
 
   function can(perm) {
@@ -951,7 +951,7 @@
     },
 
     async alerts(root) {
-      const f = state.alertFilters || { status: "", severity: "", source: "", q: "" };
+      const f = state.alertFilters || { status: "", severity: "", source: "", q: "", store: "" };
       setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
 
       const load = async () => {
@@ -959,17 +959,23 @@
         const severity = root.querySelector("#alert-sev")?.value ?? state.alertFilters?.severity ?? "";
         const source = root.querySelector("#alert-source")?.value ?? state.alertFilters?.source ?? "";
         const q = (root.querySelector("#alert-q")?.value ?? state.alertFilters?.q ?? "").trim();
-        state.alertFilters = { status, severity, source, q };
+        const store =
+          root.querySelector("#alert-store")?.value ?? state.alertFilters?.store ?? "";
+        state.alertFilters = { status, severity, source, q, store };
 
         const params = new URLSearchParams();
         if (status) params.set("status", status);
         if (severity) params.set("severity", severity);
         if (source) params.set("source", source);
         if (q) params.set("q", q);
+        if (store) params.set("store", store);
+
+        const countParams = new URLSearchParams();
+        if (store) countParams.set("store", store);
 
         const [rows, allRows, ingressRows] = await Promise.all([
           api("/api/alerts" + (params.toString() ? `?${params}` : "")),
-          api("/api/alerts").catch(() => []),
+          api("/api/alerts" + (countParams.toString() ? `?${countParams}` : "")).catch(() => []),
           api("/api/ingress").catch(() => []),
         ]);
         const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
@@ -1002,6 +1008,11 @@
                 <option value="">来源</option>
                 <option value="ingress" ${source === "ingress" ? "selected" : ""}>告警接入</option>
                 <option value="rule" ${source === "rule" ? "selected" : ""}>规则</option>
+              </select>
+              <select id="alert-store" title="列表范围">
+                <option value="" ${!store ? "selected" : ""}>列表·默认</option>
+                <option value="mysql" ${store === "mysql" ? "selected" : ""}>最近事件</option>
+                <option value="es" ${store === "es" ? "selected" : ""}>历史事件</option>
               </select>
             </div>
           </div>
@@ -1050,6 +1061,10 @@
         };
         root.querySelector("#alert-source").onchange = (e) => {
           state.alertFilters = { ...(state.alertFilters || {}), source: e.target.value };
+          load();
+        };
+        root.querySelector("#alert-store").onchange = (e) => {
+          state.alertFilters = { ...(state.alertFilters || {}), store: e.target.value };
           load();
         };
       };
@@ -1294,11 +1309,72 @@
       state.me = me;
       applyNavPermissions();
       const perms = (me.permissions || []).join(", ") || "—";
+      let hist = {
+        write_to_es: false,
+        search_store: "mysql",
+        es_configured: false,
+        es_url: "",
+        es_index: "eventide-alerts",
+        es_username: "",
+        es_password_set: false,
+      };
+      try {
+        hist = await api("/api/settings/alert-history");
+      } catch (_) {}
+      const canWriteSettings = can("settings:write");
+      const dis = canWriteSettings ? "" : "disabled";
       root.innerHTML = `
         <div class="panel" style="max-width:720px;margin-bottom:16px">
           <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
           <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
           <div id="settings-theme"></div>
+        </div>
+        <div class="panel" style="max-width:720px;margin-bottom:16px">
+          <h3 style="margin:0 0 0.75rem;font-size:1rem">告警历史仓库</h3>
+          <p class="hint" style="margin:0 0 12px">
+            在此填写 Elasticsearch 地址并保存即可生效（也可在 <code>eventide.toml</code> 里预置）。
+            状态：${
+              hist.es_configured
+                ? `<span class="badge on">已连接配置</span>`
+                : `<span class="badge off">未配置地址</span>`
+            }
+          </p>
+          <div class="field"><label>ES 地址</label>
+            <input id="hist-es-url" type="text" placeholder="http://127.0.0.1:9200" value="${esc(
+              hist.es_url || ""
+            )}" ${dis} />
+          </div>
+          <div class="field"><label>Index</label>
+            <input id="hist-es-index" type="text" placeholder="eventide-alerts" value="${esc(
+              hist.es_index || "eventide-alerts"
+            )}" ${dis} />
+          </div>
+          <div class="field"><label>用户名（可选）</label>
+            <input id="hist-es-user" type="text" autocomplete="off" value="${esc(
+              hist.es_username || ""
+            )}" ${dis} />
+          </div>
+          <div class="field"><label>密码（可选）</label>
+            <input id="hist-es-pass" type="password" autocomplete="new-password" placeholder="${
+              hist.es_password_set ? "已保存，留空则不修改" : "无密码可留空"
+            }" ${dis} />
+          </div>
+          <label class="check-row" style="margin:12px 0">
+            <input type="checkbox" id="hist-write-es" ${hist.write_to_es ? "checked" : ""} ${dis} />
+            <span>同步告警到历史事件（Elasticsearch）</span>
+          </label>
+          <div class="field" style="margin-top:8px">
+            <label>默认列表范围</label>
+            <select id="hist-search-store" ${dis}>
+              <option value="mysql" ${hist.search_store === "mysql" ? "selected" : ""}>最近事件</option>
+              <option value="es" ${hist.search_store === "es" ? "selected" : ""}>历史事件</option>
+            </select>
+          </div>
+          ${
+            canWriteSettings
+              ? `<div style="margin-top:14px"><button class="primary" id="hist-save">保存</button></div>`
+              : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
+          }
         </div>
         <div class="panel" style="max-width:720px">
           <h3 style="margin:0 0 1rem;font-size:1rem">运行信息</h3>
@@ -1318,6 +1394,29 @@
           </p>
         </div>`;
       bindThemeHost(document.getElementById("settings-theme"), "cards");
+      const saveBtn = document.getElementById("hist-save");
+      if (saveBtn) {
+        saveBtn.onclick = async () => {
+          try {
+            const body = {
+              write_to_es: !!document.getElementById("hist-write-es")?.checked,
+              search_store: document.getElementById("hist-search-store")?.value || "mysql",
+              es_url: (document.getElementById("hist-es-url")?.value || "").trim(),
+              es_index: (document.getElementById("hist-es-index")?.value || "").trim(),
+              es_username: (document.getElementById("hist-es-user")?.value || "").trim(),
+              es_password: document.getElementById("hist-es-pass")?.value || "",
+            };
+            hist = await api("/api/settings/alert-history", {
+              method: "PUT",
+              body: JSON.stringify(body),
+            });
+            toast("告警历史设置已保存");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
     },
 
     async users(root) {

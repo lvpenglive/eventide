@@ -2,6 +2,7 @@
 
 mod iam;
 mod overview;
+mod settings;
 
 use crate::auth::{self, require_auth, require_route_perm};
 use crate::scheduler;
@@ -105,6 +106,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/users/{id}/reset-password",
             post(iam::reset_password),
+        )
+        .route(
+            "/api/settings/alert-history",
+            get(settings::get_alert_history).put(settings::put_alert_history),
         )
         // Inner: perm check; Outer: JWT auth (last layer = outermost)
         .layer(middleware::from_fn(require_route_perm))
@@ -613,43 +618,72 @@ struct AlertQuery {
     q: Option<String>,
     /// `ingress` | `rule` — filter by source label prefix or absence.
     source: Option<String>,
+    /// `mysql` | `es` — override list backend (default from settings).
+    store: Option<String>,
 }
 
 async fn list_alerts(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AlertQuery>,
 ) -> ApiResult<Json<Vec<AlertEvent>>> {
-    let mut alerts = state
-        .db
-        .list_alerts(q.status.as_deref())
-        .map_err(ApiError::internal)?;
+    let prefs = state.alert_history_prefs();
+    let store = q
+        .store
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(prefs.search_store.as_str())
+        .to_ascii_lowercase();
 
-    if let Some(sev) = q.severity.as_deref().filter(|s| !s.is_empty()) {
-        alerts.retain(|a| a.severity.as_str() == sev);
-    }
-    if let Some(src) = q.source.as_deref().filter(|s| !s.is_empty()) {
-        match src {
-            "ingress" => alerts.retain(|a| {
-                a.labels
-                    .get("source")
-                    .map(|s| s.starts_with("ingress:"))
-                    .unwrap_or(false)
-            }),
-            "rule" => alerts.retain(|a| {
-                !a.labels
-                    .get("source")
-                    .map(|s| s.starts_with("ingress:"))
-                    .unwrap_or(false)
-            }),
-            _ => {}
+    let mut alerts = if store == "es" || store == "elasticsearch" {
+        let Some(es) = state.es_client() else {
+            return Err(ApiError::bad(
+                "elasticsearch 未配置：请在「系统设置 → 告警历史仓库」填写地址",
+            ));
+        };
+        es.search_alerts(
+            q.status.as_deref(),
+            q.severity.as_deref(),
+            q.source.as_deref(),
+            q.q.as_deref(),
+            500,
+        )
+        .await
+        .map_err(ApiError::internal)?
+    } else {
+        let mut alerts = state
+            .db
+            .list_alerts(q.status.as_deref())
+            .map_err(ApiError::internal)?;
+
+        if let Some(sev) = q.severity.as_deref().filter(|s| !s.is_empty()) {
+            alerts.retain(|a| a.severity.as_str() == sev);
         }
-    }
-    if let Some(needle) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let n = needle.to_ascii_lowercase();
-        alerts.retain(|a| alert_matches_query(a, &n));
-    }
+        if let Some(src) = q.source.as_deref().filter(|s| !s.is_empty()) {
+            match src {
+                "ingress" => alerts.retain(|a| {
+                    a.labels
+                        .get("source")
+                        .map(|s| s.starts_with("ingress:"))
+                        .unwrap_or(false)
+                }),
+                "rule" => alerts.retain(|a| {
+                    !a.labels
+                        .get("source")
+                        .map(|s| s.starts_with("ingress:"))
+                        .unwrap_or(false)
+                }),
+                _ => {}
+            }
+        }
+        if let Some(needle) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let n = needle.to_ascii_lowercase();
+            alerts.retain(|a| alert_matches_query(a, &n));
+        }
+        alerts
+    };
 
-    // Firing first, then pending, then resolved; within group by last_evaluated desc (already mostly).
+    // Firing first, then pending, then resolved; within group by last_evaluated desc.
     alerts.sort_by(|a, b| {
         let rank = |s: &AlertStatus| match s {
             AlertStatus::Firing => 0,

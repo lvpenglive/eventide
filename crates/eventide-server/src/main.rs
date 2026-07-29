@@ -1,12 +1,15 @@
 //! Eventide HTTP API, scheduler, and static console.
 
 mod api;
+mod alert_history;
 mod auth;
 mod config;
 mod db;
+mod elasticsearch;
 mod iam;
 mod ingress_api;
 mod kafka_ingress;
+mod leader;
 mod notify_pipeline;
 mod password;
 mod scheduler;
@@ -40,28 +43,43 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::load(&config_path)
         .with_context(|| format!("load config from {config_path}"))?;
 
-    std::fs::create_dir_all(
-        std::path::Path::new(&config.database_path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(".")),
-    )
-    .ok();
-
-    let db = Db::open(&config.database_path).context("open sqlite")?;
-    db.migrate().context("migrate sqlite")?;
+    let db = Db::connect(&config.mysql_url).context("connect mysql")?;
+    db.migrate().context("migrate mysql")?;
     db.seed_iam_if_empty(&config.auth.username, &config.auth.password)
         .context("seed IAM")?;
 
-    let throttle = eventide_core::ThrottleGate::new(config.storm.throttle_config());
-    let aggregate = eventide_core::AggregateBuffer::new(config.storm.aggregate_config());
+    let redis_client =
+        redis::Client::open(config.redis_url.as_str()).context("parse redis_url")?;
+    // Fail fast if Redis is unreachable.
+    {
+        let mut conn = redis_client
+            .get_connection()
+            .context("connect redis")?;
+        let pong: String = redis::cmd("PING")
+            .query(&mut conn)
+            .context("redis PING")?;
+        tracing::info!(%pong, redis = %config.redis_url, "redis ready");
+    }
+
+    let throttle = eventide_core::RedisThrottleGate::new(
+        config.storm.throttle_config(),
+        &redis_client,
+    )
+    .context("redis throttle")?;
+    let aggregate = eventide_core::RedisAggregateBuffer::new(
+        config.storm.aggregate_config(),
+        &redis_client,
+    )
+    .context("redis aggregate")?;
     let pressure = eventide_core::IngressPressure::new(config.storm.pressure_config());
+
     if config.storm.throttle_enabled {
         tracing::info!(
             min_interval = config.storm.min_interval_seconds,
             max_per_window = config.storm.max_per_window,
             window = config.storm.window_seconds,
             key = %config.storm.throttle_key,
-            "storm throttle enabled"
+            "storm throttle enabled (redis)"
         );
     }
     if config.storm.aggregate_enabled {
@@ -69,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
             window = config.storm.aggregate_window_seconds,
             group_by = %config.storm.group_by,
             mode = %config.storm.aggregate_mode,
-            "storm aggregate enabled"
+            "storm aggregate enabled (redis)"
         );
     }
     tracing::info!(
@@ -78,6 +96,55 @@ async fn main() -> anyhow::Result<()> {
         degrade_notify_per_sec = config.storm.degrade_notify_per_sec,
         "storm ingress pressure configured"
     );
+    tracing::info!(mysql = %config.mysql_url, "mysql ready");
+
+    let leader = Arc::new(
+        crate::leader::LeaderElection::new(&redis_client, &config.cluster)
+            .context("leader election")?,
+    );
+    tracing::info!(
+        enabled = config.cluster.enabled,
+        key = %config.cluster.leader_key,
+        lease_seconds = config.cluster.lease_seconds,
+        holder = %leader.holder_id(),
+        "cluster leader election configured"
+    );
+    crate::leader::spawn_leader_loop(leader.clone());
+
+    let (notify_queue, notify_rx) = crate::notify_pipeline::NotifyQueue::new();
+
+    let alert_history_prefs = {
+        use crate::alert_history::{AlertHistoryPrefs, ALERT_HISTORY_KEY};
+        let c = &config.elasticsearch;
+        let prefs = match db.get_kv(ALERT_HISTORY_KEY) {
+            Ok(Some(s)) => serde_json::from_str::<AlertHistoryPrefs>(&s).unwrap_or_default(),
+            _ => AlertHistoryPrefs::default(),
+        }
+        .with_toml_fallback(&c.url, &c.index, &c.username, &c.password);
+        tracing::info!(
+            write_to_es = prefs.write_to_es,
+            search_store = %prefs.search_store,
+            es_url = %prefs.es_url,
+            "alert history prefs loaded"
+        );
+        prefs
+    };
+    let es_client = match alert_history_prefs.build_es_client() {
+        Ok(c) => {
+            if c.is_some() {
+                tracing::info!(
+                    url = %alert_history_prefs.es_url,
+                    index = %alert_history_prefs.es_index,
+                    "elasticsearch client ready"
+                );
+            }
+            c
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "elasticsearch client init failed");
+            None
+        }
+    };
 
     let state = Arc::new(AppState {
         db,
@@ -86,7 +153,13 @@ async fn main() -> anyhow::Result<()> {
         throttle,
         aggregate,
         pressure,
+        leader,
+        kafka_pool: Arc::new(eventide_sources::KafkaClientPool::new()),
+        notify_queue,
+        es: Arc::new(std::sync::RwLock::new(es_client)),
+        alert_history: Arc::new(std::sync::RwLock::new(alert_history_prefs)),
     });
+    crate::notify_pipeline::spawn_notify_workers(state.clone(), notify_rx);
 
     spawn_scheduler(state.clone());
     crate::kafka_ingress::spawn_kafka_ingress(state.clone());

@@ -9,7 +9,57 @@ use eventide_core::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::{mpsc, Semaphore};
 use uuid::Uuid;
+
+/// Max queued notify jobs (Kafka backpressure when full).
+const NOTIFY_QUEUE_CAPACITY: usize = 1024;
+/// Concurrent outbound notify HTTP calls.
+const NOTIFY_WORKERS: usize = 8;
+
+pub struct NotifyJob {
+    pub rule: Rule,
+    pub channel_ids: Vec<Uuid>,
+    pub event: AlertEvent,
+    pub transition: AlertTransition,
+    pub now: DateTime<Utc>,
+}
+
+/// Outbound notify queue — persist first, send in background workers.
+#[derive(Clone)]
+pub struct NotifyQueue {
+    tx: mpsc::Sender<NotifyJob>,
+}
+
+impl NotifyQueue {
+    pub fn new() -> (Self, mpsc::Receiver<NotifyJob>) {
+        let (tx, rx) = mpsc::channel(NOTIFY_QUEUE_CAPACITY);
+        (Self { tx }, rx)
+    }
+
+    pub async fn enqueue(&self, job: NotifyJob) -> Result<(), mpsc::error::SendError<NotifyJob>> {
+        self.tx.send(job).await
+    }
+}
+
+pub fn spawn_notify_workers(state: Arc<AppState>, mut rx: mpsc::Receiver<NotifyJob>) {
+    tokio::spawn(async move {
+        let sem = Arc::new(Semaphore::new(NOTIFY_WORKERS));
+        while let Some(job) = rx.recv().await {
+            let permit = match sem.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            let state = state.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(e) = dispatch_queued_notify(&state, job).await {
+                    tracing::warn!("queued notify failed: {e:#}");
+                }
+            });
+        }
+    });
+}
 
 fn write_log(
     state: &AppState,
@@ -33,7 +83,53 @@ fn write_log(
     });
 }
 
+/// Persist + notify inline (scheduler / HTTP ingress).
 pub async fn persist_and_notify(
+    state: &Arc<AppState>,
+    rule: &Rule,
+    channel_ids: &[Uuid],
+    event: AlertEvent,
+    transition: AlertTransition,
+    existing_had_fp: bool,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    persist_and_notify_inner(
+        state,
+        rule,
+        channel_ids,
+        event,
+        transition,
+        existing_had_fp,
+        now,
+        false,
+    )
+    .await
+}
+
+/// Persist immediately, enqueue notify (Kafka ingress — digests topic faster).
+pub async fn persist_and_queue_notify(
+    state: &Arc<AppState>,
+    rule: &Rule,
+    channel_ids: &[Uuid],
+    event: AlertEvent,
+    transition: AlertTransition,
+    existing_had_fp: bool,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    persist_and_notify_inner(
+        state,
+        rule,
+        channel_ids,
+        event,
+        transition,
+        existing_had_fp,
+        now,
+        true,
+    )
+    .await
+}
+
+async fn persist_and_notify_inner(
     state: &Arc<AppState>,
     rule: &Rule,
     channel_ids: &[Uuid],
@@ -41,6 +137,7 @@ pub async fn persist_and_notify(
     transition: AlertTransition,
     existing_had_fp: bool,
     now: DateTime<Utc>,
+    queue_notify: bool,
 ) -> anyhow::Result<()> {
     // Skip brand-new resolved placeholders with no prior state.
     if event.status == AlertStatus::Resolved
@@ -66,92 +163,32 @@ pub async fn persist_and_notify(
         _ => false,
     };
 
-    if should_notify {
-        state.pressure.note_notify_attempt(now);
-        if state.pressure.should_skip_notify(now) {
-            tracing::warn!(
-                inflight = state.pressure.inflight(),
-                rate = state.pressure.notify_rate(now),
-                "notify skipped by storm degrade"
-            );
-            for ch_id in channel_ids {
-                if let Some(ch) = state.db.get_channel(*ch_id)? {
-                    let body = format_notify_log_body(&ch, rule, &event, transition);
-                    write_log(
-                        state,
-                        event.id,
-                        ch.id,
-                        transition,
-                        false,
-                        Some("degraded".into()),
-                        body,
-                        now,
-                    );
-                }
-            }
-            match transition {
-                AlertTransition::BecameFiring => event.notified_firing = true,
-                AlertTransition::BecameResolved => event.notified_resolved = true,
-                AlertTransition::Unchanged => {}
-            }
-            state.db.upsert_alert(&event)?;
-            return Ok(());
-        }
+    if !should_notify {
+        state.db.upsert_alert(&event)?;
+        maybe_index_alert(state, &event);
+        return Ok(());
+    }
 
-        let sample_labels = &state.aggregate.config().sample_labels;
-        let group_by = &state.aggregate.config().group_by;
+    state.pressure.note_notify_attempt(now);
+    if state.pressure.should_skip_notify(now) {
+        tracing::warn!(
+            inflight = state.pressure.inflight(),
+            rate = state.pressure.notify_rate(now),
+            "notify skipped by storm degrade"
+        );
         for ch_id in channel_ids {
             if let Some(ch) = state.db.get_channel(*ch_id)? {
                 let body = format_notify_log_body(&ch, rule, &event, transition);
-                // P1: aggregate BecameFiring only.
-                let agg_action = if transition == AlertTransition::BecameFiring
-                    && state.aggregate.enabled()
-                {
-                    let gkey = build_group_key(group_by, &event.labels);
-                    let sample = format_aggregate_sample(sample_labels, &event.labels);
-                    state.aggregate.push(
-                        &ch.id.to_string(),
-                        &gkey,
-                        &event.fingerprint,
-                        sample,
-                        now,
-                    )
-                } else {
-                    AggregatePushResult::Bypass
-                };
-
-                match agg_action {
-                    AggregatePushResult::Buffered => {
-                        write_log(
-                            state,
-                            event.id,
-                            ch.id,
-                            transition,
-                            false,
-                            Some("aggregated".into()),
-                            body,
-                            now,
-                        );
-                        continue;
-                    }
-                    AggregatePushResult::SendHead | AggregatePushResult::Bypass => {}
-                }
-
-                let tkey = if matches!(agg_action, AggregatePushResult::SendHead) {
-                    build_group_key(group_by, &event.labels)
-                } else {
-                    build_throttle_key(
-                        &state.config.storm.throttle_key,
-                        &event.fingerprint,
-                        &event.labels,
-                    )
-                };
-
-                if !send_with_throttle(state, &ch, rule, &event, transition, &tkey, &body, now)
-                    .await?
-                {
-                    continue;
-                }
+                write_log(
+                    state,
+                    event.id,
+                    ch.id,
+                    transition,
+                    false,
+                    Some("degraded".into()),
+                    body,
+                    now,
+                );
             }
         }
         match transition {
@@ -159,9 +196,145 @@ pub async fn persist_and_notify(
             AlertTransition::BecameResolved => event.notified_resolved = true,
             AlertTransition::Unchanged => {}
         }
+        state.db.upsert_alert(&event)?;
+        maybe_index_alert(state, &event);
+        return Ok(());
     }
 
+    if queue_notify {
+        // Land alert in DB first so Kafka offset can advance without waiting on HTTP.
+        state.db.upsert_alert(&event)?;
+        maybe_index_alert(state, &event);
+        let job = NotifyJob {
+            rule: rule.clone(),
+            channel_ids: channel_ids.to_vec(),
+            event,
+            transition,
+            now,
+        };
+        if let Err(e) = state.notify_queue.enqueue(job).await {
+            // Channel closed — fall back to inline dispatch.
+            tracing::warn!("notify queue closed, falling back inline");
+            let mut job = e.0;
+            run_channel_notifies(
+                state,
+                &job.rule,
+                &job.channel_ids,
+                &mut job.event,
+                job.transition,
+                job.now,
+            )
+            .await?;
+            state.db.upsert_alert(&job.event)?;
+            maybe_index_alert(state, &job.event);
+        }
+        return Ok(());
+    }
+
+    run_channel_notifies(state, rule, channel_ids, &mut event, transition, now).await?;
     state.db.upsert_alert(&event)?;
+    maybe_index_alert(state, &event);
+    Ok(())
+}
+
+fn maybe_index_alert(state: &Arc<AppState>, event: &AlertEvent) {
+    if !state.alert_history_prefs().write_to_es {
+        return;
+    }
+    let Some(es) = state.es_client() else {
+        return;
+    };
+    let event = event.clone();
+    tokio::spawn(async move {
+        if let Err(e) = es.index_alert(&event).await {
+            tracing::warn!(alert = %event.id, error = %e, "elasticsearch index failed");
+        }
+    });
+}
+
+async fn dispatch_queued_notify(state: &Arc<AppState>, mut job: NotifyJob) -> anyhow::Result<()> {
+    run_channel_notifies(
+        state,
+        &job.rule,
+        &job.channel_ids,
+        &mut job.event,
+        job.transition,
+        job.now,
+    )
+    .await?;
+    state.db.upsert_alert(&job.event)?;
+    maybe_index_alert(state, &job.event);
+    Ok(())
+}
+
+async fn run_channel_notifies(
+    state: &Arc<AppState>,
+    rule: &Rule,
+    channel_ids: &[Uuid],
+    event: &mut AlertEvent,
+    transition: AlertTransition,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let sample_labels = &state.aggregate.config().sample_labels;
+    let group_by = &state.aggregate.config().group_by;
+    for ch_id in channel_ids {
+        if let Some(ch) = state.db.get_channel(*ch_id)? {
+            let body = format_notify_log_body(&ch, rule, event, transition);
+            // P1: aggregate BecameFiring only.
+            let agg_action = if transition == AlertTransition::BecameFiring
+                && state.aggregate.enabled()
+            {
+                let gkey = build_group_key(group_by, &event.labels);
+                let sample = format_aggregate_sample(sample_labels, &event.labels);
+                state.aggregate.push(
+                    &ch.id.to_string(),
+                    &gkey,
+                    &event.fingerprint,
+                    sample,
+                    now,
+                )
+            } else {
+                AggregatePushResult::Bypass
+            };
+
+            match agg_action {
+                AggregatePushResult::Buffered => {
+                    write_log(
+                        state,
+                        event.id,
+                        ch.id,
+                        transition,
+                        false,
+                        Some("aggregated".into()),
+                        body,
+                        now,
+                    );
+                    continue;
+                }
+                AggregatePushResult::SendHead | AggregatePushResult::Bypass => {}
+            }
+
+            let tkey = if matches!(agg_action, AggregatePushResult::SendHead) {
+                build_group_key(group_by, &event.labels)
+            } else {
+                build_throttle_key(
+                    &state.config.storm.throttle_key,
+                    &event.fingerprint,
+                    &event.labels,
+                )
+            };
+
+            if !send_with_throttle(state, &ch, rule, event, transition, &tkey, &body, now).await?
+            {
+                continue;
+            }
+        }
+    }
+    match transition {
+        AlertTransition::BecameFiring => event.notified_firing = true,
+        AlertTransition::BecameResolved => event.notified_resolved = true,
+        AlertTransition::Unchanged => {}
+    }
     Ok(())
 }
 
@@ -302,6 +475,9 @@ pub fn spawn_aggregate_flusher(state: Arc<AppState>) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             interval.tick().await;
+            if !state.leader.is_leader() {
+                continue;
+            }
             flush_aggregates(&state).await;
         }
     });

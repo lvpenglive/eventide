@@ -80,6 +80,8 @@ pub async fn overview(
         "ingress": ingress_brief,
         "notify_skips": notify_skips,
         "pressure_inflight": state.pressure.inflight(),
+        "is_leader": state.leader.is_leader(),
+        "leader_holder_id": state.leader.holder_id(),
     })))
 }
 

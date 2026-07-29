@@ -1,5 +1,6 @@
 listen = "0.0.0.0:8080"
-database_path = "data/eventide.db"
+mysql_url = "mysql://eventide:eventide@127.0.0.1:3306/eventide"
+redis_url = "redis://127.0.0.1:6379/"
 static_dir = "static"
 scheduler_tick_seconds = 5
 
@@ -9,7 +10,7 @@ password = "admin123"
 jwt_secret = "eventide-dev-secret-change-me"
 token_ttl_hours = 24
 
-# Alert-storm (README §13.1)
+# Alert-storm (README §13.1) — throttle/aggregate state lives in Redis
 [storm]
 throttle_enabled = true
 min_interval_seconds = 60
@@ -26,8 +27,22 @@ aggregate_mode = "head+summary"
 aggregate_sample_labels = "ip,instance,alertIp"
 aggregate_sample_limit = 10
 
-# P2: ingress backpressure
+# P2: ingress backpressure (per-process)
 ingress_max_inflight = 100
 # when true: under load skip notify (still persist); triggers at ~80% inflight or notify rate
 degrade_skip_notify = false
 degrade_notify_per_sec = 50
+
+# Multi-instance: only the Redis lease holder runs scheduler / Kafka poll / aggregate flush.
+# HTTP API and webhook ingress still run on every instance. Set enabled = false for single-node.
+[cluster]
+enabled = true
+leader_key = "eventide:cluster:leader"
+lease_seconds = 15
+
+# Optional bootstrap for alert history ES (console「系统设置」也可改地址，保存即生效)
+# [elasticsearch]
+# url = "http://127.0.0.1:9200"
+# index = "eventide-alerts"
+# username = ""
+# password = ""

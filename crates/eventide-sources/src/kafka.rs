@@ -3,10 +3,12 @@
 use chrono::Utc;
 use eventide_core::{Labels, MetricSample};
 use rskafka::client::partition::{OffsetAt, UnknownTopicHandling};
-use rskafka::client::ClientBuilder;
+use rskafka::client::{Client, ClientBuilder};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Error)]
 pub enum KafkaError {
@@ -269,23 +271,60 @@ fn json_path_string(root: &Value, path: &str) -> Option<String> {
     }
 }
 
+/// Shared Kafka clients keyed by bootstrap broker list (ingress / multi-tick reuse).
+#[derive(Default)]
+pub struct KafkaClientPool {
+    clients: Mutex<HashMap<String, Arc<Client>>>,
+}
+
+impl KafkaClientPool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn get(&self, brokers: &[String]) -> Result<Arc<Client>, KafkaError> {
+        let key = brokers_key(brokers);
+        {
+            let guard = self.clients.lock().await;
+            if let Some(c) = guard.get(&key) {
+                return Ok(Arc::clone(c));
+            }
+        }
+        let client = Arc::new(connect_client(brokers.to_vec()).await?);
+        let mut guard = self.clients.lock().await;
+        Ok(Arc::clone(guard.entry(key).or_insert_with(|| Arc::clone(&client))))
+    }
+}
+
+fn brokers_key(brokers: &[String]) -> String {
+    let mut parts: Vec<&str> = brokers.iter().map(|s| s.as_str()).collect();
+    parts.sort_unstable();
+    parts.join(",")
+}
+
+pub async fn connect_client(brokers: Vec<String>) -> Result<Client, KafkaError> {
+    ClientBuilder::new(brokers)
+        .build()
+        .await
+        .map_err(|e| KafkaError::Client(e.to_string()))
+}
+
 /// Fetch records for ingress (partition + starting offset).
+///
+/// `max_wait_ms` is kept low because the server already polls on an interval —
+/// long blocking waits just inflate idle tick latency.
 pub async fn fetch_records_from(
-    brokers: &[String],
+    client: &Client,
     topic: &str,
     partition: i32,
     offset: i64,
 ) -> Result<(Vec<Vec<u8>>, i64), KafkaError> {
-    let client = ClientBuilder::new(brokers.to_vec())
-        .build()
-        .await
-        .map_err(|e| KafkaError::Client(e.to_string()))?;
     let pc = client
         .partition_client(topic.to_string(), partition, UnknownTopicHandling::Error)
         .await
         .map_err(|e| KafkaError::Client(e.to_string()))?;
     let (records, high) = pc
-        .fetch_records(offset, 1..1_000_000, 800)
+        .fetch_records(offset, 1..2_000_000, 200)
         .await
         .map_err(|e| KafkaError::Client(e.to_string()))?;
     let payloads = records
@@ -296,14 +335,10 @@ pub async fn fetch_records_from(
 }
 
 pub async fn latest_offset(
-    brokers: &[String],
+    client: &Client,
     topic: &str,
     partition: i32,
 ) -> Result<i64, KafkaError> {
-    let client = ClientBuilder::new(brokers.to_vec())
-        .build()
-        .await
-        .map_err(|e| KafkaError::Client(e.to_string()))?;
     let pc = client
         .partition_client(topic.to_string(), partition, UnknownTopicHandling::Error)
         .await
@@ -314,14 +349,10 @@ pub async fn latest_offset(
 }
 
 pub async fn earliest_offset(
-    brokers: &[String],
+    client: &Client,
     topic: &str,
     partition: i32,
 ) -> Result<i64, KafkaError> {
-    let client = ClientBuilder::new(brokers.to_vec())
-        .build()
-        .await
-        .map_err(|e| KafkaError::Client(e.to_string()))?;
     let pc = client
         .partition_client(topic.to_string(), partition, UnknownTopicHandling::Error)
         .await

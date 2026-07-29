@@ -1,10 +1,11 @@
-//! Repository helpers mapping SQLite rows to core models.
+//! Repository helpers mapping MySQL rows to core models.
 
 use super::Db;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use eventide_core::*;
-use rusqlite::{params, OptionalExtension, Row};
+use mysql::prelude::*;
+use mysql::{Params, Row, Value};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -21,6 +22,10 @@ fn fmt_dt(t: DateTime<Utc>) -> String {
     t.to_rfc3339()
 }
 
+fn positional(vals: Vec<Value>) -> Params {
+    Params::Positional(vals)
+}
+
 fn labels_from_json(s: &str) -> Result<Labels> {
     Ok(serde_json::from_str(s).unwrap_or_default())
 }
@@ -32,155 +37,176 @@ fn uuid_ids_from_json(s: &str) -> Result<Vec<Uuid>> {
         .collect()
 }
 
+fn col_str(row: &Row, idx: usize) -> Result<String> {
+    match row.get_opt::<String, _>(idx) {
+        Some(Ok(s)) => Ok(s),
+        Some(Err(e)) => Err(anyhow!("bad/null string col {idx}: {e}")),
+        None => Err(anyhow!("missing string col {idx}")),
+    }
+}
+
+fn col_str_opt(row: &Row, idx: usize) -> Option<String> {
+    match row.get_opt::<String, _>(idx) {
+        Some(Ok(s)) => Some(s),
+        _ => None,
+    }
+}
+
+fn col_i64(row: &Row, idx: usize) -> i64 {
+    row.get::<i64, _>(idx).unwrap_or(0)
+}
+
+fn col_f64_opt(row: &Row, idx: usize) -> Option<f64> {
+    row.get::<f64, _>(idx)
+}
+
+fn col_uuid(row: &Row, idx: usize) -> Result<Uuid> {
+    Uuid::parse_str(&col_str(row, idx)?).map_err(|e| anyhow!(e))
+}
+
+fn v(x: impl Into<Value>) -> Value {
+    x.into()
+}
+
 impl Db {
     // ---------- datasources ----------
 
     pub fn list_datasources(&self) -> Result<Vec<Datasource>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, name, kind, url, enabled, created_at, updated_at,
                     COALESCE(options_json, '{}') FROM datasources ORDER BY name",
         )?;
-        let rows = stmt.query_map([], map_datasource)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_datasource).collect()
     }
 
     pub fn get_datasource(&self, id: Uuid) -> Result<Option<Datasource>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, name, kind, url, enabled, created_at, updated_at,
-                    COALESCE(options_json, '{}') FROM datasources WHERE id=?1",
-            params![id.to_string()],
-            map_datasource,
-        )
-        .optional()
-        .map_err(Into::into)
+                    COALESCE(options_json, '{}') FROM datasources WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_datasource).transpose()?)
     }
 
     pub fn upsert_datasource(&self, ds: &Datasource) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        conn.exec_drop(
             "INSERT INTO datasources (id, name, kind, url, enabled, created_at, updated_at, options_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, kind=excluded.kind, url=excluded.url,
-               enabled=excluded.enabled, updated_at=excluded.updated_at,
-               options_json=excluded.options_json",
-            params![
-                ds.id.to_string(),
-                ds.name,
-                ds.kind.as_str(),
-                ds.url,
-                ds.enabled as i64,
-                fmt_dt(ds.created_at),
-                fmt_dt(ds.updated_at),
-                serde_json::to_string(&ds.options)?,
-            ],
+             VALUES (?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), kind=VALUES(kind), url=VALUES(url),
+               enabled=VALUES(enabled), updated_at=VALUES(updated_at),
+               options_json=VALUES(options_json)",
+            positional(vec![
+                v(ds.id.to_string()),
+                v(ds.name.as_str()),
+                v(ds.kind.as_str()),
+                v(ds.url.as_str()),
+                v(ds.enabled as i64),
+                v(fmt_dt(ds.created_at)),
+                v(fmt_dt(ds.updated_at)),
+                v(serde_json::to_string(&ds.options)?),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_datasource(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute(
-            "DELETE FROM datasources WHERE id=?1",
-            params![id.to_string()],
-        )?;
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM datasources WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
     }
 
     // ---------- channels ----------
 
     pub fn list_channels(&self) -> Result<Vec<NotifyChannel>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, name, kind, url, secret, enabled, created_at, updated_at,
                     COALESCE(options_json, '{}')
              FROM notify_channels ORDER BY name",
         )?;
-        let rows = stmt.query_map([], map_channel)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_channel).collect()
     }
 
     pub fn get_channel(&self, id: Uuid) -> Result<Option<NotifyChannel>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, name, kind, url, secret, enabled, created_at, updated_at,
                     COALESCE(options_json, '{}')
-             FROM notify_channels WHERE id=?1",
-            params![id.to_string()],
-            map_channel,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM notify_channels WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_channel).transpose()?)
     }
 
     pub fn upsert_channel(&self, ch: &NotifyChannel) -> Result<()> {
-        let conn = self.lock()?;
-        let options_json = serde_json::to_string(&ch.options)?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        conn.exec_drop(
             "INSERT INTO notify_channels (id, name, kind, url, secret, enabled, created_at, updated_at, options_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, kind=excluded.kind, url=excluded.url, secret=excluded.secret,
-               enabled=excluded.enabled, updated_at=excluded.updated_at,
-               options_json=excluded.options_json",
-            params![
-                ch.id.to_string(),
-                ch.name,
-                ch.kind.as_str(),
-                ch.url,
-                ch.secret,
-                ch.enabled as i64,
-                fmt_dt(ch.created_at),
-                fmt_dt(ch.updated_at),
-                options_json,
-            ],
+             VALUES (?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), kind=VALUES(kind), url=VALUES(url), secret=VALUES(secret),
+               enabled=VALUES(enabled), updated_at=VALUES(updated_at),
+               options_json=VALUES(options_json)",
+            positional(vec![
+                v(ch.id.to_string()),
+                v(ch.name.as_str()),
+                v(ch.kind.as_str()),
+                v(ch.url.as_str()),
+                v(ch.secret.clone()),
+                v(ch.enabled as i64),
+                v(fmt_dt(ch.created_at)),
+                v(fmt_dt(ch.updated_at)),
+                v(serde_json::to_string(&ch.options)?),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_channel(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute(
-            "DELETE FROM notify_channels WHERE id=?1",
-            params![id.to_string()],
-        )?;
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM notify_channels WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
     }
 
     // ---------- rules ----------
 
     pub fn list_rules(&self) -> Result<Vec<Rule>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, name, datasource_id, expr, comparator, threshold, for_seconds, interval_seconds,
                     severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at
              FROM rules ORDER BY name",
         )?;
-        let rows = stmt.query_map([], map_rule)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_rule).collect()
     }
 
     pub fn list_enabled_rules_due(&self, now: DateTime<Utc>) -> Result<Vec<Rule>> {
         let rules = self.list_rules()?;
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let mut due = Vec::new();
         for rule in rules {
             if !rule.enabled {
                 continue;
             }
-            let last: Option<String> = conn
-                .query_row(
-                    "SELECT last_run_at FROM rules WHERE id=?1",
-                    params![rule.id.to_string()],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .flatten();
+            let last_row: Option<Row> = conn.exec_first(
+                "SELECT last_run_at FROM rules WHERE id=?",
+                positional(vec![v(rule.id.to_string())]),
+            )?;
+            let last = last_row.as_ref().and_then(|r| col_str_opt(r, 0));
             let should = match last {
                 None => true,
                 Some(s) => {
@@ -196,112 +222,106 @@ impl Db {
     }
 
     pub fn touch_rule_run(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
-            "UPDATE rules SET last_run_at=?1 WHERE id=?2",
-            params![fmt_dt(at), id.to_string()],
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "UPDATE rules SET last_run_at=? WHERE id=?",
+            positional(vec![v(fmt_dt(at)), v(id.to_string())]),
         )?;
         Ok(())
     }
 
     pub fn get_rule(&self, id: Uuid) -> Result<Option<Rule>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, name, datasource_id, expr, comparator, threshold, for_seconds, interval_seconds,
                     severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at
-             FROM rules WHERE id=?1",
-            params![id.to_string()],
-            map_rule,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM rules WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_rule).transpose()?)
     }
 
     pub fn upsert_rule(&self, rule: &Rule) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let channel_ids: Vec<String> = rule.channel_ids.iter().map(|u| u.to_string()).collect();
-        conn.execute(
+        conn.exec_drop(
             "INSERT INTO rules (
                 id, name, datasource_id, expr, comparator, threshold, for_seconds, interval_seconds,
                 severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, datasource_id=excluded.datasource_id, expr=excluded.expr,
-               comparator=excluded.comparator, threshold=excluded.threshold,
-               for_seconds=excluded.for_seconds, interval_seconds=excluded.interval_seconds,
-               severity=excluded.severity, labels_json=excluded.labels_json,
-               annotations_json=excluded.annotations_json, channel_ids_json=excluded.channel_ids_json,
-               enabled=excluded.enabled, updated_at=excluded.updated_at",
-            params![
-                rule.id.to_string(),
-                rule.name,
-                rule.datasource_id.to_string(),
-                rule.expr,
-                rule.comparator.as_str(),
-                rule.threshold,
-                rule.for_seconds as i64,
-                rule.interval_seconds as i64,
-                rule.severity.as_str(),
-                serde_json::to_string(&rule.labels)?,
-                serde_json::to_string(&rule.annotations)?,
-                serde_json::to_string(&channel_ids)?,
-                rule.enabled as i64,
-                fmt_dt(rule.created_at),
-                fmt_dt(rule.updated_at),
-            ],
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), datasource_id=VALUES(datasource_id), expr=VALUES(expr),
+               comparator=VALUES(comparator), threshold=VALUES(threshold),
+               for_seconds=VALUES(for_seconds), interval_seconds=VALUES(interval_seconds),
+               severity=VALUES(severity), labels_json=VALUES(labels_json),
+               annotations_json=VALUES(annotations_json), channel_ids_json=VALUES(channel_ids_json),
+               enabled=VALUES(enabled), updated_at=VALUES(updated_at)",
+            positional(vec![
+                v(rule.id.to_string()),
+                v(rule.name.as_str()),
+                v(rule.datasource_id.to_string()),
+                v(rule.expr.as_str()),
+                v(rule.comparator.as_str()),
+                v(rule.threshold),
+                v(rule.for_seconds as i64),
+                v(rule.interval_seconds as i64),
+                v(rule.severity.as_str()),
+                v(serde_json::to_string(&rule.labels)?),
+                v(serde_json::to_string(&rule.annotations)?),
+                v(serde_json::to_string(&channel_ids)?),
+                v(rule.enabled as i64),
+                v(fmt_dt(rule.created_at)),
+                v(fmt_dt(rule.updated_at)),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_rule(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute("DELETE FROM rules WHERE id=?1", params![id.to_string()])?;
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM rules WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
     }
 
     // ---------- alert events ----------
 
     pub fn list_alerts(&self, status: Option<&str>) -> Result<Vec<AlertEvent>> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         if let Some(st) = status {
-            let mut stmt = conn.prepare(
+            let rows: Vec<Row> = conn.exec(
                 "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                         value, starts_at, ends_at, pending_since, last_evaluated_at,
                         notified_firing, notified_resolved
-                 FROM alert_events WHERE status=?1 ORDER BY last_evaluated_at DESC LIMIT 500",
+                 FROM alert_events WHERE status=? ORDER BY last_evaluated_at DESC LIMIT 500",
+                positional(vec![v(st)]),
             )?;
-            let rows = stmt.query_map(params![st], map_alert)?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
+            rows.iter().map(map_alert).collect()
         } else {
-            let mut stmt = conn.prepare(
+            let rows: Vec<Row> = conn.query(
                 "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                         value, starts_at, ends_at, pending_since, last_evaluated_at,
                         notified_firing, notified_resolved
                  FROM alert_events ORDER BY last_evaluated_at DESC LIMIT 500",
             )?;
-            let rows = stmt.query_map([], map_alert)?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(Into::into)
+            rows.iter().map(map_alert).collect()
         }
     }
 
-    /// Counts by status without loading full alert rows.
     pub fn alert_status_counts(&self) -> Result<(usize, usize, usize, usize)> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let mut firing = 0usize;
         let mut pending = 0usize;
         let mut resolved = 0usize;
-        let mut stmt = conn.prepare(
-            "SELECT status, COUNT(*) FROM alert_events GROUP BY status",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let status: String = row.get(0)?;
-            let n: i64 = row.get(1)?;
-            Ok((status, n as usize))
-        })?;
+        let rows: Vec<Row> =
+            conn.query("SELECT status, COUNT(*) FROM alert_events GROUP BY status")?;
         for row in rows {
-            let (status, n) = row?;
+            let status = col_str(&row, 0)?;
+            let n = col_i64(&row, 1) as usize;
             match status.as_str() {
                 "firing" => firing = n,
                 "pending" => pending = n,
@@ -312,11 +332,10 @@ impl Db {
         Ok((firing, pending, resolved, firing + pending + resolved))
     }
 
-    /// Recent alerts for dashboard: firing/pending first, then resolved.
     pub fn list_recent_alerts_overview(&self, limit: usize) -> Result<Vec<AlertEvent>> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let lim = limit.max(1) as i64;
-        let mut stmt = conn.prepare(
+        let rows: Vec<Row> = conn.exec(
             "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                     value, starts_at, ends_at, pending_since, last_evaluated_at,
                     notified_firing, notified_resolved
@@ -327,11 +346,10 @@ impl Db {
                  ELSE 2
              END,
              last_evaluated_at DESC
-             LIMIT ?1",
+             LIMIT ?",
+            positional(vec![v(lim)]),
         )?;
-        let rows = stmt.query_map(params![lim], map_alert)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_alert).collect()
     }
 
     pub fn count_table(&self, table: &str) -> Result<usize> {
@@ -346,81 +364,75 @@ impl Db {
         if !allowed.contains(&table) {
             anyhow::bail!("count_table: unsupported table");
         }
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let sql = format!("SELECT COUNT(*) FROM {table}");
-        let n: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+        let n: i64 = conn.query_first(sql)?.unwrap_or(0);
         Ok(n as usize)
     }
 
     pub fn count_enabled_rules(&self) -> Result<usize> {
-        let conn = self.lock()?;
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM rules WHERE enabled=1",
-            [],
-            |row| row.get(0),
-        )?;
+        let mut conn = self.conn()?;
+        let n: i64 = conn
+            .query_first("SELECT COUNT(*) FROM rules WHERE enabled=1")?
+            .unwrap_or(0);
         Ok(n as usize)
     }
 
     pub fn list_recent_notify_skips(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let lim = limit.max(1) as i64;
-        let mut stmt = conn.prepare(
+        let rows: Vec<Row> = conn.exec(
             "SELECT COALESCE(error, ''), transition, created_at
              FROM notify_logs
              WHERE success=0 AND error IS NOT NULL AND error != ''
              ORDER BY created_at DESC
-             LIMIT ?1",
+             LIMIT ?",
+            positional(vec![v(lim)]),
         )?;
-        let rows = stmt.query_map(params![lim], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        let mut out = Vec::new();
+        for row in rows {
+            out.push((
+                col_str(&row, 0).unwrap_or_default(),
+                col_str(&row, 1).unwrap_or_default(),
+                col_str(&row, 2).unwrap_or_default(),
+            ));
+        }
+        Ok(out)
     }
 
     pub fn get_alert_by_fingerprint(&self, fp: &str) -> Result<Option<AlertEvent>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                     value, starts_at, ends_at, pending_since, last_evaluated_at,
                     notified_firing, notified_resolved
-             FROM alert_events WHERE fingerprint=?1",
-            params![fp],
-            map_alert,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM alert_events WHERE fingerprint=?",
+            positional(vec![v(fp)]),
+        )?;
+        Ok(row.as_ref().map(map_alert).transpose()?)
     }
 
     pub fn get_alert(&self, id: Uuid) -> Result<Option<AlertEvent>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                     value, starts_at, ends_at, pending_since, last_evaluated_at,
                     notified_firing, notified_resolved
-             FROM alert_events WHERE id=?1",
-            params![id.to_string()],
-            map_alert,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM alert_events WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_alert).transpose()?)
     }
 
     pub fn list_notify_logs_for_alert(&self, alert_id: Uuid) -> Result<Vec<NotifyLog>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.exec(
             "SELECT id, alert_id, channel_id, transition, success, error, created_at,
                     COALESCE(body, '')
-             FROM notify_logs WHERE alert_id=?1 ORDER BY created_at DESC LIMIT 100",
+             FROM notify_logs WHERE alert_id=? ORDER BY created_at DESC LIMIT 100",
+            positional(vec![v(alert_id.to_string())]),
         )?;
-        let rows = stmt.query_map(params![alert_id.to_string()], map_notify_log)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_notify_log).collect()
     }
 
     pub fn list_notify_logs(
@@ -430,87 +442,82 @@ impl Db {
         q: Option<&str>,
         limit: usize,
     ) -> Result<Vec<NotifyLog>> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let lim = limit.clamp(1, 500) as i64;
         let mut sql = String::from(
             "SELECT id, alert_id, channel_id, transition, success, error, created_at,
                     COALESCE(body, '')
              FROM notify_logs WHERE 1=1",
         );
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut vals: Vec<Value> = Vec::new();
         if let Some(cid) = channel_id {
             sql.push_str(" AND channel_id=?");
-            params_vec.push(Box::new(cid.to_string()));
+            vals.push(v(cid.to_string()));
         }
         if let Some(ok) = success {
             sql.push_str(" AND success=?");
-            params_vec.push(Box::new(if ok { 1i64 } else { 0i64 }));
+            vals.push(v(if ok { 1i64 } else { 0i64 }));
         }
         if let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) {
             sql.push_str(" AND (body LIKE ? OR IFNULL(error,'') LIKE ? OR alert_id LIKE ?)");
             let pat = format!("%{q}%");
-            params_vec.push(Box::new(pat.clone()));
-            params_vec.push(Box::new(pat.clone()));
-            params_vec.push(Box::new(pat));
+            vals.push(v(pat.clone()));
+            vals.push(v(pat.clone()));
+            vals.push(v(pat));
         }
         sql.push_str(" ORDER BY created_at DESC LIMIT ?");
-        params_vec.push(Box::new(lim));
-
-        let mut stmt = conn.prepare(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), map_notify_log)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        vals.push(v(lim));
+        let rows: Vec<Row> = conn.exec(sql, positional(vals))?;
+        rows.iter().map(map_notify_log).collect()
     }
 
     pub fn alerts_for_rule(&self, rule_id: Uuid) -> Result<BTreeMap<String, AlertEvent>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.exec(
             "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                     value, starts_at, ends_at, pending_since, last_evaluated_at,
                     notified_firing, notified_resolved
-             FROM alert_events WHERE rule_id=?1",
+             FROM alert_events WHERE rule_id=?",
+            positional(vec![v(rule_id.to_string())]),
         )?;
-        let rows = stmt.query_map(params![rule_id.to_string()], map_alert)?;
         let mut map = BTreeMap::new();
         for row in rows {
-            let ev = row?;
+            let ev = map_alert(&row)?;
             map.insert(ev.fingerprint.clone(), ev);
         }
         Ok(map)
     }
 
     pub fn upsert_alert(&self, ev: &AlertEvent) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        conn.exec_drop(
             "INSERT INTO alert_events (
                 id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                 value, starts_at, ends_at, pending_since, last_evaluated_at,
                 notified_firing, notified_resolved
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-             ON CONFLICT(fingerprint) DO UPDATE SET
-               id=excluded.id, status=excluded.status, severity=excluded.severity,
-               labels_json=excluded.labels_json, annotations_json=excluded.annotations_json,
-               value=excluded.value, starts_at=excluded.starts_at, ends_at=excluded.ends_at,
-               pending_since=excluded.pending_since, last_evaluated_at=excluded.last_evaluated_at,
-               notified_firing=excluded.notified_firing, notified_resolved=excluded.notified_resolved",
-            params![
-                ev.id.to_string(),
-                ev.rule_id.to_string(),
-                ev.fingerprint,
-                ev.status.as_str(),
-                ev.severity.as_str(),
-                serde_json::to_string(&ev.labels)?,
-                serde_json::to_string(&ev.annotations)?,
-                ev.value,
-                fmt_dt(ev.starts_at),
-                ev.ends_at.map(fmt_dt),
-                ev.pending_since.map(fmt_dt),
-                fmt_dt(ev.last_evaluated_at),
-                ev.notified_firing as i64,
-                ev.notified_resolved as i64,
-            ],
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               id=VALUES(id), status=VALUES(status), severity=VALUES(severity),
+               labels_json=VALUES(labels_json), annotations_json=VALUES(annotations_json),
+               value=VALUES(value), starts_at=VALUES(starts_at), ends_at=VALUES(ends_at),
+               pending_since=VALUES(pending_since), last_evaluated_at=VALUES(last_evaluated_at),
+               notified_firing=VALUES(notified_firing), notified_resolved=VALUES(notified_resolved)",
+            positional(vec![
+                v(ev.id.to_string()),
+                v(ev.rule_id.to_string()),
+                v(ev.fingerprint.as_str()),
+                v(ev.status.as_str()),
+                v(ev.severity.as_str()),
+                v(serde_json::to_string(&ev.labels)?),
+                v(serde_json::to_string(&ev.annotations)?),
+                v(ev.value),
+                v(fmt_dt(ev.starts_at)),
+                v(ev.ends_at.map(fmt_dt)),
+                v(ev.pending_since.map(fmt_dt)),
+                v(fmt_dt(ev.last_evaluated_at)),
+                v(ev.notified_firing as i64),
+                v(ev.notified_resolved as i64),
+            ]),
         )?;
         Ok(())
     }
@@ -518,13 +525,11 @@ impl Db {
     // ---------- silences ----------
 
     pub fn list_silences(&self) -> Result<Vec<Silence>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, rule_id, matchers_json, starts_at, ends_at, comment, created_at FROM silences ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map([], map_silence)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_silence).collect()
     }
 
     pub fn active_silences(&self, now: DateTime<Utc>) -> Result<Vec<Silence>> {
@@ -536,125 +541,126 @@ impl Db {
     }
 
     pub fn upsert_silence(&self, s: &Silence) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        conn.exec_drop(
             "INSERT INTO silences (id, rule_id, matchers_json, starts_at, ends_at, comment, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(id) DO UPDATE SET
-               rule_id=excluded.rule_id, matchers_json=excluded.matchers_json,
-               starts_at=excluded.starts_at, ends_at=excluded.ends_at, comment=excluded.comment",
-            params![
-                s.id.to_string(),
-                s.rule_id.map(|u| u.to_string()),
-                serde_json::to_string(&s.matchers)?,
-                fmt_dt(s.starts_at),
-                fmt_dt(s.ends_at),
-                s.comment,
-                fmt_dt(s.created_at),
-            ],
+             VALUES (?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               rule_id=VALUES(rule_id), matchers_json=VALUES(matchers_json),
+               starts_at=VALUES(starts_at), ends_at=VALUES(ends_at), comment=VALUES(comment)",
+            positional(vec![
+                v(s.id.to_string()),
+                v(s.rule_id.map(|u| u.to_string())),
+                v(serde_json::to_string(&s.matchers)?),
+                v(fmt_dt(s.starts_at)),
+                v(fmt_dt(s.ends_at)),
+                v(s.comment.as_str()),
+                v(fmt_dt(s.created_at)),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_silence(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute("DELETE FROM silences WHERE id=?1", params![id.to_string()])?;
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM silences WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
     }
 
     // ---------- enrich rules ----------
 
     pub fn list_enrich_rules(&self) -> Result<Vec<EnrichRule>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, name, kind, matchers_json, match_key, templates_json, mappings_json,
                     write_labels, enabled, priority, created_at, updated_at,
                     lookup_table_id, lookup_table_ids_json, field_templates_json, label_extracts_json, lookup_match_keys_json
              FROM enrich_rules ORDER BY priority ASC, name ASC",
         )?;
-        let rows = stmt.query_map([], map_enrich)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_enrich).collect()
     }
 
     pub fn get_enrich_rule(&self, id: Uuid) -> Result<Option<EnrichRule>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, name, kind, matchers_json, match_key, templates_json, mappings_json,
                     write_labels, enabled, priority, created_at, updated_at,
                     lookup_table_id, lookup_table_ids_json, field_templates_json, label_extracts_json, lookup_match_keys_json
-             FROM enrich_rules WHERE id=?1",
-            params![id.to_string()],
-            map_enrich,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM enrich_rules WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_enrich).transpose()?)
     }
 
     pub fn upsert_enrich_rule(&self, r: &EnrichRule) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let ids_json = serde_json::to_string(&r.lookup_table_ids)?;
         let legacy_id = r.lookup_table_ids.first().map(|u| u.to_string());
-        conn.execute(
+        conn.exec_drop(
             "INSERT INTO enrich_rules (
                 id, name, kind, matchers_json, match_key, templates_json, mappings_json,
                 write_labels, enabled, priority, created_at, updated_at,
                 lookup_table_id, lookup_table_ids_json, field_templates_json, label_extracts_json,
                 lookup_match_keys_json
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, kind=excluded.kind, matchers_json=excluded.matchers_json,
-               match_key=excluded.match_key, templates_json=excluded.templates_json,
-               mappings_json=excluded.mappings_json, write_labels=excluded.write_labels,
-               enabled=excluded.enabled, priority=excluded.priority,
-               updated_at=excluded.updated_at, lookup_table_id=excluded.lookup_table_id,
-               lookup_table_ids_json=excluded.lookup_table_ids_json,
-               field_templates_json=excluded.field_templates_json,
-               label_extracts_json=excluded.label_extracts_json,
-               lookup_match_keys_json=excluded.lookup_match_keys_json",
-            params![
-                r.id.to_string(),
-                r.name,
-                r.kind.as_str(),
-                serde_json::to_string(&r.matchers)?,
-                r.match_key,
-                serde_json::to_string(&r.templates)?,
-                serde_json::to_string(&r.mappings)?,
-                r.write_labels as i64,
-                r.enabled as i64,
-                r.priority,
-                fmt_dt(r.created_at),
-                fmt_dt(r.updated_at),
-                legacy_id,
-                ids_json,
-                serde_json::to_string(&r.field_templates)?,
-                serde_json::to_string(&r.label_extracts)?,
-                serde_json::to_string(&r.lookup_match_keys)?,
-            ],
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), kind=VALUES(kind), matchers_json=VALUES(matchers_json),
+               match_key=VALUES(match_key), templates_json=VALUES(templates_json),
+               mappings_json=VALUES(mappings_json), write_labels=VALUES(write_labels),
+               enabled=VALUES(enabled), priority=VALUES(priority),
+               updated_at=VALUES(updated_at), lookup_table_id=VALUES(lookup_table_id),
+               lookup_table_ids_json=VALUES(lookup_table_ids_json),
+               field_templates_json=VALUES(field_templates_json),
+               label_extracts_json=VALUES(label_extracts_json),
+               lookup_match_keys_json=VALUES(lookup_match_keys_json)",
+            positional(vec![
+                v(r.id.to_string()),
+                v(r.name.as_str()),
+                v(r.kind.as_str()),
+                v(serde_json::to_string(&r.matchers)?),
+                v(r.match_key.as_str()),
+                v(serde_json::to_string(&r.templates)?),
+                v(serde_json::to_string(&r.mappings)?),
+                v(r.write_labels as i64),
+                v(r.enabled as i64),
+                v(r.priority),
+                v(fmt_dt(r.created_at)),
+                v(fmt_dt(r.updated_at)),
+                v(legacy_id),
+                v(ids_json),
+                v(serde_json::to_string(&r.field_templates)?),
+                v(serde_json::to_string(&r.label_extracts)?),
+                v(serde_json::to_string(&r.lookup_match_keys)?),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_enrich_rule(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute(
-            "DELETE FROM enrich_rules WHERE id=?1",
-            params![id.to_string()],
-        )?;
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM enrich_rules WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
     }
 
     // ---------- lookup tables ----------
 
     pub fn list_lookup_tables(&self) -> Result<Vec<LookupTable>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, name, description, key_label, rows_json, enabled, created_at, updated_at
              FROM lookup_tables ORDER BY name ASC",
         )?;
-        let rows = stmt.query_map([], map_lookup)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_lookup).collect()
     }
 
     pub fn lookup_tables_map(&self) -> Result<BTreeMap<Uuid, LookupTable>> {
@@ -666,70 +672,70 @@ impl Db {
     }
 
     pub fn get_lookup_table(&self, id: Uuid) -> Result<Option<LookupTable>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, name, description, key_label, rows_json, enabled, created_at, updated_at
-             FROM lookup_tables WHERE id=?1",
-            params![id.to_string()],
-            map_lookup,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM lookup_tables WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_lookup).transpose()?)
     }
 
     pub fn upsert_lookup_table(&self, t: &LookupTable) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        conn.exec_drop(
             "INSERT INTO lookup_tables (
                 id, name, description, key_label, rows_json, enabled, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, description=excluded.description,
-               key_label=excluded.key_label, rows_json=excluded.rows_json,
-               enabled=excluded.enabled, updated_at=excluded.updated_at",
-            params![
-                t.id.to_string(),
-                t.name,
-                t.description,
-                t.key_label,
-                serde_json::to_string(&t.rows)?,
-                t.enabled as i64,
-                fmt_dt(t.created_at),
-                fmt_dt(t.updated_at),
-            ],
+             ) VALUES (?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), description=VALUES(description),
+               key_label=VALUES(key_label), rows_json=VALUES(rows_json),
+               enabled=VALUES(enabled), updated_at=VALUES(updated_at)",
+            positional(vec![
+                v(t.id.to_string()),
+                v(t.name.as_str()),
+                v(t.description.as_str()),
+                v(t.key_label.as_str()),
+                v(serde_json::to_string(&t.rows)?),
+                v(t.enabled as i64),
+                v(fmt_dt(t.created_at)),
+                v(fmt_dt(t.updated_at)),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_lookup_table(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute(
-            "DELETE FROM lookup_tables WHERE id=?1",
-            params![id.to_string()],
-        )?;
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM lookup_tables WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
     }
 
     pub fn insert_notify_log(&self, log: &NotifyLog) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let transition = match log.transition {
             AlertTransition::BecameFiring => "became_firing",
             AlertTransition::BecameResolved => "became_resolved",
             AlertTransition::Unchanged => "unchanged",
         };
-        conn.execute(
+        conn.exec_drop(
             "INSERT INTO notify_logs (id, alert_id, channel_id, transition, success, error, body, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                log.id.to_string(),
-                log.alert_id.to_string(),
-                log.channel_id.to_string(),
-                transition,
-                log.success as i64,
-                log.error,
-                log.body,
-                fmt_dt(log.created_at),
-            ],
+             VALUES (?,?,?,?,?,?,?,?)",
+            positional(vec![
+                v(log.id.to_string()),
+                v(log.alert_id.to_string()),
+                v(log.channel_id.to_string()),
+                v(transition),
+                v(log.success as i64),
+                v(log.error.clone()),
+                v(log.body.as_str()),
+                v(fmt_dt(log.created_at)),
+            ]),
         )?;
         Ok(())
     }
@@ -737,210 +743,220 @@ impl Db {
     // ---------- ingress routes ----------
 
     pub fn list_ingress_routes(&self) -> Result<Vec<IngressRoute>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
             "SELECT id, name, kind, token, channel_ids_json, enabled, created_at, updated_at,
                     COALESCE(endpoint, ''), COALESCE(options_json, '{}')
              FROM ingress_routes ORDER BY name",
         )?;
-        let rows = stmt.query_map([], map_ingress)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
+        rows.iter().map(map_ingress).collect()
     }
 
     pub fn get_ingress_route(&self, id: Uuid) -> Result<Option<IngressRoute>> {
-        let conn = self.lock()?;
-        conn.query_row(
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
             "SELECT id, name, kind, token, channel_ids_json, enabled, created_at, updated_at,
                     COALESCE(endpoint, ''), COALESCE(options_json, '{}')
-             FROM ingress_routes WHERE id=?1",
-            params![id.to_string()],
-            map_ingress,
-        )
-        .optional()
-        .map_err(Into::into)
+             FROM ingress_routes WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_ingress).transpose()?)
     }
 
     pub fn upsert_ingress_route(&self, route: &IngressRoute) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.conn()?;
         let channel_ids: Vec<String> = route.channel_ids.iter().map(|u| u.to_string()).collect();
-        conn.execute(
+        conn.exec_drop(
             "INSERT INTO ingress_routes (id, name, kind, token, channel_ids_json, enabled, created_at, updated_at, endpoint, options_json)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-             ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, kind=excluded.kind, token=excluded.token,
-               channel_ids_json=excluded.channel_ids_json, enabled=excluded.enabled,
-               updated_at=excluded.updated_at, endpoint=excluded.endpoint,
-               options_json=excluded.options_json",
-            params![
-                route.id.to_string(),
-                route.name,
-                route.kind.as_str(),
-                route.token,
-                serde_json::to_string(&channel_ids)?,
-                route.enabled as i64,
-                fmt_dt(route.created_at),
-                fmt_dt(route.updated_at),
-                route.endpoint,
-                serde_json::to_string(&route.options)?,
-            ],
+             VALUES (?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), kind=VALUES(kind), token=VALUES(token),
+               channel_ids_json=VALUES(channel_ids_json), enabled=VALUES(enabled),
+               updated_at=VALUES(updated_at), endpoint=VALUES(endpoint),
+               options_json=VALUES(options_json)",
+            positional(vec![
+                v(route.id.to_string()),
+                v(route.name.as_str()),
+                v(route.kind.as_str()),
+                v(route.token.clone()),
+                v(serde_json::to_string(&channel_ids)?),
+                v(route.enabled as i64),
+                v(fmt_dt(route.created_at)),
+                v(fmt_dt(route.updated_at)),
+                v(route.endpoint.as_str()),
+                v(serde_json::to_string(&route.options)?),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn get_kafka_offset(&self, route_id: Uuid, partition: i32) -> Result<Option<i64>> {
-        let conn = self.lock()?;
-        conn.query_row(
-            "SELECT next_offset FROM ingress_kafka_offsets WHERE route_id=?1 AND partition=?2",
-            params![route_id.to_string(), partition],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
+        let mut conn = self.conn()?;
+        let offset: Option<i64> = conn.exec_first(
+            "SELECT next_offset FROM ingress_kafka_offsets WHERE route_id=? AND `partition`=?",
+            positional(vec![v(route_id.to_string()), v(partition)]),
+        )?;
+        Ok(offset)
     }
 
     pub fn set_kafka_offset(&self, route_id: Uuid, partition: i32, next_offset: i64) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO ingress_kafka_offsets (route_id, partition, next_offset)
-             VALUES (?1,?2,?3)
-             ON CONFLICT(route_id, partition) DO UPDATE SET next_offset=excluded.next_offset",
-            params![route_id.to_string(), partition, next_offset],
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "INSERT INTO ingress_kafka_offsets (route_id, `partition`, next_offset)
+             VALUES (?,?,?)
+             ON DUPLICATE KEY UPDATE next_offset=VALUES(next_offset)",
+            positional(vec![
+                v(route_id.to_string()),
+                v(partition),
+                v(next_offset),
+            ]),
         )?;
         Ok(())
     }
 
     pub fn delete_ingress_route(&self, id: Uuid) -> Result<bool> {
-        let conn = self.lock()?;
-        let _ = conn.execute(
-            "DELETE FROM ingress_kafka_offsets WHERE route_id=?1",
-            params![id.to_string()],
+        let mut conn = self.conn()?;
+        let _ = conn.exec_drop(
+            "DELETE FROM ingress_kafka_offsets WHERE route_id=?",
+            positional(vec![v(id.to_string())]),
         );
-        let n = conn.execute(
-            "DELETE FROM ingress_routes WHERE id=?1",
-            params![id.to_string()],
-        )?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM ingress_routes WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
         Ok(n > 0)
+    }
+
+    pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
+            "SELECT `value` FROM app_kv WHERE `key`=?",
+            positional(vec![v(key)]),
+        )?;
+        Ok(row.as_ref().and_then(|r| col_str_opt(r, 0)))
+    }
+
+    pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
+        let mut conn = self.conn()?;
+        let now = fmt_dt(Utc::now());
+        conn.exec_drop(
+            "INSERT INTO app_kv (`key`, `value`, updated_at) VALUES (?,?,?)
+             ON DUPLICATE KEY UPDATE `value`=VALUES(`value`), updated_at=VALUES(updated_at)",
+            positional(vec![
+                Value::from(key),
+                Value::from(value),
+                Value::from(now),
+            ]),
+        )?;
+        Ok(())
     }
 }
 
-fn map_datasource(row: &Row<'_>) -> rusqlite::Result<Datasource> {
-    let kind_s: String = row.get(2)?;
+fn map_datasource(row: &Row) -> Result<Datasource> {
+    let kind_s = col_str(row, 2)?;
     let kind = DatasourceKind::parse(&kind_s).unwrap_or(DatasourceKind::Prometheus);
-    let created: String = row.get(5)?;
-    let updated: String = row.get(6)?;
-    let options_json: String = row.get(7).unwrap_or_else(|_| "{}".into());
+    let created = col_str(row, 5)?;
+    let updated = col_str(row, 6)?;
+    let options_json = col_str_opt(row, 7).unwrap_or_else(|| "{}".into());
     Ok(Datasource {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        name: row.get(1)?,
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
         kind,
-        url: row.get(3)?,
+        url: col_str(row, 3)?,
         options: labels_from_json(&options_json).unwrap_or_default(),
-        enabled: row.get::<_, i64>(4)? != 0,
+        enabled: col_i64(row, 4) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_channel(row: &Row<'_>) -> rusqlite::Result<NotifyChannel> {
-    let kind_s: String = row.get(2)?;
+fn map_channel(row: &Row) -> Result<NotifyChannel> {
+    let kind_s = col_str(row, 2)?;
     let kind = ChannelKind::parse(&kind_s).unwrap_or(ChannelKind::Webhook);
-    let created: String = row.get(6)?;
-    let updated: String = row.get(7)?;
-    let options_json: String = row.get(8).unwrap_or_else(|_| "{}".into());
+    let created = col_str(row, 6)?;
+    let updated = col_str(row, 7)?;
+    let options_json = col_str_opt(row, 8).unwrap_or_else(|| "{}".into());
     Ok(NotifyChannel {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        name: row.get(1)?,
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
         kind,
-        url: row.get(3)?,
-        secret: row.get(4)?,
+        url: col_str(row, 3)?,
+        secret: col_str_opt(row, 4),
         options: labels_from_json(&options_json).unwrap_or_default(),
-        enabled: row.get::<_, i64>(5)? != 0,
+        enabled: col_i64(row, 5) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_rule(row: &Row<'_>) -> rusqlite::Result<Rule> {
-    let cmp_s: String = row.get(4)?;
-    let sev_s: String = row.get(8)?;
-    let labels_json: String = row.get(9)?;
-    let annotations_json: String = row.get(10)?;
-    let channel_ids_json: String = row.get(11)?;
-    let created: String = row.get(13)?;
-    let updated: String = row.get(14)?;
-
+fn map_rule(row: &Row) -> Result<Rule> {
+    let cmp_s = col_str(row, 4)?;
+    let sev_s = col_str(row, 8)?;
+    let labels_json = col_str(row, 9)?;
+    let annotations_json = col_str(row, 10)?;
+    let channel_ids_json = col_str(row, 11)?;
+    let created = col_str(row, 13)?;
+    let updated = col_str(row, 14)?;
     Ok(Rule {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        name: row.get(1)?,
-        datasource_id: Uuid::parse_str(&row.get::<_, String>(2)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        expr: row.get(3)?,
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
+        datasource_id: col_uuid(row, 2)?,
+        expr: col_str(row, 3)?,
         comparator: Comparator::parse(&cmp_s).unwrap_or(Comparator::Gt),
-        threshold: row.get(5)?,
-        for_seconds: row.get::<_, i64>(6)? as u64,
-        interval_seconds: row.get::<_, i64>(7)? as u64,
+        threshold: col_f64_opt(row, 5).unwrap_or(0.0),
+        for_seconds: col_i64(row, 6) as u64,
+        interval_seconds: col_i64(row, 7) as u64,
         severity: Severity::parse(&sev_s).unwrap_or(Severity::Warning),
         labels: labels_from_json(&labels_json).unwrap_or_default(),
         annotations: labels_from_json(&annotations_json).unwrap_or_default(),
         channel_ids: uuid_ids_from_json(&channel_ids_json).unwrap_or_default(),
-        enabled: row.get::<_, i64>(12)? != 0,
+        enabled: col_i64(row, 12) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_alert(row: &Row<'_>) -> rusqlite::Result<AlertEvent> {
-    let status_s: String = row.get(3)?;
-    let sev_s: String = row.get(4)?;
-    let labels_json: String = row.get(5)?;
-    let annotations_json: String = row.get(6)?;
-    let starts: String = row.get(8)?;
-    let ends: Option<String> = row.get(9)?;
-    let pending: Option<String> = row.get(10)?;
-    let last: String = row.get(11)?;
-
+fn map_alert(row: &Row) -> Result<AlertEvent> {
+    let status_s = col_str(row, 3)?;
+    let sev_s = col_str(row, 4)?;
+    let labels_json = col_str(row, 5)?;
+    let annotations_json = col_str(row, 6)?;
+    let starts = col_str(row, 8)?;
+    let ends = col_str_opt(row, 9);
+    let pending = col_str_opt(row, 10);
+    let last = col_str(row, 11)?;
     Ok(AlertEvent {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        rule_id: Uuid::parse_str(&row.get::<_, String>(1)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        fingerprint: row.get(2)?,
+        id: col_uuid(row, 0)?,
+        rule_id: col_uuid(row, 1)?,
+        fingerprint: col_str(row, 2)?,
         status: AlertStatus::parse(&status_s).unwrap_or(AlertStatus::Resolved),
         severity: Severity::parse(&sev_s).unwrap_or(Severity::Warning),
         labels: labels_from_json(&labels_json).unwrap_or_default(),
         annotations: labels_from_json(&annotations_json).unwrap_or_default(),
-        value: row.get(7)?,
+        value: col_f64_opt(row, 7),
         starts_at: parse_dt(&starts).unwrap_or_else(|_| Utc::now()),
         ends_at: ends.as_deref().and_then(|s| parse_dt(s).ok()),
         pending_since: pending.as_deref().and_then(|s| parse_dt(s).ok()),
         last_evaluated_at: parse_dt(&last).unwrap_or_else(|_| Utc::now()),
-        notified_firing: row.get::<_, i64>(12)? != 0,
-        notified_resolved: row.get::<_, i64>(13)? != 0,
+        notified_firing: col_i64(row, 12) != 0,
+        notified_resolved: col_i64(row, 13) != 0,
     })
 }
 
-fn map_enrich(row: &Row<'_>) -> rusqlite::Result<EnrichRule> {
-    let kind_s: String = row.get(2)?;
-    let matchers_json: String = row.get(3)?;
-    let templates_json: String = row.get(5)?;
-    let mappings_json: String = row.get(6)?;
-    let created: String = row.get(10)?;
-    let updated: String = row.get(11)?;
-    let lookup_table_id: Option<String> = row.get(12).unwrap_or(None);
-    let lookup_table_ids_json: String = row.get(13).unwrap_or_else(|_| "[]".into());
-    let field_templates_json: String = row.get(14).unwrap_or_else(|_| "{}".into());
-    let label_extracts_json: String = row.get(15).unwrap_or_else(|_| "{}".into());
-    let lookup_match_keys_json: String = row.get(16).unwrap_or_else(|_| "{}".into());
+fn map_enrich(row: &Row) -> Result<EnrichRule> {
+    let kind_s = col_str(row, 2)?;
+    let matchers_json = col_str(row, 3)?;
+    let templates_json = col_str(row, 5)?;
+    let mappings_json = col_str(row, 6)?;
+    let created = col_str(row, 10)?;
+    let updated = col_str(row, 11)?;
+    let lookup_table_id = col_str_opt(row, 12);
+    let lookup_table_ids_json = col_str_opt(row, 13).unwrap_or_else(|| "[]".into());
+    let field_templates_json = col_str_opt(row, 14).unwrap_or_else(|| "{}".into());
+    let label_extracts_json = col_str_opt(row, 15).unwrap_or_else(|| "{}".into());
+    let lookup_match_keys_json = col_str_opt(row, 16).unwrap_or_else(|| "{}".into());
     let mappings: BTreeMap<String, Labels> =
         serde_json::from_str(&mappings_json).unwrap_or_default();
     let mut lookup_table_ids: Vec<Uuid> = serde_json::from_str::<Vec<String>>(&lookup_table_ids_json)
@@ -958,110 +974,96 @@ fn map_enrich(row: &Row<'_>) -> rusqlite::Result<EnrichRule> {
     let lookup_match_keys: BTreeMap<String, String> =
         serde_json::from_str(&lookup_match_keys_json).unwrap_or_default();
     Ok(EnrichRule {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        name: row.get(1)?,
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
         kind: EnrichKind::parse(&kind_s).unwrap_or(EnrichKind::AnnotationTemplate),
         matchers: labels_from_json(&matchers_json).unwrap_or_default(),
-        match_key: row.get(4)?,
+        match_key: col_str(row, 4).unwrap_or_default(),
         templates: labels_from_json(&templates_json).unwrap_or_default(),
         mappings,
         lookup_table_ids,
         lookup_match_keys,
         field_templates: labels_from_json(&field_templates_json).unwrap_or_default(),
         label_extracts: labels_from_json(&label_extracts_json).unwrap_or_default(),
-        write_labels: row.get::<_, i64>(7)? != 0,
-        enabled: row.get::<_, i64>(8)? != 0,
-        priority: row.get(9)?,
+        write_labels: col_i64(row, 7) != 0,
+        enabled: col_i64(row, 8) != 0,
+        priority: col_i64(row, 9) as i32,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_lookup(row: &Row<'_>) -> rusqlite::Result<LookupTable> {
-    let rows_json: String = row.get(4)?;
-    let created: String = row.get(6)?;
-    let updated: String = row.get(7)?;
-    let rows: BTreeMap<String, Labels> = serde_json::from_str(&rows_json).unwrap_or_default();
+fn map_lookup(row: &Row) -> Result<LookupTable> {
+    let rows_json = col_str(row, 4)?;
+    let created = col_str(row, 6)?;
+    let updated = col_str(row, 7)?;
+    let rows_map: BTreeMap<String, Labels> = serde_json::from_str(&rows_json).unwrap_or_default();
     Ok(LookupTable {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        name: row.get(1)?,
-        description: row.get(2)?,
-        key_label: row.get(3)?,
-        rows,
-        enabled: row.get::<_, i64>(5)? != 0,
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
+        description: col_str(row, 2).unwrap_or_default(),
+        key_label: col_str(row, 3).unwrap_or_else(|_| "instance".into()),
+        rows: rows_map,
+        enabled: col_i64(row, 5) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_silence(row: &Row<'_>) -> rusqlite::Result<Silence> {
-    let rule_id: Option<String> = row.get(1)?;
-    let matchers_json: String = row.get(2)?;
-    let starts: String = row.get(3)?;
-    let ends: String = row.get(4)?;
-    let created: String = row.get(6)?;
+fn map_silence(row: &Row) -> Result<Silence> {
+    let rule_id = col_str_opt(row, 1);
+    let matchers_json = col_str(row, 2)?;
+    let starts = col_str(row, 3)?;
+    let ends = col_str(row, 4)?;
+    let created = col_str(row, 6)?;
     Ok(Silence {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
+        id: col_uuid(row, 0)?,
         rule_id: rule_id.and_then(|s| Uuid::parse_str(&s).ok()),
         matchers: labels_from_json(&matchers_json).unwrap_or_default(),
         starts_at: parse_dt(&starts).unwrap_or_else(|_| Utc::now()),
         ends_at: parse_dt(&ends).unwrap_or_else(|_| Utc::now()),
-        comment: row.get(5)?,
+        comment: col_str(row, 5).unwrap_or_default(),
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_ingress(row: &Row<'_>) -> rusqlite::Result<IngressRoute> {
-    let kind_s: String = row.get(2)?;
-    let channel_ids_json: String = row.get(4)?;
-    let created: String = row.get(6)?;
-    let updated: String = row.get(7)?;
-    let endpoint: String = row.get(8).unwrap_or_default();
-    let options_json: String = row.get(9).unwrap_or_else(|_| "{}".into());
+fn map_ingress(row: &Row) -> Result<IngressRoute> {
+    let kind_s = col_str(row, 2)?;
+    let channel_ids_json = col_str(row, 4)?;
+    let created = col_str(row, 6)?;
+    let updated = col_str(row, 7)?;
+    let endpoint = col_str_opt(row, 8).unwrap_or_default();
+    let options_json = col_str_opt(row, 9).unwrap_or_else(|| "{}".into());
     Ok(IngressRoute {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        name: row.get(1)?,
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
         kind: IngressKind::parse(&kind_s).unwrap_or(IngressKind::Generic),
-        token: row.get(3)?,
+        token: col_str_opt(row, 3),
         endpoint,
         options: labels_from_json(&options_json).unwrap_or_default(),
         channel_ids: uuid_ids_from_json(&channel_ids_json).unwrap_or_default(),
-        enabled: row.get::<_, i64>(5)? != 0,
+        enabled: col_i64(row, 5) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })
 }
 
-fn map_notify_log(row: &Row<'_>) -> rusqlite::Result<NotifyLog> {
-    let transition_s: String = row.get(3)?;
-    let created: String = row.get(6)?;
-    let body: String = row.get(7).unwrap_or_default();
+fn map_notify_log(row: &Row) -> Result<NotifyLog> {
+    let transition_s = col_str(row, 3)?;
+    let created = col_str(row, 6)?;
+    let body = col_str_opt(row, 7).unwrap_or_default();
     let transition = match transition_s.as_str() {
         "became_firing" => AlertTransition::BecameFiring,
         "became_resolved" => AlertTransition::BecameResolved,
         _ => AlertTransition::Unchanged,
     };
     Ok(NotifyLog {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        alert_id: Uuid::parse_str(&row.get::<_, String>(1)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        channel_id: Uuid::parse_str(&row.get::<_, String>(2)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
-        })?,
+        id: col_uuid(row, 0)?,
+        alert_id: col_uuid(row, 1)?,
+        channel_id: col_uuid(row, 2)?,
         transition,
-        success: row.get::<_, i64>(4)? != 0,
-        error: row.get(5)?,
+        success: col_i64(row, 4) != 0,
+        error: col_str_opt(row, 5),
         body,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
     })

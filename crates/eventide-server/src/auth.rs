@@ -151,7 +151,8 @@ pub async fn me(
         "permissions": claims.perms,
         "listen": state.config.listen,
         "scheduler_tick_seconds": state.config.scheduler_tick_seconds,
-        "database_path": state.config.database_path,
+        "mysql_url": state.config.mysql_url,
+        "redis_url": state.config.redis_url,
         "static_dir": state.config.static_dir,
         "token_ttl_hours": state.config.auth.token_ttl_hours,
     });

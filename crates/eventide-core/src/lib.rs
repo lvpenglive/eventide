@@ -6,6 +6,7 @@ mod fingerprint;
 mod ingress;
 mod models;
 mod storm;
+mod storm_redis;
 mod template;
 
 pub use enrich::{
@@ -32,6 +33,7 @@ pub use storm::{
     IngressPermit, IngressPressure, IngressPressureConfig, ThrottleConfig, ThrottleDecision,
     ThrottleGate,
 };
+pub use storm_redis::{RedisAggregateBuffer, RedisThrottleGate};
 pub use template::{
     apply_string_transform, render_map, render_template, split_path_transform, TemplateContext,
 };

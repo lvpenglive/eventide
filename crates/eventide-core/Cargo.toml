@@ -7,6 +7,7 @@ description = "Eventide core models, rule evaluation, and alert event state mach
 
 [dependencies]
 chrono = { workspace = true }
+redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

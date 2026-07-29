@@ -1,0 +1,38 @@
+# Local MySQL + Redis for Eventide.
+# Usage: docker compose up -d
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: eventide-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: eventide
+      MYSQL_DATABASE: eventide
+      MYSQL_USER: eventide
+      MYSQL_PASSWORD: eventide
+    ports:
+      - "3306:3306"
+    volumes:
+      - eventide_mysql:/var/lib/mysql
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ueventide", "-peventide"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: eventide-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - eventide_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  eventide_mysql:
+  eventide_redis:

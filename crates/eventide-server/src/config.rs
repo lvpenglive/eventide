@@ -1,14 +1,19 @@
 //! Application configuration (TOML).
 
 use eventide_core::{AggregateConfig, AggregateMode, IngressPressureConfig, ThrottleConfig};
+use crate::leader::ClusterConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
-    #[serde(default = "default_db")]
-    pub database_path: String,
+    /// MySQL connection URL, e.g. `mysql://user:pass@host:3306/eventide`
+    #[serde(default = "default_mysql")]
+    pub mysql_url: String,
+    /// Redis connection URL, e.g. `redis://host:6379/`
+    #[serde(default = "default_redis")]
+    pub redis_url: String,
     #[serde(default = "default_static")]
     pub static_dir: String,
     /// Global scheduler tick in seconds (rules still have their own interval).
@@ -16,9 +21,43 @@ pub struct AppConfig {
     pub scheduler_tick_seconds: u64,
     #[serde(default)]
     pub auth: AuthConfig,
-    /// Alert-storm controls (notification throttle / future aggregation).
+    /// Alert-storm controls (notification throttle / aggregation).
     #[serde(default)]
     pub storm: StormConfig,
+    /// Multi-instance leader election (Redis lease).
+    #[serde(default)]
+    pub cluster: ClusterConfig,
+    /// Elasticsearch connection for optional alert history (toggles live in DB / UI).
+    #[serde(default)]
+    pub elasticsearch: ElasticsearchConfig,
+}
+
+/// `[elasticsearch]` — connection only; enable write / search store via console settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElasticsearchConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_es_index")]
+    pub index: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+fn default_es_index() -> String {
+    "eventide-alerts".into()
+}
+
+impl Default for ElasticsearchConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            index: default_es_index(),
+            username: String::new(),
+            password: String::new(),
+        }
+    }
 }
 
 /// `[storm]` — throttle (P0) + aggregation (P1). See README §13.1.
@@ -77,8 +116,11 @@ pub struct AuthConfig {
 fn default_listen() -> String {
     "0.0.0.0:8080".into()
 }
-fn default_db() -> String {
-    "data/eventide.db".into()
+fn default_mysql() -> String {
+    "mysql://eventide:eventide@127.0.0.1:3306/eventide".into()
+}
+fn default_redis() -> String {
+    "redis://127.0.0.1:6379/".into()
 }
 fn default_static() -> String {
     "static".into()
@@ -210,11 +252,14 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             listen: default_listen(),
-            database_path: default_db(),
+            mysql_url: default_mysql(),
+            redis_url: default_redis(),
             static_dir: default_static(),
             scheduler_tick_seconds: default_tick(),
             auth: AuthConfig::default(),
             storm: StormConfig::default(),
+            cluster: ClusterConfig::default(),
+            elasticsearch: ElasticsearchConfig::default(),
         }
     }
 }

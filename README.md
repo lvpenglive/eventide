@@ -1,6 +1,6 @@
 # Eventide
 
-Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实现上走**单进程、SQLite、可嵌入控制台**的精简路线。
+Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实现上走**MySQL + Redis、可嵌入控制台**的路线（多实例可共享库与风暴状态）。
 
 它同时支持两种告警来源：
 
@@ -75,7 +75,8 @@ Eventide 定位为 **团队级告警中枢**：
 
 | 项 | 选型 |
 |----|------|
-| 数据库 | SQLite（`rusqlite`，bundled） |
+| 数据库 | MySQL（`mysql` crate） |
+| 缓存 / 风暴状态 | Redis（节流、聚合） |
 | HTTP 客户端 | reqwest（rustls） |
 | Kafka | rskafka（纯 Rust 客户端） |
 | 鉴权 | JWT（jsonwebtoken） |
@@ -94,8 +95,8 @@ Eventide 定位为 **团队级告警中枢**：
 | | WatchAlert | Eventide |
 |--|------------|----------|
 | 语言 | Go | Rust |
-| 存储 | MySQL | SQLite |
-| 缓存 / 选主 | Redis | 无（单机） |
+| 存储 | MySQL | MySQL |
+| 缓存 / 选主 | Redis | Redis（风暴状态 + 调度选主） |
 | 前端 | React + Ant Design | 内嵌静态页 |
 | 部署 | 多容器常见 | 单二进制 + 配置文件 |
 
@@ -126,7 +127,7 @@ eventide/
 | **eventide-core** | 领域模型；阈值评估；告警标识；状态机；Ingress 解析与字段映射；模板渲染；告警丰富 / 台账查表 |
 | **eventide-sources** | `fetch_samples()`：按数据源类型拉指标样本 |
 | **eventide-notify** | 统一 `Notifier::send`，按渠道发通知 |
-| **eventide-server** | 进程入口、JWT 鉴权、SQLite、规则调度、Kafka Ingress 轮询、REST API、控制台 |
+| **eventide-server** | 进程入口、JWT 鉴权、MySQL、Redis 风暴状态、规则调度、Kafka Ingress 轮询、REST API、控制台 |
 
 依赖关系：
 
@@ -149,7 +150,8 @@ eventide-server
   VictoriaMetrics ──►│  (拉数) ──────► (评估/告警标识/状态机)   │
   Loki/Log ────────►│                      │                  │
   Kafka(消息字段) ─►│                      ▼                  │
-                    │                 SQLite                   │
+                    │                 MySQL                    │
+                    │            Redis（风暴状态）              │
   Alertmanager ────►│  ingress API                             │
   Generic Webhook ─►│  kafka ingress ──► 同一 AlertEvent       │
   Kafka(告警总线) ─►│                      │                  │
@@ -163,12 +165,13 @@ eventide-server
 
 ### 运行时组件
 
-1. **HTTP 服务**：对外 API + 控制台页面  
-2. **规则调度器**：按 `scheduler_tick_seconds` 轮询到期规则  
-3. **Kafka Ingress 轮询**：消费「告警消息」类 Topic  
-4. **SQLite**：配置与告警事件持久化  
+1. **HTTP 服务**：对外 API + 控制台页面（多实例均可）  
+2. **规则调度器**：按 `scheduler_tick_seconds` 轮询到期规则（仅 cluster leader）  
+3. **Kafka Ingress 轮询**：消费「告警消息」类 Topic（仅 leader）  
+4. **MySQL**：配置与告警事件持久化  
+5. **Redis**：通知节流 / 聚合状态 + 调度选主 lease（多实例共享）  
 
-无 Redis、无消息中间件强依赖（Kafka 仅作为可选数据源/接入）。
+Kafka 仅作为可选数据源/接入；无消息中间件强依赖。
 
 ---
 
@@ -326,7 +329,9 @@ HTTP POST / Kafka 消费
 
 ## 7. 存储设计
 
-SQLite 文件默认：`data/eventide.db`（WAL）。
+默认使用 **MySQL**（`mysql_url`）持久化配置与告警；**Redis**（`redis_url`）保存抗风暴节流/聚合状态。
+
+本地可用 `docker compose up -d` 拉起 MySQL 8 + Redis 7（见仓库 `docker-compose.yml`）。
 
 主要表：
 
@@ -345,7 +350,9 @@ SQLite 文件默认：`data/eventide.db`（WAL）。
 | `departments` / `roles` / `users` | 组织与 RBAC（可选） |
 | `schema_meta` | 迁移版本 |
 
-Schema 通过启动时 `migrate()` 演进（当前至 **v10**：含 `label_extracts`、按规则覆盖查表键等）。
+Schema 通过启动时 `migrate()` 一次性建到当前版本（含 `notify_logs.body`、渠道 `options_json` 等）。
+
+SQLite 单机版快照标签：`sqlite-baseline`（迁移前保留）。
 
 ---
 
@@ -393,12 +400,15 @@ Header：`Authorization: Bearer <jwt>`
 ### 9.1 环境要求
 
 - Rust 稳定版（建议 1.75+）  
-- 无需单独安装 SQLite  
+- **MySQL** 与 **Redis**（可用 `docker compose up -d`）  
 
 ### 9.2 启动
 
 ```bash
-# 在仓库根目录
+# 可选：本地依赖
+docker compose up -d
+
+# 在仓库根目录（先改 eventide.toml 里的 mysql_url / redis_url）
 cargo run -p eventide-server -- eventide.toml
 ```
 
@@ -436,7 +446,8 @@ cargo run -p eventide-server -- eventide.toml
 
 ```toml
 listen = "0.0.0.0:8080"
-database_path = "data/eventide.db"
+mysql_url = "mysql://eventide:eventide@127.0.0.1:3306/eventide"
+redis_url = "redis://127.0.0.1:6379/"
 static_dir = "static"
 scheduler_tick_seconds = 5
 
@@ -449,16 +460,25 @@ token_ttl_hours = 24
 # 抗风暴见 §11.8；完整字段见仓库内 eventide.toml 示例
 # [storm]
 # ...
+
+# 多实例调度选主（Redis lease）；单机可设 enabled = false
+[cluster]
+enabled = true
+leader_key = "eventide:cluster:leader"
+lease_seconds = 15
 ```
 
 | 字段 | 含义 |
 |------|------|
 | `listen` | HTTP 监听地址 |
-| `database_path` | SQLite 路径 |
+| `mysql_url` | MySQL 连接串（库不存在时会尝试自动创建） |
+| `redis_url` | Redis 连接串（风暴节流/聚合状态 + 选主） |
 | `static_dir` | 控制台静态资源目录 |
 | `scheduler_tick_seconds` | 调度与 Kafka Ingress 轮询基准间隔 |
 | `auth.*` | 登录账号、JWT 密钥与有效期 |
 | `[storm]` | 通知节流 / 聚合 / 接入削峰（**改后需重启**；用法见 [§11.8](#118-抗告警风暴怎么用)） |
+| `[cluster]` | 多实例选主：仅 lease 持有者跑规则调度 / Kafka 拉取 / 聚合 flush；HTTP 与 webhook 仍全员服务 |
+| `[elasticsearch]` | 可选预置 ES 连接；**控制台「系统设置」也可改地址/账号**，并开关同步与默认「最近/历史事件」 |
 
 启动时可指定配置路径：
 
@@ -670,7 +690,8 @@ Zabbix 风格示例：`map_ip=sourceciname|before:_`，`map_name=sourcealertkey`
 ```
 
 消息体支持 Alertmanager JSON、Generic 批量/单条、Jeecg 拨测，以及带字段映射的自定义 JSON。  
-位点保存在 `ingress_kafka_offsets`；默认从 `latest` 开始，只消费新消息。
+位点保存在 `ingress_kafka_offsets`；默认从 `latest` 开始，只消费新消息。  
+实现上会 **复用 Kafka client**，并在 leader 内 **并行 fetch 各 partition**（入库串行）；通知走 **异步队列**（先落库再发渠道），减轻连接开销与 HTTP 通知阻塞消费。
 
 ### 11.5 告警丰富（台账 + 规则）
 
@@ -792,8 +813,8 @@ degrade_notify_per_sec = 50    # 通知尝试速率阈值（配合 degrade）
 
 #### 注意
 
-- 节流/聚合状态在**进程内存**，重启清空（可接受）。  
-- 多实例部署时各进程各自计数，共享限流需后续 Redis（见路线图）。  
+- 节流/聚合状态在 **Redis**，多实例共享；进程重启不丢（按 key TTL 过期）。  
+- Ingress 削峰（inflight / degrade）仍为**本进程**计数。  
 - 实现细节与验收清单见 [§13.1](#131-下一步优先抗告警风暴--开工清单)。
 
 ---
@@ -809,10 +830,11 @@ degrade_notify_per_sec = 50    # 通知尝试速率阈值（配合 degrade）
 ### 不适合（当前架构）
 
 - 海量日志/指标长期存储（应仍在 Loki / Prometheus）  
-- 多实例高可用争抢调度（无 Redis 选主）  
 - 超高 QPS 且无队列削峰的极端风暴——可先用 [§11.8](#118-抗告警风暴怎么用) 的节流/聚合/429；更重的削峰需外置 Kafka 等  
 
-瓶颈主要在 **SQLite 写并发** 与 **单进程算力**，不在 Rust 语言本身。
+多实例时：HTTP / webhook 可水平扩展；**规则调度、Kafka Ingress 轮询、聚合 flush** 由 Redis lease 选主，仅 leader 执行（见 `[cluster]`）。
+
+瓶颈主要在 **MySQL 写并发**、**Redis 往返** 与 **单进程算力**，不在 Rust 语言本身。
 
 ### 安全注意
 
@@ -945,7 +967,7 @@ degrade_skip_notify = false
 
 - 根因抑制树（host down 压掉上层探测）—— 单独立项。  
 - ClickHouse / 海量历史仓库 —— 与风暴正交，见架构讨论，不阻塞 P0/P1。  
-- 多实例共享节流状态（Redis）—— 等「SQLite → MySQL + Redis」一起做；P0 单机内存即可。
+- ~~多实例共享节流状态（Redis）~~ —— **已随 MySQL + Redis 落地**。
 
 #### 推荐开工顺序（给下次直接开干）
 
@@ -962,8 +984,10 @@ degrade_skip_notify = false
 - [x] 企微/飞书以外渠道与更丰富的通知模板（Slack / Telegram；markdown / @）  
 - [x] 通知渠道可配置正文模板（`template_firing` / `template_resolved`）  
 - [ ] 值班、升级、认领；根因抑制  
-- [ ] SQLite → MySQL；多实例 + Redis（含共享风暴状态）  
-- [ ] 告警历史仓库（Kafka → ClickHouse/ES，与热路径分离）  
+- [x] SQLite → MySQL；多实例 + Redis（含共享风暴状态）  
+- [x] 多实例调度选主（避免重复评估）  
+- [x] 告警历史可选写入 Elasticsearch；列表可切换 MySQL / ES 检索（ClickHouse 仍待定）  
+- [ ] 告警历史仓库补强（Kafka 缓冲 → ClickHouse 分析；与热路径进一步分离）  
 - [ ] 更多日志后端（ES 等）  
 - [ ] Ingress 更多平台适配器（开箱预设）  
 
