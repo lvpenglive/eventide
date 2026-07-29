@@ -48,7 +48,10 @@ fn col_str_opt(row: &Row, idx: usize) -> Option<String> {
 }
 
 fn col_i64(row: &Row, idx: usize) -> i64 {
-    row.get::<i64, _>(idx).unwrap_or(0)
+    match row.get_opt::<i64, _>(idx) {
+        Some(Ok(v)) => v,
+        _ => 0,
+    }
 }
 
 fn col_uuid(row: &Row, idx: usize) -> Result<Uuid> {

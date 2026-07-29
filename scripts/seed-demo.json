@@ -26,9 +26,9 @@
     {
       "name": "Demo Webhook",
       "kind": "webhook",
-      "url": "http://127.0.0.1:9999/hooks/eventide",
+      "url": "http://127.0.0.1:9/hooks/eventide",
       "secret": null,
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "Demo DingTalk",

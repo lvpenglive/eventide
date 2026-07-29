@@ -1019,7 +1019,7 @@
           ${
             rows.length
               ? view === "table"
-                ? `<div class="panel">${alertTableGrid(rows, ingressMap)}</div>`
+                ? `<div class="panel alert-table-scroll">${alertTableGrid(rows, ingressMap)}</div>`
                 : alertCards(rows, ingressMap)
               : `<div class="panel empty">
                   暂无告警。去「告警接入」试推送，或等待规则触发。
@@ -1665,7 +1665,7 @@
   function alertTableGrid(rows, ingressMap) {
     return `<table class="data alert-table"><thead><tr>
       <th>状态</th><th>级别</th><th>告警名称</th><th>告警描述</th><th>告警 IP</th><th>当前值</th>
-      <th>来源</th><th>开始时间</th><th>持续</th><th>最后更新</th><th></th>
+      <th class="col-src">来源</th><th class="col-time">开始时间</th><th class="col-dur">持续</th><th class="col-time">最后更新</th><th class="col-act"></th>
     </tr></thead><tbody>${rows
       .map((a, i) => {
         const name = alertDisplayName(a);
@@ -1684,14 +1684,14 @@
           3
         )}</div>
       </td>
-      <td class="alert-summary" title="${esc(summary)}">${esc(summary || "—")}</td>
+      <td title="${esc(summary)}"><div class="alert-summary-text">${esc(summary || "—")}</div></td>
       <td class="mono">${esc(ip || "—")}</td>
       <td class="mono">${fmtValue(a.value)}</td>
-      <td><span class="source-tag">${esc(src)}</span></td>
-      <td>${esc(fmtTime(a.starts_at))}</td>
-      <td>${esc(dur)}</td>
-      <td>${esc(fmtTime(a.last_evaluated_at))}</td>
-      <td class="actions"><button type="button" data-alert-detail="${i}">详情</button></td>
+      <td class="col-src"><span class="source-tag" title="${esc(src)}">${esc(src)}</span></td>
+      <td class="col-time">${esc(fmtTime(a.starts_at))}</td>
+      <td class="col-dur">${esc(dur)}</td>
+      <td class="col-time">${esc(fmtTime(a.last_evaluated_at))}</td>
+      <td class="col-act"><button type="button" data-alert-detail="${i}">详情</button></td>
     </tr>`;
       })
       .join("")}</tbody></table>`;

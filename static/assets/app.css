@@ -831,18 +831,82 @@ code, .mono {
   color: var(--muted);
 }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.actions button { height: 28px; padding: 0 10px; font-size: 13px; }
+.actions button { height: 28px; padding: 0 10px; font-size: 13px; white-space: nowrap; }
 
+.alert-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+table.data.alert-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+table.data.alert-table th,
+table.data.alert-table td {
+  vertical-align: middle;
+  overflow: hidden;
+}
+table.data.alert-table th:nth-child(1),
+table.data.alert-table td:nth-child(1) { min-width: 72px; }
+table.data.alert-table th:nth-child(2),
+table.data.alert-table td:nth-child(2) { min-width: 72px; }
+table.data.alert-table th:nth-child(3),
+table.data.alert-table td:nth-child(3) { min-width: 160px; max-width: 220px; }
+table.data.alert-table th:nth-child(4),
+table.data.alert-table td:nth-child(4) { min-width: 200px; max-width: 280px; }
+table.data.alert-table th:nth-child(5),
+table.data.alert-table td:nth-child(5) { min-width: 110px; }
+table.data.alert-table th:nth-child(6),
+table.data.alert-table td:nth-child(6) { min-width: 72px; }
+table.data.alert-table .col-src {
+  min-width: 130px;
+  max-width: 160px;
+}
+table.data.alert-table .col-src .source-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+table.data.alert-table .col-time {
+  min-width: 148px;
+  white-space: nowrap;
+}
+table.data.alert-table .col-dur {
+  min-width: 56px;
+  white-space: nowrap;
+}
+table.data.alert-table .col-act {
+  min-width: 72px;
+  width: 72px;
+  white-space: nowrap;
+  text-align: right;
+  padding-right: 12px;
+}
+table.data.alert-table .col-act button {
+  display: inline-block;
+  white-space: nowrap;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 13px;
+}
 .alert-name {
   font-weight: 650;
   color: var(--heading);
   margin-bottom: 6px;
+  line-height: 1.35;
+  word-break: break-word;
 }
 .alert-labels {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 8px;
+  gap: 5px;
+  margin-top: 6px;
 }
 .alert-summary {
   max-width: 280px;
@@ -852,6 +916,16 @@ code, .mono {
   -webkit-box-orient: vertical;
   overflow: hidden;
   line-height: 1.4;
+}
+.alert-summary-text {
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  line-height: 1.45;
+  max-height: 2.9em;
+  word-break: break-word;
 }
 
 /* Alert feed (card list) */
