@@ -1,7 +1,9 @@
 //! REST API for Eventide.
 
 mod iam;
+mod mib_admin;
 mod overview;
+mod policy_admin;
 mod settings;
 
 use crate::auth::{self, require_auth, require_route_perm};
@@ -111,7 +113,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/settings/alert-history",
             get(settings::get_alert_history).put(settings::put_alert_history),
         )
-        // Trap service BFF (same-origin portal)
+        .merge(mib_admin::routes())
+        .merge(policy_admin::routes())
+        // Trap service BFF (runtime health / simulate only)
         .route(
             "/trap-api",
             axum::routing::any(crate::trap_proxy::forward_root),

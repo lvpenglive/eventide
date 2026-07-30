@@ -744,6 +744,7 @@ dependencies = [
  "eventide-core",
  "eventide-notify",
  "eventide-sources",
+ "eventide-trap-data",
  "futures",
  "jsonwebtoken",
  "mysql",
@@ -783,14 +784,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "calamine",
  "chrono",
- "mib-rs",
- "mysql",
+ "eventide-trap-data",
  "reqwest",
  "rskafka",
- "rust_xlsxwriter",
- "rusty-s3",
  "serde",
  "serde_json",
  "snmp-parser",
@@ -800,6 +797,26 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "eventide-trap-data"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "calamine",
+ "chrono",
+ "mib-rs",
+ "mysql",
+ "redis",
+ "reqwest",
+ "rust_xlsxwriter",
+ "rusty-s3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "url",
  "uuid",
 ]

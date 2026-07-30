@@ -1,4 +1,4 @@
-//! HTTP API for health, stats, simulate, recent.
+//! HTTP API for health, stats, simulate, recent (CRUD lives on eventide-server).
 
 use crate::config::TrapConfig;
 use crate::kafka_out::KafkaOut;
@@ -9,6 +9,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use eventide_trap_data::{MibStore, PolicyRedis, PolicyStore};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -21,8 +22,9 @@ pub struct AppState {
     pub stats: TrapStats,
     pub recent: RecentBuffer,
     pub kafka: Option<KafkaOut>,
-    pub mibs: Arc<crate::mib_store::MibStore>,
-    pub policies: Arc<crate::policy_store::PolicyStore>,
+    pub mibs: Arc<MibStore>,
+    pub policies: Arc<PolicyStore>,
+    pub policy_redis: Option<Arc<PolicyRedis>>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -31,8 +33,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/recent", get(recent))
         .route("/api/simulate", post(simulate))
-        .merge(crate::mib_api::routes())
-        .merge(crate::policy_api::routes())
+        .route("/api/mibs/reload", post(reload_mibs))
+        .route("/api/policies/reload", post(reload_policies))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -54,6 +56,40 @@ async fn stats(State(st): State<Arc<AppState>>) -> Json<Value> {
 
 async fn recent(State(st): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({ "items": st.recent.list().await }))
+}
+
+async fn reload_mibs(State(st): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match st.mibs.reload().await {
+        Ok(()) => Ok(Json(json!({
+            "ok": true,
+            "count": st.mibs.list().await.len(),
+        }))),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{e:#}") })),
+        )),
+    }
+}
+
+async fn reload_policies(
+    State(st): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match st
+        .policies
+        .reload_prefer_redis(st.policy_redis.as_deref())
+        .await
+    {
+        Ok(()) => Ok(Json(json!({
+            "ok": true,
+            "count": st.policies.list().await.len(),
+            "stamp": st.policies.current_stamp().await,
+            "source": if st.policy_redis.is_some() { "redis_or_mysql" } else { "mysql" },
+        }))),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{e:#}") })),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -25,10 +25,11 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TrapProxyConfig};
 use crate::db::Db;
 use crate::scheduler::spawn_scheduler;
 use crate::state::AppState;
+use eventide_trap_data::{MibStore, PolicyRedis, PolicyStore, S3Store};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -147,6 +148,19 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let (mibs, policies) = open_trap_stores(&db, &config.trap).await;
+
+    let policy_redis = match PolicyRedis::connect(&config.redis_url) {
+        Ok(r) => {
+            tracing::info!("trap policy redis publisher ready");
+            Some(Arc::new(r))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "trap policy redis publisher unavailable");
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -159,7 +173,12 @@ async fn main() -> anyhow::Result<()> {
         notify_queue,
         es: Arc::new(std::sync::RwLock::new(es_client)),
         alert_history: Arc::new(std::sync::RwLock::new(alert_history_prefs)),
+        mibs,
+        policies,
+        policy_redis,
     });
+    // Seed Redis snapshot so Trap instances can boot without waiting for a CRUD.
+    state.sync_policies_to_redis().await;
     crate::notify_pipeline::spawn_notify_workers(state.clone(), notify_rx);
 
     spawn_scheduler(state.clone());
@@ -180,4 +199,57 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn open_trap_stores(
+    db: &Db,
+    trap: &TrapProxyConfig,
+) -> (Option<Arc<MibStore>>, Option<Arc<PolicyStore>>) {
+    let pool = db.pool();
+    let policies = match PolicyStore::open(pool.clone(), None).await {
+        Ok(p) => {
+            tracing::info!(backend = %p.backend(), count = p.list().await.len(), "trap policies ready");
+            Some(Arc::new(p))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "trap policy store unavailable");
+            None
+        }
+    };
+
+    if !trap.s3_configured() {
+        tracing::warn!("[trap] s3_* not configured — MIB CRUD disabled");
+        return (None, policies);
+    }
+
+    let mibs = match S3Store::connect(
+        &trap.s3_endpoint,
+        &trap.s3_access_key,
+        &trap.s3_secret_key,
+        &trap.s3_region,
+        &trap.s3_bucket,
+    )
+    .await
+    {
+        Ok(s3) => match MibStore::open(pool, s3, &trap.mib_cache_dir, None).await {
+            Ok(m) => {
+                tracing::info!(
+                    backend = %m.backend(),
+                    count = m.list().await.len(),
+                    "MIB library ready on server"
+                );
+                Some(Arc::new(m))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "MIB store open failed");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "S3 / RustFS connect failed — MIB CRUD disabled");
+            None
+        }
+    };
+
+    (mibs, policies)
 }

@@ -48,9 +48,12 @@ pub struct TrapConfig {
     /// Local cache of MIB objects for mib-rs.
     #[serde(default = "default_mib_cache_dir")]
     pub mib_cache_dir: String,
-    /// Seconds between memory reloads from MySQL (multi-instance sync).
+    /// Seconds between memory reloads (Redis preferred, MySQL fallback).
     #[serde(default = "default_reload_secs")]
     pub policy_reload_secs: u64,
+    /// Same Redis as Eventide server — policy snapshot + pub/sub. Empty = MySQL-only.
+    #[serde(default)]
+    pub redis_url: String,
 }
 
 fn default_http() -> String {
@@ -108,6 +111,7 @@ impl Default for TrapConfig {
             s3_region: default_s3_region(),
             mib_cache_dir: default_mib_cache_dir(),
             policy_reload_secs: default_reload_secs(),
+            redis_url: String::new(),
         }
     }
 }

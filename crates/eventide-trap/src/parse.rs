@@ -7,24 +7,12 @@ use snmp_parser::{parse_snmp_v1, parse_snmp_v2c, Oid};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
+pub use eventide_trap_data::ParsedTrap;
+
 /// Well-known snmpTrapOID.0
 const SNMP_TRAP_OID: &str = "1.3.6.1.6.3.1.1.4.1.0";
 /// sysUpTime.0
 const SYS_UPTIME_OID: &str = "1.3.6.1.2.1.1.3.0";
-
-#[derive(Debug, Clone)]
-pub struct ParsedTrap {
-    pub version: String,
-    pub community: String,
-    pub peer_ip: String,
-    #[allow(dead_code)]
-    pub peer_port: u16,
-    pub trap_oid: String,
-    pub alertname: String,
-    pub severity_hint: Option<String>,
-    pub varbinds: BTreeMap<String, String>,
-    pub raw_note: String,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {

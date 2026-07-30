@@ -35,19 +35,57 @@ pub struct AppConfig {
     pub trap: TrapProxyConfig,
 }
 
-/// `[trap]` — Eventide console → Trap service BFF.
+/// `[trap]` — Trap service BFF + MIB/policy storage (RustFS).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrapProxyConfig {
     /// e.g. `http://127.0.0.1:8081`. Empty disables `/trap-api` proxy.
     #[serde(default)]
     pub api_url: String,
+    /// RustFS / S3 for MIB object bodies (CRUD on this server).
+    #[serde(default)]
+    pub s3_endpoint: String,
+    #[serde(default)]
+    pub s3_access_key: String,
+    #[serde(default)]
+    pub s3_secret_key: String,
+    #[serde(default = "default_s3_bucket")]
+    pub s3_bucket: String,
+    #[serde(default = "default_s3_region")]
+    pub s3_region: String,
+    /// Local cache dir for mib-rs (OID browser / export).
+    #[serde(default = "default_mib_cache")]
+    pub mib_cache_dir: String,
+}
+
+fn default_s3_bucket() -> String {
+    "eventide-mibs".into()
+}
+fn default_s3_region() -> String {
+    "us-east-1".into()
+}
+fn default_mib_cache() -> String {
+    "data/mib-cache".into()
 }
 
 impl Default for TrapProxyConfig {
     fn default() -> Self {
         Self {
             api_url: String::new(),
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: default_s3_bucket(),
+            s3_region: default_s3_region(),
+            mib_cache_dir: default_mib_cache(),
         }
+    }
+}
+
+impl TrapProxyConfig {
+    pub fn s3_configured(&self) -> bool {
+        !self.s3_endpoint.trim().is_empty()
+            && !self.s3_access_key.is_empty()
+            && !self.s3_secret_key.is_empty()
     }
 }
 

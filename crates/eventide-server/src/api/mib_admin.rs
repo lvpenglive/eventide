@@ -1,13 +1,13 @@
-//! MIB library HTTP handlers.
+﻿//! MIB library HTTP handlers (CRUD + OID browser on eventide-server).
 
-use crate::http::AppState;
-use crate::policy_store::ImportMode;
+use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use eventide_trap_data::{write_xlsx_from_drafts, ImportMode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -27,21 +27,35 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (
-        status,
-        Json(json!({ "error": msg.into() })),
+    (status, Json(json!({ "error": msg.into() })))
+}
+
+fn mib_unavailable() -> (StatusCode, Json<Value>) {
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "MIB store unavailable: configure [trap] s3_* in eventide.toml",
     )
 }
 
-async fn list_mibs(State(st): State<Arc<AppState>>) -> Json<Value> {
-    let items = st.mibs.list().await;
-    let load_error = st.mibs.load_error().await;
-    Json(json!({
+fn policies_unavailable() -> (StatusCode, Json<Value>) {
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "policy store unavailable",
+    )
+}
+
+async fn list_mibs(State(st): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    let items = mibs.list().await;
+    let load_error = mibs.load_error().await;
+    Ok(Json(json!({
         "items": items,
-        "mib_dir": st.mibs.dir().display().to_string(),
-        "backend": st.mibs.backend(),
+        "mib_dir": mibs.dir().display().to_string(),
+        "backend": mibs.backend(),
         "load_error": load_error,
-    }))
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,13 +68,16 @@ async fn upload_mib(
     Query(q): Query<UploadQuery>,
     body: Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
     if body.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "empty body"));
     }
     if body.len() > 16 * 1024 * 1024 {
-        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "MIB 文件不能超过 16MB"));
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "MIB file must be <= 16MB"));
     }
-    match st.mibs.upload(&q.filename, &body).await {
+    match mibs.upload(&q.filename, &body).await {
         Ok(entry) => Ok(Json(json!({ "ok": true, "item": entry }))),
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
@@ -70,7 +87,10 @@ async fn get_mib(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.mibs.get(&id).await {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.get(&id).await {
         Some(e) => Ok(Json(json!(e))),
         None => Err(err(StatusCode::NOT_FOUND, "module not found")),
     }
@@ -80,7 +100,10 @@ async fn delete_mib(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.mibs.delete(&id).await {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.delete(&id).await {
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
@@ -97,12 +120,15 @@ async fn children(
     Path(id): Path<String>,
     Query(q): Query<ChildrenQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
     let parent = if q.oid.is_empty() {
         None
     } else {
         Some(q.oid.as_str())
     };
-    match st.mibs.children(&id, parent).await {
+    match mibs.children(&id, parent).await {
         Ok(nodes) => Ok(Json(json!({ "module": id, "parent_oid": q.oid, "children": nodes }))),
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
@@ -118,7 +144,10 @@ async fn node_detail(
     Path(id): Path<String>,
     Query(q): Query<NodeQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.mibs.node_detail(&id, &q.oid).await {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.node_detail(&id, &q.oid).await {
         Ok(n) => Ok(Json(json!(n))),
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
@@ -128,7 +157,10 @@ async fn notifications(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.mibs.notifications(&id).await {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.notifications(&id).await {
         Ok(items) => Ok(Json(json!({ "module": id, "items": items }))),
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
@@ -138,9 +170,12 @@ async fn export_module_policies(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
-    match st.mibs.export_policies(Some(&id)).await {
-        Ok(export) => match crate::policy_xlsx::write_xlsx_from_drafts(&export.policies) {
-            Ok(body) => Ok(crate::policy_api::xlsx_response(
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.export_policies(Some(&id)).await {
+        Ok(export) => match write_xlsx_from_drafts(&export.policies) {
+            Ok(body) => Ok(super::policy_admin::xlsx_response(
                 &format!("trap-policies-{id}.xlsx"),
                 body,
             )),
@@ -153,9 +188,15 @@ async fn export_module_policies(
 async fn export_all_policies(
     State(st): State<Arc<AppState>>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
-    match st.mibs.export_policies(None).await {
-        Ok(export) => match crate::policy_xlsx::write_xlsx_from_drafts(&export.policies) {
-            Ok(body) => Ok(crate::policy_api::xlsx_response("trap-policies-all.xlsx", body)),
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.export_policies(None).await {
+        Ok(export) => match write_xlsx_from_drafts(&export.policies) {
+            Ok(body) => Ok(super::policy_admin::xlsx_response(
+                "trap-policies-all.xlsx",
+                body,
+            )),
             Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
         },
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
@@ -185,13 +226,21 @@ async fn apply_module_policies(
     Path(id): Path<String>,
     Query(q): Query<ApplyQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let export = st
-        .mibs
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
+    let export = mibs
         .export_policies(Some(&id))
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
-    match st.policies.import_drafts(export.policies, apply_mode(&q)).await {
-        Ok(r) => Ok(Json(json!({ "ok": true, "result": r }))),
+    match policies.import_drafts(export.policies, apply_mode(&q)).await {
+        Ok(r) => {
+            st.sync_policies_to_redis().await;
+            Ok(Json(json!({ "ok": true, "result": r })))
+        }
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
 }
@@ -200,23 +249,34 @@ async fn apply_all_policies(
     State(st): State<Arc<AppState>>,
     Query(q): Query<ApplyQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let export = st
-        .mibs
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
+    let export = mibs
         .export_policies(None)
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
-    match st.policies.import_drafts(export.policies, apply_mode(&q)).await {
-        Ok(r) => Ok(Json(json!({ "ok": true, "result": r }))),
+    match policies.import_drafts(export.policies, apply_mode(&q)).await {
+        Ok(r) => {
+            st.sync_policies_to_redis().await;
+            Ok(Json(json!({ "ok": true, "result": r })))
+        }
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
 }
 
 async fn reload(State(st): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.mibs.reload().await {
+    let Some(mibs) = st.mibs.as_ref() else {
+        return Err(mib_unavailable());
+    };
+    match mibs.reload().await {
         Ok(()) => Ok(Json(json!({
             "ok": true,
-            "items": st.mibs.list().await,
-            "load_error": st.mibs.load_error().await,
+            "items": mibs.list().await,
+            "load_error": mibs.load_error().await,
         }))),
         Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
     }

@@ -1,35 +1,30 @@
 //! Eventide Trap service: UDP SNMP Trap → normalize → Kafka.
 
 mod config;
-mod db;
 mod http;
 mod kafka_out;
-mod mib_api;
-mod mib_store;
 mod normalize;
 mod parse;
-mod policy_api;
-mod policy_store;
-mod policy_xlsx;
-mod s3_store;
 mod stats;
 
 use crate::config::TrapConfig;
 use crate::http::AppState;
 use crate::kafka_out::KafkaOut;
-use crate::mib_store::MibStore;
 use crate::normalize::{to_ingress_alert_with_policy, to_kafka_payload_with_policy};
 use crate::parse::parse_udp_datagram;
-use crate::policy_store::PolicyStore;
-use crate::s3_store::S3Store;
 use crate::stats::{RecentBuffer, RecentItem, TrapStats};
 use anyhow::{Context, Result};
 use chrono::Utc;
+use eventide_trap_data::{
+    connect_mysql, ensure_trap_schema, MibStore, PolicyRedis, PolicyStore, S3Store,
+    POLICY_CHANGED_CHANNEL,
+};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -61,8 +56,8 @@ async fn main() -> Result<()> {
         );
     }
 
-    let pool = db::connect(&config.mysql_url).context("mysql")?;
-    db::ensure_trap_schema(&pool).context("trap schema")?;
+    let pool = connect_mysql(&config.mysql_url).context("mysql")?;
+    ensure_trap_schema(&pool).context("trap schema")?;
     tracing::info!("MySQL ready (trap_policies / trap_mibs)");
 
     let s3 = S3Store::connect(
@@ -104,18 +99,49 @@ async fn main() -> Result<()> {
     tracing::info!(
         backend = %policies.backend(),
         count = policies.list().await.len(),
-        "trap policies ready"
+        "trap policies ready (mysql)"
     );
+
+    let policy_redis = if config.redis_url.trim().is_empty() {
+        tracing::warn!("redis_url empty — policies load from MySQL only");
+        None
+    } else {
+        match PolicyRedis::connect(&config.redis_url) {
+            Ok(r) => {
+                tracing::info!(redis = %config.redis_url, "trap policy redis ready");
+                Some(Arc::new(r))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "trap policy redis unavailable; MySQL fallback");
+                None
+            }
+        }
+    };
+
+    if let Some(r) = policy_redis.as_ref() {
+        match policies.reload_prefer_redis(Some(r.as_ref())).await {
+            Ok(()) => tracing::info!(
+                count = policies.list().await.len(),
+                stamp = %policies.current_stamp().await,
+                "policies loaded (redis preferred)"
+            ),
+            Err(e) => tracing::warn!(error = %e, "initial redis/mysql policy load failed"),
+        }
+    }
 
     let reload_secs = config.policy_reload_secs.max(1);
     let pol_bg = policies.clone();
     let mib_bg = mibs.clone();
+    let redis_bg = policy_redis.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(reload_secs));
         loop {
             tick.tick().await;
-            match pol_bg.refresh_if_changed().await {
-                Ok(true) => tracing::info!("policies reloaded from MySQL"),
+            match pol_bg
+                .refresh_prefer_redis(redis_bg.as_deref())
+                .await
+            {
+                Ok(true) => tracing::info!("policies reloaded (redis/mysql)"),
                 Ok(false) => {}
                 Err(e) => tracing::warn!("policy refresh: {e:#}"),
             }
@@ -127,12 +153,17 @@ async fn main() -> Result<()> {
         }
     });
 
+    if let Some(r) = policy_redis.clone() {
+        spawn_policy_pubsub(r, policies.clone());
+    }
+
     let state = Arc::new(AppState {
         recent: RecentBuffer::new(config.recent_limit),
         stats: TrapStats::default(),
         kafka,
         mibs,
         policies,
+        policy_redis,
         config: config.clone(),
     });
 
@@ -148,29 +179,94 @@ async fn main() -> Result<()> {
     let app = http::router(state);
     tracing::info!("eventide-trap http://{http_addr}");
     tracing::info!("eventide-trap udp://{udp_addr}");
-    let listener = tokio::net::TcpListener::bind(http_addr).await?;
+    tracing::info!("MIB/policy CRUD is on eventide-server (/api/mibs, /api/policies)");
+
+    let listener = tokio::net::TcpListener::bind(http_addr)
+        .await
+        .with_context(|| format!("bind http {http_addr}"))?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Blocking Redis SUBSCRIBE → Notify → async reload.
+fn spawn_policy_pubsub(redis: Arc<PolicyRedis>, policies: Arc<PolicyStore>) {
+    let notify = Arc::new(Notify::new());
+    let notify_sub = notify.clone();
+    let client = redis.client().clone();
+    std::thread::Builder::new()
+        .name("trap-policy-pubsub".into())
+        .spawn(move || {
+            loop {
+                match client.get_connection() {
+                    Ok(mut conn) => {
+                        let mut pubsub = conn.as_pubsub();
+                        if let Err(e) = pubsub.subscribe(POLICY_CHANGED_CHANNEL) {
+                            tracing::warn!(error = %e, "policy pubsub subscribe failed; retry in 5s");
+                            std::thread::sleep(Duration::from_secs(5));
+                            continue;
+                        }
+                        tracing::info!(channel = POLICY_CHANGED_CHANNEL, "subscribed to policy changes");
+                        loop {
+                            match pubsub.get_message() {
+                                Ok(_msg) => notify_sub.notify_one(),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "policy pubsub read failed; reconnect");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "policy pubsub connect failed; retry in 5s");
+                        std::thread::sleep(Duration::from_secs(5));
+                    }
+                }
+            }
+        })
+        .expect("spawn policy pubsub thread");
+
+    let redis_async = redis;
+    tokio::spawn(async move {
+        loop {
+            notify.notified().await;
+            // Coalesce rapid CRUD bursts.
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(80)) => break,
+                }
+            }
+            match policies
+                .reload_prefer_redis(Some(redis_async.as_ref()))
+                .await
+            {
+                Ok(()) => {
+                    let count = policies.list().await.len();
+                    tracing::info!(count, "policies reloaded via redis pubsub");
+                }
+                Err(e) => tracing::warn!(error = %e, "pubsub policy reload failed"),
+            }
+        }
+    });
 }
 
 async fn run_udp(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
     let sock = tokio::net::UdpSocket::bind(addr)
         .await
         .with_context(|| format!("bind udp {addr}"))?;
-    tracing::info!("listening for SNMP traps on udp://{addr}");
+    tracing::info!("listening SNMP Trap on udp://{addr}");
     let mut buf = vec![0u8; 65535];
     loop {
         let (n, peer) = sock.recv_from(&mut buf).await?;
         state.stats.received.fetch_add(1, Ordering::Relaxed);
-        let data = &buf[..n];
-        match parse_udp_datagram(data, peer, &state.config.community) {
+        let datagram = &buf[..n];
+        match parse_udp_datagram(datagram, peer, &state.config.community) {
             Ok(trap) => {
                 state.stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
                 let policy = state.policies.match_trap(&trap).await;
-                let alert =
-                    to_ingress_alert_with_policy(&trap, &state.config, policy.as_ref());
-                let payload =
-                    to_kafka_payload_with_policy(&trap, &state.config, policy.as_ref());
+                let alert = to_ingress_alert_with_policy(&trap, &state.config, policy.as_ref());
+                let payload = to_kafka_payload_with_policy(&trap, &state.config, policy.as_ref());
                 let mut kafka_ok = false;
                 if let Some(k) = &state.kafka {
                     match k.publish(&trap.peer_ip, payload).await {
@@ -180,7 +276,7 @@ async fn run_udp(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
                         }
                         Err(e) => {
                             state.stats.kafka_err.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!(%peer, "kafka produce failed: {e:#}");
+                            tracing::warn!(%peer, "kafka publish: {e:#}");
                         }
                     }
                 }
@@ -188,22 +284,15 @@ async fn run_udp(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
                     .get("labels")
                     .and_then(|l| l.get("alertname"))
                     .and_then(|x| x.as_str())
-                    .unwrap_or(trap.alertname.as_str());
-                tracing::info!(
-                    %peer,
-                    oid = %trap.trap_oid,
-                    name = %alertname,
-                    policy = policy.as_ref().map(|p| p.name.as_str()).unwrap_or("-"),
-                    kafka = kafka_ok,
-                    "trap accepted"
-                );
+                    .unwrap_or(&trap.alertname)
+                    .to_string();
                 state
                     .recent
                     .push(RecentItem {
                         at: Utc::now().to_rfc3339(),
-                        peer: trap.peer_ip,
-                        trap_oid: trap.trap_oid,
-                        alertname: alertname.to_string(),
+                        peer: trap.peer_ip.clone(),
+                        trap_oid: trap.trap_oid.clone(),
+                        alertname,
                         kafka: kafka_ok,
                         alert,
                     })
@@ -211,7 +300,7 @@ async fn run_udp(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
             }
             Err(e) => {
                 state.stats.parse_err.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(%peer, "trap parse skip: {e}");
+                tracing::debug!(%peer, "snmp parse: {e}");
             }
         }
     }

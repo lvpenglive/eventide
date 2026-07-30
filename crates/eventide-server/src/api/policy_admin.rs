@@ -1,13 +1,13 @@
-//! Trap policy HTTP API.
+﻿//! Trap policy HTTP API on eventide-server.
 
-use crate::http::AppState;
-use crate::policy_store::{ImportMode, TrapPolicy};
+use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use eventide_trap_data::{ImportMode, TrapPolicy};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -29,20 +29,32 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
     (status, Json(json!({ "error": msg.into() })))
 }
 
-async fn list_policies(State(st): State<Arc<AppState>>) -> Json<Value> {
-    let items = st.policies.list().await;
-    Json(json!({
+fn policies_unavailable() -> (StatusCode, Json<Value>) {
+    err(StatusCode::SERVICE_UNAVAILABLE, "policy store unavailable")
+}
+
+async fn list_policies(
+    State(st): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
+    let items = policies.list().await;
+    Ok(Json(json!({
         "items": items,
-        "path": st.policies.backend(),
+        "path": policies.backend(),
         "count": items.len(),
-    }))
+    })))
 }
 
 async fn get_policy(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.policies.get(&id).await {
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
+    match policies.get(&id).await {
         Some(p) => Ok(Json(json!(p))),
         None => Err(err(StatusCode::NOT_FOUND, "policy not found")),
     }
@@ -52,9 +64,15 @@ async fn create_policy(
     State(st): State<Arc<AppState>>,
     Json(mut body): Json<TrapPolicy>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
     body.id.clear();
-    match st.policies.upsert(body).await {
-        Ok(p) => Ok(Json(json!({ "ok": true, "item": p }))),
+    match policies.upsert(body).await {
+        Ok(p) => {
+            st.sync_policies_to_redis().await;
+            Ok(Json(json!({ "ok": true, "item": p })))
+        }
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
 }
@@ -64,9 +82,15 @@ async fn update_policy(
     Path(id): Path<String>,
     Json(mut body): Json<TrapPolicy>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
     body.id = id;
-    match st.policies.upsert(body).await {
-        Ok(p) => Ok(Json(json!({ "ok": true, "item": p }))),
+    match policies.upsert(body).await {
+        Ok(p) => {
+            st.sync_policies_to_redis().await;
+            Ok(Json(json!({ "ok": true, "item": p })))
+        }
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
 }
@@ -75,18 +99,22 @@ async fn delete_policy(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match st.policies.delete(&id).await {
-        Ok(()) => Ok(Json(json!({ "ok": true }))),
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
+    match policies.delete(&id).await {
+        Ok(()) => {
+            st.sync_policies_to_redis().await;
+            Ok(Json(json!({ "ok": true })))
+        }
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct ImportQuery {
-    /// `merge` (default) | `skip` | `replace`
     #[serde(default)]
     mode: Option<String>,
-    /// Legacy: true → replace. Ignored when `mode` is set.
     #[serde(default)]
     replace: bool,
 }
@@ -107,33 +135,40 @@ async fn import_policies(
     Query(q): Query<ImportQuery>,
     body: Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
     if body.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "empty body"));
     }
     let mode = import_mode_from_query(q.mode.as_deref(), q.replace);
-    // Prefer xlsx; fall back to JSON for programmatic callers.
     let result = if looks_like_zip_xlsx(&body) {
-        st.policies.import_xlsx(&body, mode).await
+        policies.import_xlsx(&body, mode).await
     } else if body.first() == Some(&b'{') || body.first() == Some(&b'[') {
-        st.policies.import_json(&body, mode).await
+        policies.import_json(&body, mode).await
     } else {
-        st.policies.import_xlsx(&body, mode).await
+        policies.import_xlsx(&body, mode).await
     };
     match result {
-        Ok(r) => Ok(Json(json!({ "ok": true, "result": r }))),
+        Ok(r) => {
+            st.sync_policies_to_redis().await;
+            Ok(Json(json!({ "ok": true, "result": r })))
+        }
         Err(e) => Err(err(StatusCode::BAD_REQUEST, format!("{e:#}"))),
     }
 }
 
 fn looks_like_zip_xlsx(bytes: &[u8]) -> bool {
-    // ZIP local file header
     bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B
 }
 
 async fn export_policies(
     State(st): State<Arc<AppState>>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
-    match st.policies.export_xlsx().await {
+    let Some(policies) = st.policies.as_ref() else {
+        return Err(policies_unavailable());
+    };
+    match policies.export_xlsx().await {
         Ok(body) => Ok(xlsx_response("trap-policies-active.xlsx", body)),
         Err(e) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))),
     }

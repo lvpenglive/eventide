@@ -1025,47 +1025,59 @@ degrade_skip_notify = false
 └─────────────────────────────┘
 ```
 
-**原则：服务可拆，门户合一。** 浏览器只面对 Eventide；Trap HTTP API 经同域 `/trap-api/*` 反代（`[trap] api_url`）。
+**原则：服务可拆，门户合一。** 浏览器只面对 Eventide。  
+- **MIB / Trap 策略 CRUD**（上传、OID 树、xlsx 导入导出）在 **Eventide**（`/api/mibs`、`/api/policies`），需配置 `[trap]` 的 S3。  
+- Trap **运行态**（health / stats / recent / simulate）经同域 `/trap-api/*` 反代（`[trap] api_url`）。
 
 #### 当前已实现（骨架）
 
 | 能力 | 状态 |
 |------|------|
 | `eventide-trap`：UDP v1/v2c 解析 → Generic Ingress JSON → Kafka | ✅ |
-| HTTP：`/api/health` `/api/stats` `/api/recent` `/api/simulate` | ✅ |
-| Eventide `/trap-api` 反代 + 侧栏「SNMP Trap」状态/试推送页 | ✅ |
-| MIB 库 / Trap 策略（MySQL + RustFS）/ 多实例热加载 | ✅ |
+| Trap HTTP：`/api/health` `/api/stats` `/api/recent` `/api/simulate`（+ 可选 reload） | ✅ |
+| Eventide：`/api/mibs` `/api/policies` CRUD + OID 浏览；`/trap-api` 反代运行态 | ✅ |
+| MIB 正文 RustFS + 元数据/策略 MySQL；策略经 Redis 快照分发；Trap 多实例热加载 | ✅ |
 | SNMPv3 / UDP VIP HA | ⏳ |
 
 #### 本地联调
 
 ```bash
-# 1. Trap 服务（另开终端）—— 需能连 MySQL + RustFS
+# 1. Eventide（MIB/策略 CRUD 在此）—— MySQL + Redis；MIB 需 [trap] s3_*
+cargo run -p eventide-server -- eventide.toml
+
+# 2. Trap 服务（另开终端）—— 收 UDP + 热加载策略/MIB
 cargo run -p eventide-trap -- eventide-trap.toml
 
-# 2. Eventide：eventide.toml 增加
-# [trap]
+# eventide.toml [trap]
 # api_url = "http://127.0.0.1:8081"
-
-# 3. 控制台 → 接入配置 → SNMP Trap →「试推送」
-# 4. 在「告警接入」新建 Kafka Ingress：brokers + options.topic=eventide.snmptrap
-
-# MIB / 策略存储（eventide-trap.toml）
-# mysql_url = 与 Eventide 同库（表 trap_policies / trap_mibs）
 # s3_endpoint / s3_access_key / s3_secret_key / s3_bucket = RustFS
-# 首次启动若表空，会从本地 mib_dir / policies_path 一次性迁入
-# 多实例：共享同一 MySQL + bucket；policy_reload_secs 热加载内存
+# mib_cache_dir = "data/mib-cache"
+
+# eventide-trap.toml：mysql_url 与 Eventide 同库；同样配置 S3 供热加载 MIB
+# redis_url 与 Eventide 同 Redis（策略快照 + pub/sub；失败回退 MySQL）
+# policy_reload_secs 兜底轮询（Redis 优先，感知 Server 侧 CRUD）
+
+# 3. 控制台 → MIB 库 / Trap 策略（走 /api/...）
+# 4. 接入配置 → SNMP Trap →「试推送」（走 /trap-api/...）
+# 5. 「告警接入」新建 Kafka Ingress：brokers + options.topic=eventide.snmptrap
 ```
 
 无 Kafka 时可将 `eventide-trap.toml` 的 `kafka_brokers` 留空，用试推送勾选「仅预览 JSON」验证归一化字段。
+
+#### 策略分发（MySQL → Redis → Trap）
+
+1. **MySQL `trap_policies`**：唯一真相源；控制台 CRUD 写库。
+2. **Eventide** 启动及每次策略变更后：写入 Redis 键 `eventide:trap:policies:snapshot`，并向 `eventide:trap:policies:changed` **PUBLISH**。
+3. **Trap**：启动优先读 Redis 快照；订阅 channel 近实时重载；`policy_reload_secs` 轮询兜底；Redis 不可用时回退 MySQL。
 
 #### 职责划分
 
 | 能力 | 归属 | 说明 |
 |------|------|------|
-| MIB 正文（对象存储）+ 元数据（MySQL）+ OID 树 | **Trap 服务** | RustFS 存文件，本地 cache 供 mib-rs |
-| Trap 策略（MySQL）+ 内存匹配 | **Trap 服务** | 多实例共享库，定时 reload |
-| 监听 UDP、按策略解析、指纹、写入 Kafka | **Trap 服务** | UDP 扇入；多机可并行写同一 Topic |
+| MIB / 策略 **CRUD**、OID 树、xlsx 导入导出 | **Eventide** | JWT + IAM；写 MySQL + RustFS；策略同步 Redis |
+| MIB 正文（对象存储）+ 元数据（MySQL） | 共享存储 | Server 写；Trap 热加载读 |
+| Trap 策略匹配（内存） | **Trap 服务** | Redis 快照 + pub/sub；失败回退 MySQL |
+| 监听 UDP、解析、指纹、写入 Kafka | **Trap 服务** | UDP 扇入；多机可并行写同一 Topic |
 | Kafka Ingress 消费、入库、通知、静默 | **Eventide** | 复用现有能力 |
 | IP→机房/负责人等**运营台账丰富** | **Eventide** | 现有「告警丰富 / 台账」 |
 | Trap **协议侧**丰富（OID→告警名、severity、`${var}` 摘要） | **Trap 服务**（写 Kafka 前完成） | 与台账丰富分层 |
@@ -1082,7 +1094,7 @@ Trap 服务写出单条告警对象（可被 Generic / 自动识别），至少�
 
 1. [x] Trap 服务骨架：收 Trap（v1/v2c）→ 固定字段 JSON → 写 Kafka；门户试推送  
 2. [x] 统一门户：Eventide 侧栏入口 + `/trap-api` 反代（JWT 登录后访问；Trap 侧鉴权后续加强）  
-3. [x] MIB 上传/解析与 OID 树（控制台「MIB 库」）；从 NOTIFICATION-TYPE 导出 Trap 策略 JSON  
+3. [x] MIB / 策略 CRUD 在 Eventide（`/api/mibs`、`/api/policies`）；Trap 热加载；OID 树与 xlsx 导出  
 4. [x] Trap 策略 CRUD、摘要 `${变量}` 生效、Excel(xlsx) 导入导出  
 5. [ ] SNMPv3、UDP VIP 高可用、与台账丰富联调  
 6. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控  

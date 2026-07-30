@@ -1,4 +1,4 @@
-﻿listen = "0.0.0.0:8080"
+listen = "0.0.0.0:8080"
 mysql_url = "mysql://root:886363@120.26.105.115:3306/eventide"
 redis_url = "redis://123.207.158.181:6379/"
 static_dir = "static"
@@ -31,6 +31,12 @@ enabled = true
 leader_key = "eventide:cluster:leader"
 lease_seconds = 15
 
-# Trap 服务 HTTP（控制台 /trap-api 反代）。空 = 未启用。
+# Trap：运行态反代 + MIB/策略 CRUD（RustFS）
 [trap]
 api_url = "http://127.0.0.1:8081"
+s3_endpoint = "http://120.26.105.115:9000"
+s3_access_key = "admin"
+s3_secret_key = "admin123"
+s3_bucket = "eventide-mibs"
+s3_region = "us-east-1"
+mib_cache_dir = "data/mib-cache"

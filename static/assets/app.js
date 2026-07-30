@@ -1,4 +1,4 @@
-/* Eventide console SPA */
+﻿/* Eventide console SPA */
 (() => {
   const TOKEN_KEY = "eventide_token";
   const USER_KEY = "eventide_user";
@@ -1551,7 +1551,7 @@
           const buf = await file.arrayBuffer();
           const t = token();
           const res = await fetch(
-            `/trap-api/api/mibs?filename=${encodeURIComponent(file.name)}`,
+            `/api/mibs?filename=${encodeURIComponent(file.name)}`,
             {
               method: "POST",
               headers: {
@@ -1576,7 +1576,7 @@
       const loadChildren = async (moduleId, oid) => {
         const key = `${moduleId}|${oid || ""}`;
         const q = oid ? `?oid=${encodeURIComponent(oid)}` : "";
-        const data = await api(`/trap-api/api/mibs/${encodeURIComponent(moduleId)}/children${q}`);
+        const data = await api(`/api/mibs/${encodeURIComponent(moduleId)}/children${q}`);
         state.mibTree[key] = data.children || [];
         return state.mibTree[key];
       };
@@ -1639,7 +1639,7 @@
         let list = mibListCache;
         if (!reuse || !list) {
           try {
-            list = await api("/trap-api/api/mibs");
+            list = await api("/api/mibs");
             mibListCache = list;
           } catch (e) {
             root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
@@ -1679,7 +1679,7 @@
           if (state.mibFocusOid) {
             try {
               const nd = await api(
-                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/node?oid=${encodeURIComponent(
+                `/api/mibs/${encodeURIComponent(state.mibSel)}/node?oid=${encodeURIComponent(
                   state.mibFocusOid
                 )}`
               );
@@ -1713,7 +1713,7 @@
             let rows = cached;
             if (!rows) {
               const n = await api(
-                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/notifications`
+                `/api/mibs/${encodeURIComponent(state.mibSel)}/notifications`
               );
               rows = n.items || [];
               mibNotifCache[state.mibSel] = rows;
@@ -1873,7 +1873,7 @@
             ev.stopPropagation();
             if (!confirm(`删除模块 ${b.dataset.mibDel}？`)) return;
             try {
-              await api(`/trap-api/api/mibs/${encodeURIComponent(b.dataset.mibDel)}`, {
+              await api(`/api/mibs/${encodeURIComponent(b.dataset.mibDel)}`, {
                 method: "DELETE",
               });
               toast("已删除");
@@ -1911,7 +1911,7 @@
           expOne.onclick = async () => {
             try {
               await downloadPolicies(
-                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/export-policies`
+                `/api/mibs/${encodeURIComponent(state.mibSel)}/export-policies`
               );
               toast("已导出");
             } catch (e) {
@@ -1926,7 +1926,7 @@
               const mode = await askPolicyImportMode("从 MIB 导入到策略");
               if (mode === null) return;
               const r = await api(
-                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/apply-policies?mode=${mode}`,
+                `/api/mibs/${encodeURIComponent(state.mibSel)}/apply-policies?mode=${mode}`,
                 { method: "POST" }
               );
               toast(
@@ -1943,7 +1943,7 @@
 
       document.getElementById("btn-mib-reload").onclick = async () => {
         try {
-          await api("/trap-api/api/mibs/reload", { method: "POST" });
+          await api("/api/mibs/reload", { method: "POST" });
           state.mibTree = {};
           invalidateMibCache();
           toast("已重新加载");
@@ -1954,7 +1954,7 @@
       };
       document.getElementById("btn-mib-export-all").onclick = async () => {
         try {
-          await downloadPolicies("/trap-api/api/mibs/export-policies");
+          await downloadPolicies("/api/mibs/export-policies");
           toast("已导出全部策略");
         } catch (e) {
           toast(e.message, true);
@@ -2249,12 +2249,12 @@
           };
           try {
             if (body.id) {
-              await api(`/trap-api/api/policies/${encodeURIComponent(body.id)}`, {
+              await api(`/api/policies/${encodeURIComponent(body.id)}`, {
                 method: "PUT",
                 body: JSON.stringify(body),
               });
             } else {
-              await api("/trap-api/api/policies", {
+              await api("/api/policies", {
                 method: "POST",
                 body: JSON.stringify(body),
               });
@@ -2466,7 +2466,7 @@
           b.onclick = async () => {
             if (!confirm("删除该策略？")) return;
             try {
-              await api(`/trap-api/api/policies/${encodeURIComponent(b.dataset.polDel)}`, {
+              await api(`/api/policies/${encodeURIComponent(b.dataset.polDel)}`, {
                 method: "DELETE",
               });
               toast("已删除");
@@ -2480,7 +2480,7 @@
 
       const paint = async () => {
         try {
-          const data = await api("/trap-api/api/policies");
+          const data = await api("/api/policies");
           polCache = { items: data.items || [], path: data.path || "" };
           renderPolicies();
         } catch (e) {
@@ -2493,7 +2493,7 @@
       document.getElementById("btn-pol-refresh").onclick = () => paint();
       document.getElementById("btn-pol-export").onclick = async () => {
         try {
-          await downloadPolicies("/trap-api/api/policies/export");
+          await downloadPolicies("/api/policies/export");
           toast("已导出");
         } catch (e) {
           toast(e.message, true);
@@ -2515,7 +2515,7 @@
             const buf = await file.arrayBuffer();
             const t = token();
             const res = await fetch(
-              `/trap-api/api/policies/import?mode=${mode}`,
+              `/api/policies/import?mode=${mode}`,
               {
                 method: "POST",
                 headers: {
@@ -3157,11 +3157,11 @@
       const pid = labels.trap_policy_id;
       try {
         if (pid) {
-          const p = await api(`/trap-api/api/policies/${encodeURIComponent(pid)}`);
+          const p = await api(`/api/policies/${encodeURIComponent(pid)}`);
           objectOids = (p && p.object_oids) || null;
         }
         if (!objectOids || !Object.keys(objectOids).length) {
-          const data = await api("/trap-api/api/policies");
+          const data = await api("/api/policies");
           const list = (data && data.items) || data || [];
           const oid = it.trap_oid || labels.trap_oid || "";
           const hit = Array.isArray(list)

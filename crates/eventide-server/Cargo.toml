@@ -31,3 +31,4 @@ futures = { workspace = true }
 eventide-core = { workspace = true }
 eventide-notify = { workspace = true }
 eventide-sources = { workspace = true }
+eventide-trap-data = { workspace = true }

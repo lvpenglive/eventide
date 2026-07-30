@@ -6,6 +6,7 @@ members = [
     "crates/eventide-notify",
     "crates/eventide-server",
     "crates/eventide-trap",
+    "crates/eventide-trap-data",
 ]
 
 [workspace.package]
@@ -38,3 +39,4 @@ futures = "0.3"
 eventide-core = { path = "crates/eventide-core" }
 eventide-notify = { path = "crates/eventide-notify" }
 eventide-sources = { path = "crates/eventide-sources" }
+eventide-trap-data = { path = "crates/eventide-trap-data" }

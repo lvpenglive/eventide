@@ -2,7 +2,7 @@
 
 use crate::config::TrapConfig;
 use crate::parse::ParsedTrap;
-use crate::policy_store::{
+use eventide_trap_data::{
     build_fingerprint, build_template_vars, render_template, resolve_event_status,
     resolve_object_name, resolve_severity, TrapPolicy,
 };

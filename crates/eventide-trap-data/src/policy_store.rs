@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::mib_store::{PolicyExport, TrapPolicyDraft};
-use crate::parse::ParsedTrap;
+use crate::parsed::ParsedTrap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrapPolicy {
@@ -237,6 +237,61 @@ impl PolicyStore {
         }
         self.reload_from_db().await?;
         Ok(true)
+    }
+
+    pub async fn current_stamp(&self) -> String {
+        self.stamp.read().await.clone()
+    }
+
+    /// Replace in-memory policies (e.g. after loading a Redis snapshot).
+    pub async fn apply_snapshot(&self, policies: Vec<TrapPolicy>, stamp: String) {
+        let count = policies.len();
+        *self.inner.write().await = policies;
+        *self.stamp.write().await = stamp;
+        tracing::debug!(count, "applied policy snapshot to memory");
+    }
+
+    /// Prefer Redis snapshot; fall back to MySQL if missing/unavailable.
+    pub async fn refresh_prefer_redis(
+        &self,
+        redis: Option<&crate::policy_redis::PolicyRedis>,
+    ) -> Result<bool> {
+        if let Some(r) = redis {
+            match r.load_snapshot() {
+                Ok(Some(snap)) => {
+                    if snap.stamp == self.current_stamp().await {
+                        return Ok(false);
+                    }
+                    self.apply_snapshot(snap.policies, snap.stamp).await;
+                    return Ok(true);
+                }
+                Ok(None) => {
+                    tracing::debug!("no redis policy snapshot; falling back to mysql");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "redis policy load failed; falling back to mysql");
+                }
+            }
+        }
+        self.refresh_if_changed().await
+    }
+
+    /// Force reload: Redis snapshot first, else MySQL.
+    pub async fn reload_prefer_redis(
+        &self,
+        redis: Option<&crate::policy_redis::PolicyRedis>,
+    ) -> Result<()> {
+        if let Some(r) = redis {
+            match r.load_snapshot() {
+                Ok(Some(snap)) => {
+                    self.apply_snapshot(snap.policies, snap.stamp).await;
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "redis reload failed; using mysql"),
+            }
+        }
+        self.reload_from_db().await
     }
 
     async fn migrate_from_json(&self, path: &Path) -> Result<()> {

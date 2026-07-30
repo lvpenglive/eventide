@@ -16,7 +16,7 @@ recent_limit = 50
 # Shared Eventide MySQL (trap_policies + trap_mibs)
 mysql_url = "mysql://eventide:eventide@127.0.0.1:3306/eventide"
 
-# RustFS / S3 (MIB object bodies)
+# RustFS / S3 — Trap 热加载 MIB 正文（与 eventide.toml [trap] 同一 bucket）
 s3_endpoint = "http://127.0.0.1:9000"
 s3_access_key = "CHANGE_ME"
 s3_secret_key = "CHANGE_ME"
@@ -26,6 +26,11 @@ s3_region = "us-east-1"
 mib_cache_dir = "data/mib-cache"
 policy_reload_secs = 10
 
-# Legacy local paths — one-time migration sources when DB tables are empty
+# Same Redis as eventide-server — policy snapshot + pub/sub (preferred over MySQL poll)
+# Key: eventide:trap:policies:snapshot  Channel: eventide:trap:policies:changed
+redis_url = "redis://127.0.0.1:6379/"
+
+# Legacy local paths — one-time migration when DB tables are empty
+# (MIB/policy CRUD is on eventide-server; Trap only reloads)
 mib_dir = "data/mibs"
 policies_path = "data/trap-policies.json"

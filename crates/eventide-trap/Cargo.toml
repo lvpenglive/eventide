@@ -13,13 +13,9 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 chrono = { workspace = true }
-mib-rs = { version = "0.8", default-features = false }
-mysql = { workspace = true }
+eventide-trap-data = { workspace = true }
 reqwest = { workspace = true }
 rskafka = { workspace = true }
-rusty-s3 = "0.7"
-calamine = "0.26"
-rust_xlsxwriter = "0.79"
 serde = { workspace = true }
 serde_json = { workspace = true }
 snmp-parser = "0.11"
@@ -30,4 +26,3 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
-url = "2"

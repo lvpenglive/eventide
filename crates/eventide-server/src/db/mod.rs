@@ -23,6 +23,11 @@ impl Db {
         self.pool.get_conn().context("mysql get_conn")
     }
 
+    /// Clone of the underlying MySQL pool (for shared trap stores).
+    pub fn pool(&self) -> Pool {
+        self.pool.clone()
+    }
+
     pub fn migrate(&self) -> Result<()> {
         let mut conn = self.conn()?;
         // MySQL drivers often only run the first statement in a batch — execute one-by-one.
