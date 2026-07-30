@@ -196,13 +196,50 @@ impl Db {
     `value` MEDIUMTEXT NOT NULL,
     updated_at VARCHAR(64) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+            r#"CREATE TABLE IF NOT EXISTS trap_policies (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    trap_oid VARCHAR(512) NOT NULL,
+    match_mode VARCHAR(16) NOT NULL DEFAULT 'exact',
+    severity VARCHAR(32) NOT NULL,
+    enabled TINYINT NOT NULL DEFAULT 1,
+    summary_template MEDIUMTEXT NOT NULL,
+    description MEDIUMTEXT NOT NULL,
+    objects_json MEDIUMTEXT NOT NULL,
+    object_oids_json MEDIUMTEXT NOT NULL,
+    keywords_json MEDIUMTEXT NOT NULL,
+    module VARCHAR(255) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL DEFAULT '',
+    resolve_oid VARCHAR(512) NOT NULL DEFAULT '',
+    resolve_values_json MEDIUMTEXT NOT NULL,
+    fingerprint_oids_json MEDIUMTEXT NOT NULL,
+    severity_oid VARCHAR(512) NOT NULL DEFAULT '',
+    severity_map_json MEDIUMTEXT NOT NULL,
+    updated_at VARCHAR(64) NOT NULL,
+    KEY idx_trap_policies_oid (trap_oid(191)),
+    KEY idx_trap_policies_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+            r#"CREATE TABLE IF NOT EXISTS trap_mibs (
+    id VARCHAR(255) PRIMARY KEY,
+    filename VARCHAR(512) NOT NULL,
+    object_key VARCHAR(1024) NOT NULL,
+    size BIGINT NOT NULL DEFAULT 0,
+    uploaded_at VARCHAR(64) NOT NULL,
+    parse_ok TINYINT NOT NULL DEFAULT 0,
+    error MEDIUMTEXT NULL,
+    notification_count INT NOT NULL DEFAULT 0,
+    node_count INT NOT NULL DEFAULT 0,
+    module_oid VARCHAR(512) NULL,
+    updated_at VARCHAR(64) NOT NULL,
+    KEY idx_trap_mibs_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
         ];
         for sql in STMTS {
             conn.query_drop(*sql)
                 .with_context(|| format!("migrate: {sql}"))?;
         }
         conn.exec_drop(
-            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '13')
+            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '14')
                ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)"#,
             (),
         )?;

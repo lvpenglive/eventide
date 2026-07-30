@@ -174,7 +174,7 @@ mod tests {
             labels,
             annotations,
             value: Some(95.5),
-            severity: "critical",
+            severity: "disaster",
             status: "firing",
             fingerprint: "abc",
             rule_name: Some("HighCPU"),
@@ -193,7 +193,7 @@ mod tests {
         let c = ctx(&labels, &annotations);
         assert_eq!(
             render_template("host={{labels.instance}} sev={{severity}}", &c),
-            "host=db-1 sev=critical"
+            "host=db-1 sev=disaster"
         );
     }
 

@@ -30,6 +30,8 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
 - [12. 容量与边界](#12-容量与边界)
 - [13. 路线图](#13-路线图)
   - [13.1 抗告警风暴实现清单](#131-下一步优先抗告警风暴--开工清单)
+  - [13.2 更后可演进](#132-更后可演进)
+  - [13.3 SNMP Trap 接入](#133-snmp-trap-接入)
 - [14. 开发与构建](#14-开发与构建)
 
 ---
@@ -990,6 +992,106 @@ degrade_skip_notify = false
 - [ ] 告警历史仓库补强（Kafka 缓冲 → ClickHouse 分析；与热路径进一步分离）  
 - [ ] 更多日志后端（ES 等）  
 - [ ] Ingress 更多平台适配器（开箱预设）  
+- [x] **SNMP Trap 接入骨架**（独立 Trap 服务 → Kafka → Kafka Ingress；统一门户试推送）—— 详见 [§13.3](#133-snmp-trap-接入)  
+- [ ] SNMP Trap：SNMPv3 / UDP VIP HA
+- [x] SNMP Trap：策略 MySQL + MIB RustFS + 多实例热加载
+
+### 13.3 SNMP Trap 接入
+
+面向大量**主机硬件与网络设备**：设备向 **UDP**（生产 162 / 开发可用 1162）发 Trap，经独立服务解析后写入 Kafka，再由 Eventide **已有 Kafka Ingress** 消费，汇入同一套丰富 / 静默 / 通知流水线。
+
+#### 目标形态
+
+```
+主机 / 交换机 / 存储 / BMC …
+        │  SNMP Trap (UDP)
+        ▼
+┌─────────────────────────────┐
+│  eventide-trap（独立进程）    │
+│  · 收 Trap / 解析 v1·v2c     │
+│  · （后续）MIB · Trap 策略   │
+│  · OID→字段归一化 · 写 Kafka │
+└──────────────┬──────────────┘
+               │  告警 JSON（与 Ingress 对齐）
+               ▼
+         Kafka Topic（默认 eventide.snmptrap）
+               │
+               ▼
+┌─────────────────────────────┐
+│  Eventide（现有）             │
+│  · Kafka Ingress（仅 leader） │
+│  · 台账丰富 / 静默 / 通知     │
+│  · 控制台「SNMP Trap」门户    │
+└─────────────────────────────┘
+```
+
+**原则：服务可拆，门户合一。** 浏览器只面对 Eventide；Trap HTTP API 经同域 `/trap-api/*` 反代（`[trap] api_url`）。
+
+#### 当前已实现（骨架）
+
+| 能力 | 状态 |
+|------|------|
+| `eventide-trap`：UDP v1/v2c 解析 → Generic Ingress JSON → Kafka | ✅ |
+| HTTP：`/api/health` `/api/stats` `/api/recent` `/api/simulate` | ✅ |
+| Eventide `/trap-api` 反代 + 侧栏「SNMP Trap」状态/试推送页 | ✅ |
+| MIB 库 / Trap 策略（MySQL + RustFS）/ 多实例热加载 | ✅ |
+| SNMPv3 / UDP VIP HA | ⏳ |
+
+#### 本地联调
+
+```bash
+# 1. Trap 服务（另开终端）—— 需能连 MySQL + RustFS
+cargo run -p eventide-trap -- eventide-trap.toml
+
+# 2. Eventide：eventide.toml 增加
+# [trap]
+# api_url = "http://127.0.0.1:8081"
+
+# 3. 控制台 → 接入配置 → SNMP Trap →「试推送」
+# 4. 在「告警接入」新建 Kafka Ingress：brokers + options.topic=eventide.snmptrap
+
+# MIB / 策略存储（eventide-trap.toml）
+# mysql_url = 与 Eventide 同库（表 trap_policies / trap_mibs）
+# s3_endpoint / s3_access_key / s3_secret_key / s3_bucket = RustFS
+# 首次启动若表空，会从本地 mib_dir / policies_path 一次性迁入
+# 多实例：共享同一 MySQL + bucket；policy_reload_secs 热加载内存
+```
+
+无 Kafka 时可将 `eventide-trap.toml` 的 `kafka_brokers` 留空，用试推送勾选「仅预览 JSON」验证归一化字段。
+
+#### 职责划分
+
+| 能力 | 归属 | 说明 |
+|------|------|------|
+| MIB 正文（对象存储）+ 元数据（MySQL）+ OID 树 | **Trap 服务** | RustFS 存文件，本地 cache 供 mib-rs |
+| Trap 策略（MySQL）+ 内存匹配 | **Trap 服务** | 多实例共享库，定时 reload |
+| 监听 UDP、按策略解析、指纹、写入 Kafka | **Trap 服务** | UDP 扇入；多机可并行写同一 Topic |
+| Kafka Ingress 消费、入库、通知、静默 | **Eventide** | 复用现有能力 |
+| IP→机房/负责人等**运营台账丰富** | **Eventide** | 现有「告警丰富 / 台账」 |
+| Trap **协议侧**丰富（OID→告警名、severity、`${var}` 摘要） | **Trap 服务**（写 Kafka 前完成） | 与台账丰富分层 |
+
+#### Kafka 告警约定
+
+Trap 服务写出单条告警对象（可被 Generic / 自动识别），至少包含：
+
+- `status` / `severity` / `fingerprint`
+- `labels`：`alertname`、`ip`、`trap_oid`、`source=ingress:snmptrap` 等
+- `annotations.summary`
+
+#### 推荐实现顺序
+
+1. [x] Trap 服务骨架：收 Trap（v1/v2c）→ 固定字段 JSON → 写 Kafka；门户试推送  
+2. [x] 统一门户：Eventide 侧栏入口 + `/trap-api` 反代（JWT 登录后访问；Trap 侧鉴权后续加强）  
+3. [x] MIB 上传/解析与 OID 树（控制台「MIB 库」）；从 NOTIFICATION-TYPE 导出 Trap 策略 JSON  
+4. [x] Trap 策略 CRUD、摘要 `${变量}` 生效、Excel(xlsx) 导入导出  
+5. [ ] SNMPv3、UDP VIP 高可用、与台账丰富联调  
+6. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控  
+
+#### 明确不做（本阶段）
+
+- Eventide 主进程内嵌监听 **162**
+- 在 Eventide 内维护完整厂商 MIB 与 OID 策略编辑
+- 用 Eventide「告警丰富」替代 Trap 策略摘要
 
 ---
 ## 14. 开发与构建
@@ -1001,8 +1103,12 @@ cargo test --workspace
 # 仅编译服务
 cargo build -p eventide-server --release
 
+# Trap 服务
+cargo build -p eventide-trap --release
+
 # 运行
 ./target/release/eventide eventide.toml
+./target/release/eventide-trap eventide-trap.toml
 ```
 
 日志级别：
@@ -1032,6 +1138,9 @@ cargo run -p eventide-server -- eventide.toml
 | Lookup / 台账 | 键值对照表，供丰富规则查表 |
 | field mapping | 接入侧把任意 JSON 映射为统一告警字段 |
 | storm / 告警风暴 | 短时间大量相似告警涌入；靠节流、聚合、削峰消化 |
+| SNMP Trap | 设备主动推送的 SNMP 告警（常 UDP/162）；由独立 `eventide-trap` 解析后进 Kafka |
+| MIB | SNMP 管理信息库；描述 OID 含义，供 Trap 策略与解析使用 |
+| Trap 策略 | OID→级别/摘要/关键字等规则，决定 Trap 如何归一成告警 |
 
 ---
 

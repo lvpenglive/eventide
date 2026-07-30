@@ -7,6 +7,23 @@
   const ALERT_VIEW_KEY = "eventide_alert_view"; // cards | table
   const THEME_KEY = "eventide_theme"; // light | dark | system
 
+  // Zabbix-aligned severities (0–5)
+  const SEVERITIES = [
+    ["not_classified", "0 Not classified"],
+    ["information", "1 Information"],
+    ["warning", "2 Warning"],
+    ["average", "3 Average"],
+    ["high", "4 High"],
+    ["disaster", "5 Disaster"],
+  ];
+  function severityOptions(selected, fallback = "warning") {
+    const cur = selected || fallback;
+    return SEVERITIES.map(
+      ([v, label]) =>
+        `<option value="${v}" ${cur === v ? "selected" : ""}>${label}</option>`
+    ).join("");
+  }
+
   const PAGE_GROUP = {
     overview: null,
     alerts: "ops",
@@ -14,6 +31,9 @@
     datasources: "config",
     rules: "config",
     ingress: "config",
+    trap: "config",
+    mib: "config",
+    policies: "config",
     channels: "notify",
     notifies: "notify",
     enrich: "notify",
@@ -30,6 +50,9 @@
     datasources: "datasources:read",
     rules: "rules:read",
     ingress: "ingress:read",
+    trap: "trap:read",
+    mib: "trap:read",
+    policies: "trap:read",
     channels: "channels:read",
     notifies: "channels:read",
     enrich: "enrich:read",
@@ -46,6 +69,9 @@
     "datasources",
     "rules",
     "ingress",
+    "trap",
+    "mib",
+    "policies",
     "channels",
     "notifies",
     "enrich",
@@ -68,6 +94,9 @@
     channels: ["通知渠道", "Webhook · 自定义 HTTP · 钉钉 · 企微 · 飞书 · Slack · TG"],
     notifies: ["通知日志", "发送记录 · 可查正文"],
     ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
+    trap: ["SNMP Trap", "Trap 服务状态 · 试推送 · 对接 Kafka Ingress"],
+    mib: ["MIB 库", "上传 MIB · OID 树浏览 · 导出 Trap 策略"],
+    policies: ["Trap 策略", "导入 MIB 导出 · 匹配 OID · 摘要模板生效"],
     alerts: ["告警事件", "按状态浏览 · 点开看详情"],
     enrich: ["告警丰富", "台账补字段 · 写描述 / IP / 级别"],
     silences: ["静默策略", "按规则或标签临时抑制通知"],
@@ -423,6 +452,29 @@
     modal.classList.remove("open");
     modalBody.classList.remove("wide", "xl");
     modalBody.innerHTML = "";
+  }
+  /** @returns {Promise<null|'merge'|'skip'>} */
+  function askPolicyImportMode(title = "导入策略") {
+    return new Promise((resolve) => {
+      openModal(`
+        <div class="modal-head"><h3>${esc(title)}</h3>
+          <p class="desc">「合并导入」：同 OID 更新、新 OID 追加。<br/>
+          「忽略重复」：已有同 OID 的跳过，只追加新的。</p>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="ghost" id="imp-cancel">取消</button>
+          <button type="button" class="ghost" id="imp-skip">忽略重复</button>
+          <button type="button" class="primary" id="imp-merge">合并导入</button>
+        </div>
+      `);
+      const done = (v) => {
+        closeModal();
+        resolve(v);
+      };
+      document.getElementById("imp-cancel").onclick = () => done(null);
+      document.getElementById("imp-skip").onclick = () => done("skip");
+      document.getElementById("imp-merge").onclick = () => done("merge");
+    });
   }
   modal.addEventListener("click", (e) => {
     if (e.target === modal) closeModal();
@@ -999,10 +1051,8 @@
               </div>
               <input id="alert-q" placeholder="搜索名称、描述…" value="${esc(q)}" />
               <select id="alert-sev">
-                <option value="">级别</option>
-                <option value="critical" ${severity === "critical" ? "selected" : ""}>critical</option>
-                <option value="warning" ${severity === "warning" ? "selected" : ""}>warning</option>
-                <option value="info" ${severity === "info" ? "selected" : ""}>info</option>
+                <option value="" ${!severity ? "selected" : ""}>全部级别</option>
+                ${severityOptions(severity, "")}
               </select>
               <select id="alert-source">
                 <option value="">来源</option>
@@ -1302,6 +1352,1204 @@
           renderPage();
         };
       });
+    },
+
+    async trap(root) {
+      setActions(`<button class="ghost" id="btn-trap-refresh">刷新</button>`);
+      const canWrite = can("trap:write");
+      const paint = async () => {
+        let health = null;
+        let stats = null;
+        let recent = { items: [] };
+        let err = null;
+        try {
+          health = await api("/trap-api/api/health");
+          stats = await api("/trap-api/api/stats");
+          recent = await api("/trap-api/api/recent");
+        } catch (e) {
+          err = e.message || String(e);
+        }
+
+        if (err) {
+          root.innerHTML = `
+            <div class="panel" style="max-width:720px">
+              <h3 style="margin:0 0 0.75rem;font-size:1rem">Trap 服务未连通</h3>
+              <p class="hint">${esc(err)}</p>
+              <p class="hint" style="margin-top:12px">
+                1. 启动 Trap：<code>cargo run -p eventide-trap -- eventide-trap.toml</code><br/>
+                2. 在 <code>eventide.toml</code> 配置 <code>[trap] api_url = "http://127.0.0.1:8081"</code><br/>
+                3. Eventide 侧配置 Kafka Ingress，Topic 与 Trap 写出一致（默认 <code>eventide.snmptrap</code>）
+              </p>
+            </div>`;
+          return;
+        }
+
+        const items = recent.items || [];
+        root.innerHTML = `
+          <div class="panel" style="max-width:900px;margin-bottom:16px">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">服务状态</h3>
+            <p class="hint" style="margin:0 0 12px">
+              <span class="badge on">在线</span>
+              UDP <code>${esc(health.listen_udp || "—")}</code>
+              · Kafka ${
+                health.kafka_enabled
+                  ? `<span class="badge on">已启用</span> <code>${esc(health.kafka_topic || "")}</code>`
+                  : `<span class="badge off">未配置 brokers</span>`
+              }
+            </p>
+            <div class="stat-row" style="display:flex;flex-wrap:wrap;gap:12px;font-size:0.9rem">
+              <span>接收 ${esc(stats.received ?? 0)}</span>
+              <span>解析成功 ${esc(stats.parsed_ok ?? 0)}</span>
+              <span>解析失败 ${esc(stats.parse_err ?? 0)}</span>
+              <span>Kafka 成功 ${esc(stats.kafka_ok ?? 0)}</span>
+              <span>Kafka 失败 ${esc(stats.kafka_err ?? 0)}</span>
+              <span>试推送 ${esc(stats.simulated ?? 0)}</span>
+            </div>
+          </div>
+          <div class="panel" style="max-width:900px;margin-bottom:16px">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">试推送（模拟 Trap）</h3>
+            <p class="hint" style="margin:0 0 12px">写出与 Kafka Ingress Generic 对齐的 JSON，用于联调（不依赖真实设备）。</p>
+            <div class="field"><label>设备 IP</label>
+              <input id="trap-sim-ip" type="text" value="10.0.0.1" ${canWrite ? "" : "disabled"} />
+            </div>
+            <div class="field"><label>Trap OID</label>
+              <input id="trap-sim-oid" type="text" value="1.3.6.1.6.3.1.1.5.3" ${canWrite ? "" : "disabled"} />
+            </div>
+            <div class="field"><label>告警名（可选）</label>
+              <input id="trap-sim-name" type="text" placeholder="linkDown" ${canWrite ? "" : "disabled"} />
+            </div>
+            <div class="field"><label>级别</label>
+              <select id="trap-sim-sev" ${canWrite ? "" : "disabled"}>
+                ${severityOptions("warning")}
+              </select>
+            </div>
+            <label class="check-row" style="margin:8px 0 14px">
+              <input type="checkbox" id="trap-sim-dry" ${canWrite ? "" : "disabled"} />
+              <span>仅预览 JSON（不写 Kafka）</span>
+            </label>
+            ${
+              canWrite
+                ? `<button class="primary" id="btn-trap-sim">试推送</button>`
+                : `<p class="hint">需要 <code>trap:write</code> 才能试推送。</p>`
+            }
+            <pre id="trap-sim-out" class="mono" style="margin-top:12px;white-space:pre-wrap;font-size:0.8rem;max-height:240px;overflow:auto"></pre>
+          </div>
+          <div class="panel" style="max-width:900px">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">最近事件</h3>
+            <p class="hint" style="margin:0 0 12px">点击「详情」查看完整 OID / 变量名 / Varbind。</p>
+            ${
+              items.length
+                ? `<table class="data"><thead><tr><th>时间</th><th>IP</th><th>OID</th><th>名称</th><th>Kafka</th><th></th></tr></thead>
+                  <tbody>${items
+                    .map(
+                      (it, i) => `<tr>
+                    <td>${esc(fmtTime(it.at))}</td>
+                    <td class="mono">${esc(it.peer)}</td>
+                    <td class="mono" title="${esc(it.trap_oid)}">${esc(
+                        it.trap_oid && it.trap_oid.length > 36
+                          ? it.trap_oid.slice(0, 36) + "…"
+                          : it.trap_oid
+                      )}</td>
+                    <td>${esc(it.alertname)}</td>
+                    <td>${it.kafka ? "✓" : "—"}</td>
+                    <td class="actions"><button type="button" data-trap-detail="${i}">详情</button></td>
+                  </tr>`
+                    )
+                    .join("")}</tbody></table>`
+                : `<div class="empty">尚无 Trap / 试推送记录。</div>`
+            }
+          </div>`;
+
+        root.querySelectorAll("[data-trap-detail]").forEach((b) => {
+          b.onclick = () => showTrapRecentDetail(items[Number(b.dataset.trapDetail)]);
+        });
+
+        const btn = document.getElementById("btn-trap-sim");
+        if (btn) {
+          btn.onclick = async () => {
+            try {
+              const body = {
+                ip: document.getElementById("trap-sim-ip").value.trim(),
+                trap_oid: document.getElementById("trap-sim-oid").value.trim(),
+                alertname: document.getElementById("trap-sim-name").value.trim() || null,
+                severity: document.getElementById("trap-sim-sev").value,
+                dry_run: document.getElementById("trap-sim-dry").checked,
+              };
+              const r = await api("/trap-api/api/simulate", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+              document.getElementById("trap-sim-out").textContent = JSON.stringify(
+                r.alert || r,
+                null,
+                2
+              );
+              toast(r.kafka ? "已写入 Kafka" : "已生成预览");
+              await paint();
+            } catch (e) {
+              toast(e.message || String(e), true);
+            }
+          };
+        }
+      };
+      document.getElementById("btn-trap-refresh").onclick = () => paint();
+      await paint();
+    },
+
+    async mib(root) {
+      const canWrite = can("trap:write");
+      setActions(`
+        <button class="ghost" id="btn-mib-reload">重新加载</button>
+        <button class="ghost" id="btn-mib-export-all">导出全部策略</button>
+        ${
+          canWrite
+            ? `<button class="primary" id="btn-mib-upload">上传 MIB</button>
+               <input type="file" id="mib-file" accept=".mib,.txt,.my,.smi" hidden multiple />`
+            : ""
+        }
+      `);
+
+      state.mibSel = state.mibSel || null;
+      state.mibTree = state.mibTree || {};
+      state.mibExpanded = state.mibExpanded || {};
+      state.mibQ = state.mibQ || "";
+      state.mibTrapQ = state.mibTrapQ || "";
+      let mibListCache = null;
+      let mibNotifCache = {};
+
+      const invalidateMibCache = () => {
+        mibListCache = null;
+        mibNotifCache = {};
+      };
+
+      const downloadPolicies = async (path) => {
+        const t = token();
+        const res = await fetch(path, {
+          headers: t ? { Authorization: `Bearer ${t}` } : {},
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          let msg = text;
+          try {
+            msg = JSON.parse(text).error || text;
+          } catch (_) {}
+          throw new Error(msg || res.statusText);
+        }
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = /filename="?([^"]+)"?/.exec(cd);
+        const name = (m && m[1]) || "trap-policies.json";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+
+      const uploadFiles = async (files) => {
+        for (const file of files) {
+          const buf = await file.arrayBuffer();
+          const t = token();
+          const res = await fetch(
+            `/trap-api/api/mibs?filename=${encodeURIComponent(file.name)}`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/octet-stream",
+                ...(t ? { Authorization: `Bearer ${t}` } : {}),
+              },
+              body: buf,
+            }
+          );
+          const text = await res.text();
+          let data = null;
+          try {
+            data = text ? JSON.parse(text) : null;
+          } catch {
+            data = { error: text };
+          }
+          if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
+          toast(`已上传 ${data.item?.module_name || file.name}`);
+        }
+      };
+
+      const loadChildren = async (moduleId, oid) => {
+        const key = `${moduleId}|${oid || ""}`;
+        const q = oid ? `?oid=${encodeURIComponent(oid)}` : "";
+        const data = await api(`/trap-api/api/mibs/${encodeURIComponent(moduleId)}/children${q}`);
+        state.mibTree[key] = data.children || [];
+        return state.mibTree[key];
+      };
+
+      const renderTreeNodes = (moduleId, parentOid, depth) => {
+        const key = `${moduleId}|${parentOid || ""}`;
+        const nodes = state.mibTree[key] || [];
+        return nodes
+          .map((n) => {
+            const expKey = `${moduleId}|${n.oid}`;
+            const expanded = !!state.mibExpanded[expKey];
+            const kids = expanded ? renderTreeNodes(moduleId, n.oid, depth + 1) : "";
+            const caret = n.has_children ? (expanded ? "▾" : "▸") : "·";
+            return `<div class="mib-node" style="padding-left:${depth * 14}px">
+              <button type="button" class="mib-node-btn ${
+                state.mibFocusOid === n.oid ? "active" : ""
+              }" data-mib-oid="${esc(n.oid)}" data-mib-expand="${n.has_children ? "1" : "0"}">
+                <span class="mib-caret">${caret}</span>
+                <span class="mib-name">${esc(n.name)}${
+                  n.is_notification ? ' <span class="badge on">Trap</span>' : ""
+                }</span>
+                <span class="mib-oid mono">${esc(n.oid)}</span>
+              </button>
+              ${kids}
+            </div>`;
+          })
+          .join("");
+      };
+
+      const filterMibModules = (items, qRaw) => {
+        const q = String(qRaw || "")
+          .trim()
+          .toLowerCase();
+        if (!q) return items;
+        return items.filter((it) => {
+          const blob = [it.module_name, it.id, it.filename, it.module_oid, it.error]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          return blob.includes(q);
+        });
+      };
+
+      const filterTrapRows = (rows, qRaw) => {
+        const q = String(qRaw || "")
+          .trim()
+          .toLowerCase();
+        if (!q) return rows;
+        return rows.filter((r) => {
+          const blob = [r.name, r.trap_oid, r.severity, (r.objects || []).join(" "), r.module]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+          return blob.includes(q);
+        });
+      };
+
+      const paint = async (opts = {}) => {
+        const reuse = !!opts.reuse;
+        let list = mibListCache;
+        if (!reuse || !list) {
+          try {
+            list = await api("/trap-api/api/mibs");
+            mibListCache = list;
+          } catch (e) {
+            root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
+              e.message
+            )}</p></div>`;
+            return;
+          }
+        }
+        const items = list.items || [];
+        const filteredMods = filterMibModules(items, state.mibQ);
+        if (!state.mibSel && items.length) state.mibSel = items[0].id;
+        if (state.mibSel && !items.find((x) => x.id === state.mibSel)) {
+          state.mibSel = items[0]?.id || null;
+          state.mibTree = {};
+          state.mibExpanded = {};
+        }
+
+        const focusId = document.activeElement?.id;
+        const focusPos =
+          focusId === "mib-q" || focusId === "mib-trap-q"
+            ? document.activeElement.selectionStart
+            : null;
+
+        let detailHtml = `<div class="empty">选择左侧模块后浏览 OID 树</div>`;
+        let notifHtml = "";
+        if (state.mibSel) {
+          const rootKey = `${state.mibSel}|`;
+          if (!state.mibTree[rootKey]) {
+            try {
+              await loadChildren(state.mibSel, "");
+            } catch (e) {
+              detailHtml = `<div class="empty">${esc(e.message)}</div>`;
+            }
+          }
+          const treeHtml = renderTreeNodes(state.mibSel, "", 0);
+          let nodeInfo = `<p class="hint">点击节点查看详情；标有 Trap 的为 NOTIFICATION / TRAP-TYPE。</p>`;
+          if (state.mibFocusOid) {
+            try {
+              const nd = await api(
+                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/node?oid=${encodeURIComponent(
+                  state.mibFocusOid
+                )}`
+              );
+              nodeInfo = `
+                <div class="field"><label>名称</label><div><strong>${esc(nd.name)}</strong>
+                  ${nd.is_notification ? '<span class="badge on">Trap</span>' : ""}</div></div>
+                <div class="field"><label>OID</label><div class="mono">${esc(nd.oid)}</div></div>
+                <div class="field"><label>类型</label><div>${esc(nd.kind)} · ${esc(nd.status)}</div></div>
+                <div class="field"><label>描述</label><div class="summary-box">${esc(
+                  nd.description || "—"
+                )}</div></div>
+                ${
+                  nd.objects && nd.objects.length
+                    ? `<div class="field"><label>OBJECTS</label><div class="mono">${esc(
+                        nd.objects.join(", ")
+                      )}</div></div>`
+                    : ""
+                }`;
+            } catch (e) {
+              nodeInfo = `<p class="hint">${esc(e.message)}</p>`;
+            }
+          }
+          detailHtml = `
+            <div class="mib-browser">
+              <div class="mib-tree">${treeHtml || `<div class="empty">无 OID 节点</div>`}</div>
+              <div class="mib-detail">${nodeInfo}</div>
+            </div>`;
+
+          try {
+            const cached = mibNotifCache[state.mibSel];
+            let rows = cached;
+            if (!rows) {
+              const n = await api(
+                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/notifications`
+              );
+              rows = n.items || [];
+              mibNotifCache[state.mibSel] = rows;
+            }
+            const shown = filterTrapRows(rows, state.mibTrapQ);
+            notifHtml = `
+              <div class="panel" style="margin-top:16px">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
+                  <h3 style="margin:0;font-size:1rem">可导出的 Trap（${
+                    state.mibTrapQ.trim()
+                      ? `${shown.length} / ${rows.length}`
+                      : rows.length
+                  }）</h3>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button type="button" class="ghost" id="btn-mib-export-one">下载 Excel</button>
+                    ${
+                      canWrite && rows.length
+                        ? `<button type="button" class="primary" id="btn-mib-import-pol">导入到策略</button>`
+                        : ""
+                    }
+                  </div>
+                </div>
+                ${
+                  rows.length
+                    ? `<div class="alert-filters" style="margin-bottom:10px">
+                        <input id="mib-trap-q" placeholder="搜索 Trap 名称、OID、OBJECTS…" value="${esc(
+                          state.mibTrapQ || ""
+                        )}" />
+                      </div>
+                      ${
+                        shown.length
+                          ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
+                        <th>名称</th><th>OID</th><th>级别</th><th>OBJECTS</th></tr></thead>
+                      <tbody>${shown
+                        .map((r) => {
+                          const objs = (r.objects || []).join(", ");
+                          return `<tr>
+                          <td>${esc(r.name)}</td>
+                          <td class="mono">${esc(r.trap_oid)}</td>
+                          <td>${esc(r.severity)}</td>
+                          <td class="mono"><span class="mib-objects" title="${esc(
+                            objs
+                          )}">${esc(objs || "—")}</span></td>
+                        </tr>`;
+                        })
+                        .join("")}</tbody></table></div>`
+                          : `<div class="empty">没有符合筛选条件的 Trap。</div>`
+                      }`
+                    : `<div class="empty">该 MIB 未定义 NOTIFICATION-TYPE / TRAP-TYPE。</div>`
+                }
+              </div>`;
+          } catch (e) {
+            notifHtml = `<div class="panel" style="margin-top:16px"><p class="hint">${esc(
+              e.message
+            )}</p></div>`;
+          }
+        }
+
+        root.innerHTML = `
+          ${
+            list.load_error
+              ? `<div class="panel" style="margin-bottom:12px"><p class="hint">解析警告：${esc(
+                  list.load_error
+                )}</p></div>`
+              : ""
+          }
+          <div class="mib-layout">
+            <div class="panel mib-side">
+              <h3 style="margin:0 0 8px;font-size:1rem">已上传模块</h3>
+              <p class="hint" style="margin:0 0 10px">目录 <code>${esc(list.mib_dir || "")}</code>${
+                list.backend ? ` · <code>${esc(list.backend)}</code>` : ""
+              }
+                · 显示 ${esc(filteredMods.length)} / ${esc(items.length)}</p>
+              ${
+                items.length
+                  ? `<div class="alert-filters" style="margin-bottom:10px">
+                      <input id="mib-q" placeholder="搜索模块名、文件名、OID…" value="${esc(
+                        state.mibQ || ""
+                      )}" />
+                    </div>
+                    ${
+                      filteredMods.length
+                        ? `<ul class="mib-mod-list">${filteredMods
+                            .map(
+                              (it) => `<li>
+                      <div class="mib-mod ${
+                        state.mibSel === it.id ? "active" : ""
+                      }" role="button" tabindex="0" data-mib-mod="${esc(it.id)}">
+                        <span class="mib-mod-title">${esc(it.module_name)}</span>
+                        <span class="mib-mod-meta">${it.parse_ok ? "已解析" : "解析失败"} · Trap ${esc(
+                          it.notification_count
+                        )} · 节点 ${esc(it.node_count)}</span>
+                      </div>
+                      ${
+                        canWrite
+                          ? `<button type="button" class="danger ghost mib-del" data-mib-del="${esc(
+                              it.id
+                            )}" title="删除">×</button>`
+                          : ""
+                      }
+                    </li>`
+                            )
+                            .join("")}</ul>`
+                        : `<div class="empty">没有符合筛选条件的模块。</div>`
+                    }`
+                  : `<div class="empty">尚未上传 MIB。可先用仓库 <code>crates/eventide-trap/fixtures/EXAMPLE-FULL-MIB.txt</code> 试传。</div>`
+              }
+            </div>
+            <div class="mib-main">
+              <div class="panel">${detailHtml}</div>
+              ${notifHtml}
+            </div>
+          </div>`;
+
+        const bindSearch = (id, key) => {
+          const el = root.querySelector(`#${id}`);
+          if (!el) return;
+          let t = null;
+          el.oninput = () => {
+            clearTimeout(t);
+            t = setTimeout(() => {
+              state[key] = el.value || "";
+              paint({ reuse: true });
+            }, 200);
+          };
+          if (focusId === id) {
+            el.focus();
+            if (focusPos != null) {
+              try {
+                el.setSelectionRange(focusPos, focusPos);
+              } catch (_) {}
+            }
+          }
+        };
+        bindSearch("mib-q", "mibQ");
+        bindSearch("mib-trap-q", "mibTrapQ");
+
+        root.querySelectorAll("[data-mib-mod]").forEach((b) => {
+          const select = async () => {
+            state.mibSel = b.dataset.mibMod;
+            state.mibFocusOid = null;
+            state.mibTree = {};
+            state.mibExpanded = {};
+            state.mibTrapQ = "";
+            await paint({ reuse: true });
+          };
+          b.onclick = select;
+          b.onkeydown = (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              select();
+            }
+          };
+        });
+        root.querySelectorAll("[data-mib-del]").forEach((b) => {
+          b.onclick = async (ev) => {
+            ev.stopPropagation();
+            if (!confirm(`删除模块 ${b.dataset.mibDel}？`)) return;
+            try {
+              await api(`/trap-api/api/mibs/${encodeURIComponent(b.dataset.mibDel)}`, {
+                method: "DELETE",
+              });
+              toast("已删除");
+              state.mibSel = null;
+              invalidateMibCache();
+              await paint();
+            } catch (e) {
+              toast(e.message, true);
+            }
+          };
+        });
+        root.querySelectorAll("[data-mib-oid]").forEach((b) => {
+          b.onclick = async () => {
+            const oid = b.dataset.mibOid;
+            const canExp = b.dataset.mibExpand === "1";
+            state.mibFocusOid = oid;
+            if (canExp && state.mibSel) {
+              const expKey = `${state.mibSel}|${oid}`;
+              if (!state.mibExpanded[expKey]) {
+                state.mibExpanded[expKey] = true;
+                try {
+                  await loadChildren(state.mibSel, oid);
+                } catch (e) {
+                  toast(e.message, true);
+                }
+              } else {
+                state.mibExpanded[expKey] = false;
+              }
+            }
+            await paint({ reuse: true });
+          };
+        });
+        const expOne = document.getElementById("btn-mib-export-one");
+        if (expOne && state.mibSel) {
+          expOne.onclick = async () => {
+            try {
+              await downloadPolicies(
+                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/export-policies`
+              );
+              toast("已导出");
+            } catch (e) {
+              toast(e.message, true);
+            }
+          };
+        }
+        const impPol = document.getElementById("btn-mib-import-pol");
+        if (impPol && state.mibSel) {
+          impPol.onclick = async () => {
+            try {
+              const mode = await askPolicyImportMode("从 MIB 导入到策略");
+              if (mode === null) return;
+              const r = await api(
+                `/trap-api/api/mibs/${encodeURIComponent(state.mibSel)}/apply-policies?mode=${mode}`,
+                { method: "POST" }
+              );
+              toast(
+                `${mode === "skip" ? "已忽略重复" : "已合并"}：新增 ${
+                  r.result?.created ?? 0
+                }，更新 ${r.result?.updated ?? 0}，跳过 ${r.result?.skipped ?? 0}`
+              );
+            } catch (e) {
+              toast(e.message, true);
+            }
+          };
+        }
+      };
+
+      document.getElementById("btn-mib-reload").onclick = async () => {
+        try {
+          await api("/trap-api/api/mibs/reload", { method: "POST" });
+          state.mibTree = {};
+          invalidateMibCache();
+          toast("已重新加载");
+          await paint();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+      document.getElementById("btn-mib-export-all").onclick = async () => {
+        try {
+          await downloadPolicies("/trap-api/api/mibs/export-policies");
+          toast("已导出全部策略");
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+      const fileInput = document.getElementById("mib-file");
+      const uploadBtn = document.getElementById("btn-mib-upload");
+      if (uploadBtn && fileInput) {
+        uploadBtn.onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+          try {
+            await uploadFiles([...fileInput.files]);
+            fileInput.value = "";
+            state.mibTree = {};
+            invalidateMibCache();
+            await paint();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      await paint();
+    },
+
+    async policies(root) {
+      const canWrite = can("trap:write");
+      setActions(`
+        <button class="ghost" id="btn-pol-refresh">刷新</button>
+        <button class="ghost" id="btn-pol-export">导出</button>
+        ${
+          canWrite
+            ? `<button class="ghost" id="btn-pol-import">导入 Excel</button>
+               <input type="file" id="pol-file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+               <button class="primary" id="btn-pol-add">新建策略</button>`
+            : ""
+        }
+      `);
+
+      const downloadPolicies = async (path) => {
+        const t = token();
+        const res = await fetch(path, {
+          headers: t ? { Authorization: `Bearer ${t}` } : {},
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          let msg = text;
+          try {
+            msg = JSON.parse(text).error || text;
+          } catch (_) {}
+          throw new Error(msg || res.statusText);
+        }
+        const blob = await res.blob();
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = /filename="?([^"]+)"?/.exec(cd);
+        const name = (m && m[1]) || "trap-policies.json";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+
+      const editPolicy = (row) => {
+        const p = row || {
+          id: "",
+          name: "",
+          trap_oid: "",
+          match_mode: "exact",
+          severity: "warning",
+          enabled: true,
+          summary_template: "${alertname}: ${ip}",
+          description: "",
+          objects: [],
+          object_oids: {},
+          keywords: [],
+          module: "",
+          status: "",
+          resolve_oid: "",
+          resolve_values: [],
+          fingerprint_oids: [],
+          severity_oid: "",
+          severity_map: {},
+        };
+        const resolveVals = Array.isArray(p.resolve_values)
+          ? p.resolve_values.join(", ")
+          : "";
+        const fpOids = Array.isArray(p.fingerprint_oids)
+          ? p.fingerprint_oids.join(", ")
+          : "";
+        const sevMapText = Object.entries(p.severity_map || {})
+          .map(([k, v]) => `${k}=${v}`)
+          .join(";");
+        const objNames = [
+          ...new Set([
+            ...Object.keys(p.object_oids || {}),
+            ...(Array.isArray(p.objects) ? p.objects : []),
+          ]),
+        ].filter(Boolean);
+        const varsHtml = [
+          "alertname",
+          "ip",
+          "trap_oid",
+          ...objNames,
+        ]
+          .map((n) => `<code class="pol-var" title="\${${esc(n)}}">\${${esc(n)}}</code>`)
+          .join("");
+        openModal(
+          `
+          <div class="modal-head">
+            <h3>${p.id ? "编辑策略" : "新建策略"}</h3>
+            <p class="desc">同一 Trap OID 一条策略；默认告警，恢复条件命中则为恢复。</p>
+          </div>
+          <form id="pol-form" class="modal-body pol-form">
+            <section class="enrich-section">
+              <h4>基本信息</h4>
+              <div class="row">
+                <div class="field" style="flex:1.4"><label>名称</label>
+                  <input name="name" required value="${esc(p.name)}" />
+                </div>
+                <div class="field" style="flex:1"><label>模块</label>
+                  <input name="module" placeholder="可选" value="${esc(p.module || "")}" />
+                </div>
+              </div>
+              <div class="field"><label>Trap OID</label>
+                <input name="trap_oid" required class="mono" value="${esc(p.trap_oid)}" />
+              </div>
+              <div class="row">
+                <div class="field"><label>匹配方式</label>
+                  <select name="match_mode">
+                    <option value="exact" ${p.match_mode === "exact" ? "selected" : ""}>精确</option>
+                    <option value="prefix" ${p.match_mode === "prefix" ? "selected" : ""}>前缀</option>
+                  </select>
+                </div>
+                <div class="field"><label>默认级别</label>
+                  <select name="severity">
+                    ${severityOptions(p.severity || "warning")}
+                  </select>
+                </div>
+              </div>
+              <label class="check-row" style="margin-bottom:12px">
+                <input type="checkbox" name="enabled" ${
+                  p.enabled !== false ? "checked" : ""
+                } /><span>启用此策略</span>
+              </label>
+            </section>
+
+            <section class="enrich-section">
+              <h4>告警与恢复</h4>
+              <div class="row">
+                <div class="field" style="flex:1.5"><label>恢复 OID</label>
+                  <input name="resolve_oid" class="mono" placeholder="例：…10.3.1.1.11" value="${esc(
+                    p.resolve_oid || ""
+                  )}" />
+                </div>
+                <div class="field"><label>恢复值</label>
+                  <input name="resolve_values" placeholder="逗号分隔，如 2" value="${esc(
+                    resolveVals
+                  )}" />
+                </div>
+              </div>
+              <p class="field-hint">该 OID 的 varbind 值命中任一项时标记为恢复；可填 OBJECTS 名或数字 OID。</p>
+              <div class="field"><label>指纹 OID</label>
+                <input name="fingerprint_oids" class="mono" placeholder="逗号分隔，例：…10.3.1.1.9" value="${esc(
+                  fpOids
+                )}" />
+              </div>
+              <p class="field-hint">取这些 varbind 的<strong>值</strong>关联告警与恢复（如流水号）。</p>
+            </section>
+
+            <section class="enrich-section">
+              <h4>动态级别</h4>
+              <div class="row">
+                <div class="field"><label>级别 OID</label>
+                  <input name="severity_oid" class="mono" placeholder="例：…10.3.1.1.6" value="${esc(
+                    p.severity_oid || ""
+                  )}" />
+                </div>
+                <div class="field" style="flex:1.4"><label>级别映射</label>
+                  <input name="severity_map" class="mono" placeholder="1=disaster;2=high;3=average;4=warning" value="${esc(
+                    sevMapText
+                  )}" />
+                </div>
+              </div>
+              <p class="field-hint">原值=平台级别，分号分隔；未命中映射时用上方默认级别。</p>
+            </section>
+
+            <section class="enrich-section">
+              <h4>告警内容</h4>
+              <div class="field"><label>摘要模板</label>
+                <textarea name="summary_template" class="mono pol-summary" rows="4">${esc(
+                  p.summary_template || ""
+                )}</textarea>
+              </div>
+              <p class="field-hint" style="margin-top:-8px">点击下方变量可插入到光标处</p>
+              <div class="pol-vars">${varsHtml}</div>
+              <div class="field"><label>描述</label>
+                <textarea name="description" rows="2" placeholder="可选">${esc(
+                  p.description || ""
+                )}</textarea>
+              </div>
+            </section>
+
+            <input type="hidden" name="id" value="${esc(p.id || "")}" />
+            <input type="hidden" name="objects_json" value="${esc(
+              JSON.stringify(p.objects || [])
+            )}" />
+            <input type="hidden" name="object_oids_json" value="${esc(
+              JSON.stringify(p.object_oids || {})
+            )}" />
+            <input type="hidden" name="keywords_json" value="${esc(
+              JSON.stringify(p.keywords || [])
+            )}" />
+            <input type="hidden" name="status" value="${esc(p.status || "")}" />
+          </form>
+          <div class="modal-actions">
+            <button type="button" class="ghost" id="pol-cancel">取消</button>
+            <button type="button" class="primary" id="pol-save">保存</button>
+          </div>
+        `,
+          { xl: true }
+        );
+        document.getElementById("pol-cancel").onclick = () => closeModal();
+        document.querySelectorAll("#pol-form .pol-var").forEach((el) => {
+          el.onclick = () => {
+            const ta = document.querySelector(
+              '#pol-form textarea[name="summary_template"]'
+            );
+            if (!ta) return;
+            const token = el.textContent || "";
+            const start = ta.selectionStart ?? ta.value.length;
+            const end = ta.selectionEnd ?? start;
+            ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
+            ta.focus();
+            const pos = start + token.length;
+            try {
+              ta.setSelectionRange(pos, pos);
+            } catch (_) {}
+          };
+        });
+        document.getElementById("pol-save").onclick = async () => {
+          const form = document.getElementById("pol-form");
+          const fd = new FormData(form);
+          let objects = [],
+            object_oids = {},
+            keywords = [];
+          try {
+            objects = JSON.parse(String(fd.get("objects_json") || "[]"));
+            object_oids = JSON.parse(String(fd.get("object_oids_json") || "{}"));
+            keywords = JSON.parse(String(fd.get("keywords_json") || "[]"));
+          } catch (_) {}
+          const resolve_values = String(fd.get("resolve_values") || "")
+            .split(/[,，;；]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const fingerprint_oids = String(fd.get("fingerprint_oids") || "")
+            .split(/[,，;；]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const severity_map = {};
+          String(fd.get("severity_map") || "")
+            .split(/[;；]+/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .forEach((pair) => {
+              const i = pair.indexOf("=");
+              if (i > 0) {
+                const k = pair.slice(0, i).trim();
+                const v = pair.slice(i + 1).trim();
+                if (k && v) severity_map[k] = v;
+              }
+            });
+          const body = {
+            id: String(fd.get("id") || ""),
+            name: String(fd.get("name") || "").trim(),
+            trap_oid: String(fd.get("trap_oid") || "").trim(),
+            match_mode: String(fd.get("match_mode") || "exact"),
+            severity: String(fd.get("severity") || "warning"),
+            enabled: !!form.querySelector('[name="enabled"]')?.checked,
+            summary_template: String(fd.get("summary_template") || ""),
+            description: String(fd.get("description") || ""),
+            module: String(fd.get("module") || ""),
+            status: String(fd.get("status") || ""),
+            resolve_oid: String(fd.get("resolve_oid") || "").trim(),
+            resolve_values,
+            fingerprint_oids,
+            severity_oid: String(fd.get("severity_oid") || "").trim(),
+            severity_map,
+            objects,
+            object_oids,
+            keywords,
+            updated_at: "",
+          };
+          try {
+            if (body.id) {
+              await api(`/trap-api/api/policies/${encodeURIComponent(body.id)}`, {
+                method: "PUT",
+                body: JSON.stringify(body),
+              });
+            } else {
+              await api("/trap-api/api/policies", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+            }
+            toast("已保存");
+            closeModal();
+            await paint();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      };
+
+      let polCache = { items: [], path: "" };
+
+      const renderPolicies = () => {
+        const all = polCache.items || [];
+        const f = state.policyFilters || {
+          q: "",
+          enabled: "",
+          module: "",
+          resolve: "",
+        };
+        const q = (f.q || "").trim().toLowerCase();
+        const modules = [
+          ...new Set(all.map((p) => p.module).filter((m) => m && String(m).trim())),
+        ].sort();
+
+        const filtered = all.filter((p) => {
+          if (f.enabled === "1" && !p.enabled) return false;
+          if (f.enabled === "0" && p.enabled) return false;
+          if (f.module && (p.module || "") !== f.module) return false;
+          if (f.resolve === "1") {
+            const has =
+              (p.resolve_oid && String(p.resolve_oid).trim()) ||
+              (p.resolve_values && p.resolve_values.length) ||
+              p.status === "resolved";
+            if (!has) return false;
+          }
+          if (f.resolve === "0") {
+            const has =
+              (p.resolve_oid && String(p.resolve_oid).trim()) ||
+              (p.resolve_values && p.resolve_values.length) ||
+              p.status === "resolved";
+            if (has) return false;
+          }
+          if (q) {
+            const blob = [
+              p.name,
+              p.trap_oid,
+              p.module,
+              p.summary_template,
+              p.description,
+              p.resolve_oid,
+              (p.resolve_values || []).join(" "),
+              (p.fingerprint_oids || []).join(" "),
+              p.severity_oid,
+              p.severity,
+            ]
+              .join(" ")
+              .toLowerCase();
+            if (!blob.includes(q)) return false;
+          }
+          return true;
+        });
+
+        const focusId = document.activeElement?.id;
+        const focusPos =
+          focusId === "pol-q" ? document.activeElement.selectionStart : null;
+
+        root.innerHTML = `
+          <div class="panel" style="margin-bottom:12px">
+            <p class="hint" style="margin:0 0 10px">
+              策略存储 <code>${esc(polCache.path || "")}</code> ·
+              显示 ${esc(filtered.length)} / ${esc(all.length)} 条。
+            </p>
+            <div class="alert-filters">
+              <input id="pol-q" placeholder="搜索名称、OID、模块、摘要…" value="${esc(f.q || "")}" />
+              <select id="pol-enabled">
+                <option value="" ${!f.enabled ? "selected" : ""}>启用·全部</option>
+                <option value="1" ${f.enabled === "1" ? "selected" : ""}>已启用</option>
+                <option value="0" ${f.enabled === "0" ? "selected" : ""}>已禁用</option>
+              </select>
+              <select id="pol-module">
+                <option value="" ${!f.module ? "selected" : ""}>模块·全部</option>
+                ${modules
+                  .map(
+                    (m) =>
+                      `<option value="${esc(m)}" ${f.module === m ? "selected" : ""}>${esc(
+                        m
+                      )}</option>`
+                  )
+                  .join("")}
+              </select>
+              <select id="pol-resolve">
+                <option value="" ${!f.resolve ? "selected" : ""}>恢复条件·全部</option>
+                <option value="1" ${f.resolve === "1" ? "selected" : ""}>已配置恢复</option>
+                <option value="0" ${f.resolve === "0" ? "selected" : ""}>未配置恢复</option>
+              </select>
+            </div>
+          </div>
+          <div class="panel">
+            ${
+              filtered.length
+                ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
+                    <th>启用</th><th>名称</th><th>OID</th><th>恢复</th><th>指纹OID</th><th>级别映射</th><th>模块</th><th>摘要</th><th></th>
+                  </tr></thead><tbody>${filtered
+                    .map(
+                      (p) => `<tr>
+                      <td>${p.enabled ? "✓" : "—"}</td>
+                      <td>${esc(p.name)}</td>
+                      <td class="mono">${esc(p.trap_oid)}</td>
+                      <td class="mono"><span class="mib-objects" title="${esc(
+                        `${p.resolve_oid || ""} = ${(p.resolve_values || []).join(",")}`
+                      )}">${
+                        p.resolve_oid
+                          ? esc(`${p.resolve_oid}→${(p.resolve_values || []).join(",")}`)
+                          : p.status === "resolved"
+                            ? "(始终恢复)"
+                            : "—"
+                      }</span></td>
+                      <td class="mono"><span class="mib-objects" title="${esc(
+                        (p.fingerprint_oids || []).join(", ")
+                      )}">${esc((p.fingerprint_oids || []).join(", ") || "—")}</span></td>
+                      <td class="mono"><span class="mib-objects" title="${esc(
+                        p.severity_oid
+                          ? `${p.severity_oid}: ${Object.entries(p.severity_map || {})
+                              .map(([k, v]) => k + "=" + v)
+                              .join(";")}`
+                          : ""
+                      )}">${
+                        p.severity_oid
+                          ? esc(p.severity_oid)
+                          : esc(p.severity || "—")
+                      }</span></td>
+                      <td>${esc(p.module || "—")}</td>
+                      <td class="mono"><span class="mib-objects" title="${esc(
+                        p.summary_template || ""
+                      )}">${esc(p.summary_template || "—")}</span></td>
+                      <td class="actions">
+                        ${
+                          canWrite
+                            ? `<button type="button" data-pol-edit="${esc(p.id)}">编辑</button>
+                               <button type="button" class="danger" data-pol-del="${esc(
+                                 p.id
+                               )}">删除</button>`
+                            : ""
+                        }
+                      </td>
+                    </tr>`
+                    )
+                    .join("")}</tbody></table></div>`
+                : `<div class="empty">${
+                    all.length
+                      ? "没有符合筛选条件的策略。"
+                      : "暂无策略。请到「MIB 库」点「导入到策略」，或在此「导入 Excel」 /「新建策略」。"
+                  }</div>`
+            }
+          </div>`;
+
+        const readFilters = () => {
+          state.policyFilters = {
+            q: root.querySelector("#pol-q")?.value || "",
+            enabled: root.querySelector("#pol-enabled")?.value || "",
+            module: root.querySelector("#pol-module")?.value || "",
+            resolve: root.querySelector("#pol-resolve")?.value || "",
+          };
+        };
+        const qEl = root.querySelector("#pol-q");
+        if (qEl) {
+          let t = null;
+          qEl.oninput = () => {
+            clearTimeout(t);
+            t = setTimeout(() => {
+              readFilters();
+              renderPolicies();
+            }, 200);
+          };
+          if (focusId === "pol-q") {
+            qEl.focus();
+            if (focusPos != null) {
+              try {
+                qEl.setSelectionRange(focusPos, focusPos);
+              } catch (_) {}
+            }
+          }
+        }
+        root.querySelector("#pol-enabled")?.addEventListener("change", () => {
+          readFilters();
+          renderPolicies();
+        });
+        root.querySelector("#pol-module")?.addEventListener("change", () => {
+          readFilters();
+          renderPolicies();
+        });
+        root.querySelector("#pol-resolve")?.addEventListener("change", () => {
+          readFilters();
+          renderPolicies();
+        });
+
+        const byId = Object.fromEntries(all.map((p) => [p.id, p]));
+        root.querySelectorAll("[data-pol-edit]").forEach((b) => {
+          b.onclick = () => {
+            const row = byId[b.dataset.polEdit];
+            if (row) editPolicy(row);
+          };
+        });
+        root.querySelectorAll("[data-pol-del]").forEach((b) => {
+          b.onclick = async () => {
+            if (!confirm("删除该策略？")) return;
+            try {
+              await api(`/trap-api/api/policies/${encodeURIComponent(b.dataset.polDel)}`, {
+                method: "DELETE",
+              });
+              toast("已删除");
+              await paint();
+            } catch (e) {
+              toast(e.message, true);
+            }
+          };
+        });
+      };
+
+      const paint = async () => {
+        try {
+          const data = await api("/trap-api/api/policies");
+          polCache = { items: data.items || [], path: data.path || "" };
+          renderPolicies();
+        } catch (e) {
+          root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
+            e.message
+          )}</p></div>`;
+        }
+      };
+
+      document.getElementById("btn-pol-refresh").onclick = () => paint();
+      document.getElementById("btn-pol-export").onclick = async () => {
+        try {
+          await downloadPolicies("/trap-api/api/policies/export");
+          toast("已导出");
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+      const importBtn = document.getElementById("btn-pol-import");
+      const fileInput = document.getElementById("pol-file");
+      if (importBtn && fileInput) {
+        importBtn.onclick = () => fileInput.click();
+        fileInput.onchange = async () => {
+          const file = fileInput.files?.[0];
+          if (!file) return;
+          try {
+            const mode = await askPolicyImportMode("导入 Excel 策略");
+            if (mode === null) {
+              fileInput.value = "";
+              return;
+            }
+            const buf = await file.arrayBuffer();
+            const t = token();
+            const res = await fetch(
+              `/trap-api/api/policies/import?mode=${mode}`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type":
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                  ...(t ? { Authorization: `Bearer ${t}` } : {}),
+                },
+                body: buf,
+              }
+            );
+            const text = await res.text();
+            let data = null;
+            try {
+              data = text ? JSON.parse(text) : null;
+            } catch {
+              data = { error: text };
+            }
+            if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
+            toast(
+              `${mode === "skip" ? "已忽略重复" : "已合并"}：新增 ${
+                data.result?.created ?? 0
+              }，更新 ${data.result?.updated ?? 0}，跳过 ${data.result?.skipped ?? 0}`
+            );
+            fileInput.value = "";
+            await paint();
+          } catch (e) {
+            toast(e.message, true);
+            fileInput.value = "";
+          }
+        };
+      }
+      const addBtn = document.getElementById("btn-pol-add");
+      if (addBtn) addBtn.onclick = () => editPolicy(null);
+      await paint();
     },
 
     async settings(root) {
@@ -1829,6 +3077,152 @@
       .join("")}</tbody></table>`;
   }
 
+  /** Longest-prefix match: numeric OID → OBJECTS name via policy object_oids (name→base). */
+  function nameFromObjectOids(oid, objectOids) {
+    if (!oid || !objectOids) return "";
+    let best = "";
+    let bestLen = -1;
+    for (const [name, baseRaw] of Object.entries(objectOids)) {
+      const base = String(baseRaw || "").trim();
+      if (!base) continue;
+      if (oid === base || oid.startsWith(base + ".")) {
+        if (base.length > bestLen) {
+          bestLen = base.length;
+          best = name;
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Extract OID→value(+name) rows from trap alert annotations. */
+  function trapVarbindRows(alert, objectOidsFallback) {
+    const an = (alert && alert.annotations) || {};
+    let nameMap = {};
+    if (an.varbind_names) {
+      try {
+        nameMap =
+          typeof an.varbind_names === "string"
+            ? JSON.parse(an.varbind_names)
+            : an.varbind_names || {};
+      } catch (_) {
+        nameMap = {};
+      }
+    }
+    for (let i = 0; i < 512; i++) {
+      const oid = an[`vb${i}_oid`];
+      if (oid == null || oid === "") break;
+      const nm = an[`vb${i}_name`];
+      if (nm && !nameMap[oid]) nameMap[String(oid)] = String(nm);
+    }
+    const resolveName = (oid) => {
+      if (nameMap[oid]) return String(nameMap[oid]);
+      return nameFromObjectOids(oid, objectOidsFallback) || "";
+    };
+    if (an.varbinds) {
+      try {
+        const obj = typeof an.varbinds === "string" ? JSON.parse(an.varbinds) : an.varbinds;
+        return Object.entries(obj || {}).map(([oid, val]) => ({
+          oid,
+          val: String(val),
+          name: resolveName(oid),
+        }));
+      } catch (_) {}
+    }
+    const rows = [];
+    for (let i = 0; i < 512; i++) {
+      const oid = an[`vb${i}_oid`];
+      if (oid == null || oid === "") break;
+      const o = String(oid);
+      rows.push({
+        oid: o,
+        val: String(an[`vb${i}_val`] ?? ""),
+        name: resolveName(o),
+      });
+    }
+    return rows;
+  }
+
+  async function showTrapRecentDetail(it) {
+    if (!it) return;
+    const alert = it.alert || {};
+    const labels = alert.labels || {};
+    const an = alert.annotations || {};
+    let objectOids = null;
+    const needFallback = () => {
+      const rows = trapVarbindRows(alert, null);
+      return rows.some((r) => r.oid && !r.name);
+    };
+    if (needFallback()) {
+      const pid = labels.trap_policy_id;
+      try {
+        if (pid) {
+          const p = await api(`/trap-api/api/policies/${encodeURIComponent(pid)}`);
+          objectOids = (p && p.object_oids) || null;
+        }
+        if (!objectOids || !Object.keys(objectOids).length) {
+          const data = await api("/trap-api/api/policies");
+          const list = (data && data.items) || data || [];
+          const oid = it.trap_oid || labels.trap_oid || "";
+          const hit = Array.isArray(list)
+            ? list.find((p) => p && p.trap_oid === oid && p.object_oids)
+            : null;
+          if (hit) objectOids = hit.object_oids;
+        }
+      } catch (_) {}
+    }
+    const vbs = trapVarbindRows(alert, objectOids);
+    const named = vbs.filter((r) => r.name).length;
+    openModal(
+      `
+      <div class="modal-head">
+        <h3>Trap 详情</h3>
+        <p class="desc">
+          <span class="mono">${esc(it.peer || labels.ip || "—")}</span>
+          · ${esc(it.alertname || labels.alertname || "—")}
+          <span class="hint" style="margin-left:8px">${esc(fmtTime(it.at))}</span>
+        </p>
+      </div>
+      <div class="modal-body">
+        <div class="field"><label>Trap OID</label>
+          <div class="summary-box mono">${esc(it.trap_oid || labels.trap_oid || "—")}</div>
+        </div>
+        <div class="field"><label>摘要</label>
+          <div class="summary-box">${esc(an.summary || "—")}</div>
+        </div>
+        <div class="field"><label>Varbinds（OID / 变量名 / 值，共 ${vbs.length}${
+          named ? `，已识别 ${named}` : ""
+        }）</label>
+          ${
+            vbs.length
+              ? `<div class="alert-table-scroll"><table class="data"><thead><tr><th style="width:3rem">#</th><th>变量名</th><th>OID</th><th>值</th></tr></thead>
+                <tbody>${vbs
+                  .map(
+                    (r, i) =>
+                      `<tr><td>${i}</td><td class="mono">${esc(r.name || "—")}</td><td class="mono">${esc(
+                        r.oid
+                      )}</td><td class="mono">${esc(r.val)}</td></tr>`
+                  )
+                  .join("")}</tbody></table></div>`
+              : `<div class="empty" style="padding:8px 0">无 varbind</div>`
+          }
+        </div>
+        <div class="field"><label>Labels</label>${kvTable(labels)}</div>
+        <details style="margin-top:12px">
+          <summary class="hint" style="cursor:pointer">原始告警 JSON</summary>
+          <pre class="mono" style="white-space:pre-wrap;font-size:0.78rem;max-height:280px;overflow:auto;margin-top:8px">${esc(
+            JSON.stringify(alert, null, 2)
+          )}</pre>
+        </details>
+      </div>
+      <div class="modal-foot"><button type="button" class="ghost" id="trap-detail-close">关闭</button></div>
+    `,
+      { xl: true }
+    );
+    const closeBtn = document.getElementById("trap-detail-close");
+    if (closeBtn) closeBtn.onclick = () => closeModal();
+  }
+
   async function showAlertDetail(a, ingressMap = {}) {
     if (!a) return;
     const name = alertDisplayName(a);
@@ -1869,6 +3263,28 @@
            .join("")}</tbody></table>`
       : `<div class="empty" style="padding:8px 0">暂无通知记录（可能未绑定渠道，或尚未发生状态边沿）</div>`;
 
+    const trapVbs = trapVarbindRows(a);
+    const anForTable = { ...(a.annotations || {}) };
+    delete anForTable.varbinds;
+    delete anForTable.varbind_count;
+    Object.keys(anForTable).forEach((k) => {
+      if (/^vb\d+_(oid|val)$/.test(k)) delete anForTable[k];
+    });
+    const trapVbHtml = trapVbs.length
+      ? `<div class="field">
+          <label>SNMP Varbinds（完整 OID / 值，共 ${trapVbs.length}）</label>
+          <div class="alert-table-scroll"><table class="data"><thead><tr><th style="width:3rem">#</th><th>OID</th><th>值</th></tr></thead>
+            <tbody>${trapVbs
+              .map(
+                (r, i) =>
+                  `<tr><td>${i}</td><td class="mono">${esc(r.oid)}</td><td class="mono">${esc(
+                    r.val
+                  )}</td></tr>`
+              )
+              .join("")}</tbody></table></div>
+        </div>`
+      : "";
+
     openModal(`
       <div class="modal-head">
         <h3>${esc(name)}</h3>
@@ -1896,8 +3312,9 @@
         <div class="field">
           <label>告警描述</label>
           <div class="summary-box">${esc(alertSummary(a) || "—")}</div>
-          ${kvTable(a.annotations)}
+          ${kvTable(anForTable)}
         </div>
+        ${trapVbHtml}
         <div class="field">
           <label>标签</label>
           ${kvTable(a.labels)}
@@ -2780,14 +4197,7 @@
           <div class="row">
             <div class="field"><label>严重级别</label>
               <select name="severity">
-                ${["info", "warning", "critical"]
-                  .map(
-                    (s) =>
-                      `<option value="${s}" ${
-                        row?.severity === s || (!row && s === "warning") ? "selected" : ""
-                      }>${s}</option>`
-                  )
-                  .join("")}
+                ${severityOptions(row?.severity || "warning")}
               </select>
             </div>
           </div>
@@ -3038,7 +4448,7 @@
                     <tr><td><code>map_value</code></td><td>当前值</td><td><code>value</code></td></tr>
                     <tr><td><code>map_fingerprint</code></td><td>去重标识</td><td><code>fingerprint</code></td></tr>
                     <tr><td><code>map_severity</code></td><td>级别原始值</td><td><code>labels.severity</code> + 引擎级别</td></tr>
-                    <tr><td><code>map_critical</code></td><td>哪些取值算严重</td><td>→ Critical</td></tr>
+                    <tr><td><code>map_critical</code></td><td>哪些取值算 Disaster/High</td><td>→ disaster</td></tr>
                     <tr><td><code>map_labels</code></td><td>额外标签，<code>目标标签:源路径,...</code></td><td>对应 <code>labels.*</code></td></tr>
                     <tr><td><code>map_enabled</code></td><td>强制开启映射</td><td>—</td></tr>
                   </tbody>
@@ -3116,7 +4526,7 @@
             <div class="row">
               <div class="field">
                 <label>critical 取值</label>
-                <input name="map_critical" placeholder="P1,critical" value="${esc(opt.map_critical || "")}" />
+                <input name="map_critical" placeholder="Disaster,High,5,4" value="${esc(opt.map_critical || "")}" />
               </div>
               <div class="field">
                 <label>额外标签 map_labels</label>
@@ -3690,7 +5100,7 @@
         payload,
         annotations: {},
         value: 1,
-        severity: "info",
+        severity: "information",
         rule_name: "PreviewRule",
       };
       if (ingressId) body.ingress_id = ingressId;
@@ -3859,7 +5269,7 @@
                 <tr><td><code>{{labels.台账名.列名}}</code></td><td>台账查出的列（必须带台账名前缀，如 <code>{{labels.device_info_form.主机名}}</code>）</td></tr>
                 <tr><td><code>{{annotations.xxx}}</code></td><td>告警注解；常见 <code>summary</code> / <code>description</code></td></tr>
                 <tr><td><code>{{value}}</code></td><td>当前监控值</td></tr>
-                <tr><td><code>{{severity}}</code></td><td>引擎级别（critical / warning / info 等）</td></tr>
+                <tr><td><code>{{severity}}</code></td><td>引擎级别（Zabbix：not_classified / information / warning / average / high / disaster）</td></tr>
                 <tr><td><code>{{status}}</code></td><td>firing / resolved</td></tr>
                 <tr><td><code>{{fingerprint}}</code></td><td>告警指纹</td></tr>
                 <tr><td><code>{{rule.name}}</code></td><td>当前丰富规则名</td></tr>
@@ -3890,7 +5300,7 @@
                 <tr><td>从台账补字段</td><td>勾选台账；「用标签」填匹配键（默认台账的 key，可改为抽取的 <code>sss_ip</code>）。命中后写入 <code>labels.台账名.列名</code></td></tr>
                 <tr><td>告警描述</td><td>对应 field 模板 <code>summary</code>；可点/拖下方芯片插入</td></tr>
                 <tr><td>告警 IP</td><td>写入 <code>ip</code> / <code>alertIp</code>（及必要时 <code>instance</code>）</td></tr>
-                <tr><td>告警级别</td><td>可用 critical / warning / info，或中文 严重 / 警告 / 信息，也可用模板</td></tr>
+                <tr><td>告警级别</td><td>Zabbix 六级：disaster / high / average / warning / information / not_classified（兼容 critical→disaster、info→information；也可用中文）</td></tr>
                 <tr><td>告警名称</td><td>可选，改写 <code>labels.alertname</code></td></tr>
                 <tr><td>高级 · 内联映射</td><td>无台账时用 JSON 对照表；匹配键填标签名</td></tr>
               </tbody>
@@ -3998,7 +5408,7 @@
             <div class="field"><label>告警级别</label>
               <input name="ft_severity" value="${esc(
                 ft.severity || ""
-              )}" placeholder="critical / 警告 / {{labels.级别}}" />
+              )}" placeholder="disaster / 严重 / {{labels.级别}}" />
             </div>
           </div>
           <div class="field"><label>告警名称（可选）</label>
@@ -4006,7 +5416,7 @@
               ft.alertname || ""
             )}" placeholder="{{labels.主机名}}-不可达，留空则不改" />
           </div>
-          <div class="hint">级别可用 critical / warning / info，或中文 严重 / 警告 / 信息。</div>
+          <div class="hint">级别按 Zabbix：disaster / high / average / warning / information / not_classified（兼容 critical、info；可用中文）。</div>
         </div>
 
         <details class="enrich-step enrich-advanced" ${hasAdvanced ? "open" : ""}>

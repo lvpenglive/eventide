@@ -5,6 +5,7 @@ members = [
     "crates/eventide-sources",
     "crates/eventide-notify",
     "crates/eventide-server",
+    "crates/eventide-trap",
 ]
 
 [workspace.package]

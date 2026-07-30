@@ -421,9 +421,12 @@ fn parse_severity_loose(s: &str) -> Option<Severity> {
         return Some(sev);
     }
     match s.trim() {
-        "严重" | "紧急" | "致命" | "高" | "P0" | "P1" | "1" => Some(Severity::Critical),
-        "警告" | "告警" | "中" | "P2" | "2" => Some(Severity::Warning),
-        "信息" | "提示" | "低" | "P3" | "3" => Some(Severity::Info),
+        "未分类" | "未知" => Some(Severity::NotClassified),
+        "信息" | "提示" | "低" | "P5" => Some(Severity::Information),
+        "警告" | "告警" | "P4" => Some(Severity::Warning),
+        "一般严重" | "次要" | "中" | "P3" => Some(Severity::Average),
+        "严重" | "重要" | "高" | "P2" => Some(Severity::High),
+        "灾难" | "紧急" | "致命" | "P0" | "P1" => Some(Severity::Disaster),
         _ => None,
     }
 }
@@ -647,7 +650,7 @@ mod tests {
             rule_id: Uuid::nil(),
             fingerprint: "fp1".into(),
             status: AlertStatus::Firing,
-            severity: Severity::Critical,
+            severity: Severity::Disaster,
             labels,
             annotations,
             value: Some(99.0),
@@ -848,7 +851,7 @@ mod tests {
 
         let mut sev_rows = BTreeMap::new();
         let mut sev_meta = BTreeMap::new();
-        sev_meta.insert("级别".into(), "critical".into());
+        sev_meta.insert("级别".into(), "disaster".into());
         sev_rows.insert("High".into(), sev_meta);
 
         let mut lookups = BTreeMap::new();
@@ -907,7 +910,7 @@ mod tests {
         );
         assert_eq!(
             ev.labels.get("levels.级别").map(String::as_str),
-            Some("critical")
+            Some("disaster")
         );
     }
 
@@ -1010,7 +1013,7 @@ mod tests {
         enrich_alert(&mut ev, Some("HighCPU"), &[rule], &empty_lookups());
         assert_eq!(
             ev.annotations.get("runbook").map(String::as_str),
-            Some("https://wiki/api#critical")
+            Some("https://wiki/api#disaster")
         );
     }
 

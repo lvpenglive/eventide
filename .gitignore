@@ -5,3 +5,6 @@
 *.db-shm
 *.db-*
 .DS_Store
+eventide-trap.toml
+scripts/_*.rs
+scripts/emit_repo.py

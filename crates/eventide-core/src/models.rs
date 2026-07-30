@@ -42,31 +42,98 @@ impl Comparator {
     }
 }
 
-/// Alert severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Alert severity (aligned with Zabbix 0–5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
-    Info,
+    /// 0 — Not classified
+    NotClassified,
+    /// 1 — Information
+    Information,
+    /// 2 — Warning
     Warning,
-    Critical,
+    /// 3 — Average
+    Average,
+    /// 4 — High
+    High,
+    /// 5 — Disaster
+    Disaster,
 }
 
 impl Severity {
+    pub const ALL: [Severity; 6] = [
+        Self::NotClassified,
+        Self::Information,
+        Self::Warning,
+        Self::Average,
+        Self::High,
+        Self::Disaster,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Info => "info",
+            Self::NotClassified => "not_classified",
+            Self::Information => "information",
             Self::Warning => "warning",
-            Self::Critical => "critical",
+            Self::Average => "average",
+            Self::High => "high",
+            Self::Disaster => "disaster",
+        }
+    }
+
+    /// Zabbix numeric level 0–5.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::NotClassified => 0,
+            Self::Information => 1,
+            Self::Warning => 2,
+            Self::Average => 3,
+            Self::High => 4,
+            Self::Disaster => 5,
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "info" => Some(Self::Info),
+        let t = s.trim();
+        if t.is_empty() {
+            return None;
+        }
+        // Numeric 0–5 (Zabbix)
+        if let Ok(n) = t.parse::<u8>() {
+            return match n {
+                0 => Some(Self::NotClassified),
+                1 => Some(Self::Information),
+                2 => Some(Self::Warning),
+                3 => Some(Self::Average),
+                4 => Some(Self::High),
+                5 => Some(Self::Disaster),
+                _ => None,
+            };
+        }
+        match t.to_ascii_lowercase().as_str() {
+            "not_classified" | "notclassified" | "unknown" | "none" => {
+                Some(Self::NotClassified)
+            }
+            "information" | "info" | "informational" => Some(Self::Information),
             "warning" | "warn" => Some(Self::Warning),
-            "critical" | "crit" => Some(Self::Critical),
+            "average" | "avg" | "minor" => Some(Self::Average),
+            "high" | "major" => Some(Self::High),
+            "disaster" | "critical" | "crit" | "fatal" | "emergency" => Some(Self::Disaster),
             _ => None,
         }
+    }
+}
+
+impl Serialize for Severity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Severity {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Severity::parse(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown severity: {s}")))
     }
 }
 

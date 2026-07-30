@@ -30,6 +30,25 @@ pub struct AppConfig {
     /// Elasticsearch connection for optional alert history (toggles live in DB / UI).
     #[serde(default)]
     pub elasticsearch: ElasticsearchConfig,
+    /// Reverse-proxy target for console `/trap-api/*` (Trap service HTTP).
+    #[serde(default)]
+    pub trap: TrapProxyConfig,
+}
+
+/// `[trap]` — Eventide console → Trap service BFF.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrapProxyConfig {
+    /// e.g. `http://127.0.0.1:8081`. Empty disables `/trap-api` proxy.
+    #[serde(default)]
+    pub api_url: String,
+}
+
+impl Default for TrapProxyConfig {
+    fn default() -> Self {
+        Self {
+            api_url: String::new(),
+        }
+    }
 }
 
 /// `[elasticsearch]` — connection only; enable write / search store via console settings.
@@ -260,6 +279,7 @@ impl Default for AppConfig {
             storm: StormConfig::default(),
             cluster: ClusterConfig::default(),
             elasticsearch: ElasticsearchConfig::default(),
+            trap: TrapProxyConfig::default(),
         }
     }
 }

@@ -437,7 +437,7 @@ mod tests {
             threshold: 80.0,
             for_seconds,
             interval_seconds: 30,
-            severity: Severity::Critical,
+            severity: Severity::Disaster,
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
             channel_ids: vec![],
@@ -510,7 +510,7 @@ mod tests {
             &event,
             AlertTransition::BecameFiring,
         );
-        assert!(body.contains("[critical]"));
+        assert!(body.contains("[disaster]"));
         assert!(body.contains("high_cpu"));
         assert!(body.contains("val=90"));
         assert!(body.contains("edge=firing"));
@@ -542,6 +542,6 @@ mod tests {
         )
         .expect("json ok");
         assert_eq!(v["msg"], "disk \"C:\" full");
-        assert_eq!(v["sev"], "critical");
+        assert_eq!(v["sev"], "disaster");
     }
 }

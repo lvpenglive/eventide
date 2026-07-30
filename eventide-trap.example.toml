@@ -1,0 +1,31 @@
+# Eventide Trap service — SNMP Trap → Kafka
+# Copy to eventide-trap.toml and fill in secrets.
+# Run: cargo run -p eventide-trap -- eventide-trap.toml
+
+listen_http = "0.0.0.0:8081"
+listen_udp = "0.0.0.0:1162"
+
+kafka_brokers = "127.0.0.1:9092"
+kafka_topic = "eventide.snmptrap"
+kafka_partition = 0
+
+community = ""
+default_severity = "warning"
+recent_limit = 50
+
+# Shared Eventide MySQL (trap_policies + trap_mibs)
+mysql_url = "mysql://eventide:eventide@127.0.0.1:3306/eventide"
+
+# RustFS / S3 (MIB object bodies)
+s3_endpoint = "http://127.0.0.1:9000"
+s3_access_key = "CHANGE_ME"
+s3_secret_key = "CHANGE_ME"
+s3_bucket = "eventide-mibs"
+s3_region = "us-east-1"
+
+mib_cache_dir = "data/mib-cache"
+policy_reload_secs = 10
+
+# Legacy local paths — one-time migration sources when DB tables are empty
+mib_dir = "data/mibs"
+policies_path = "data/trap-policies.json"

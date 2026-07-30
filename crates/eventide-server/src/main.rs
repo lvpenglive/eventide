@@ -14,6 +14,7 @@ mod notify_pipeline;
 mod password;
 mod scheduler;
 mod state;
+mod trap_proxy;
 
 use anyhow::Context;
 use axum::Router;

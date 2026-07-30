@@ -127,6 +127,16 @@ pub const PERMISSION_CATALOG: &[PermDef] = &[
         label: "修改系统设置",
         group: "系统",
     },
+    PermDef {
+        code: "trap:read",
+        label: "查看 SNMP Trap",
+        group: "接入",
+    },
+    PermDef {
+        code: "trap:write",
+        label: "管理 SNMP Trap / 试推送",
+        group: "接入",
+    },
 ];
 
 pub fn catalog_json() -> serde_json::Value {
@@ -220,6 +230,9 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
         } else {
             "settings:read"
         });
+    }
+    if path.starts_with("/trap-api") {
+        return Some(if write { "trap:write" } else { "trap:read" });
     }
     // Unknown protected route: require login only
     None

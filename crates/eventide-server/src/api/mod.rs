@@ -111,6 +111,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/settings/alert-history",
             get(settings::get_alert_history).put(settings::put_alert_history),
         )
+        // Trap service BFF (same-origin portal)
+        .route(
+            "/trap-api",
+            axum::routing::any(crate::trap_proxy::forward_root),
+        )
+        .route(
+            "/trap-api/{*path}",
+            axum::routing::any(crate::trap_proxy::forward),
+        )
         // Inner: perm check; Outer: JWT auth (last layer = outermost)
         .layer(middleware::from_fn(require_route_perm))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
@@ -873,13 +882,13 @@ fn sample_ingress_payload(route: &IngressRoute, scenario: &str) -> String {
                 "fingerprint": fp,
                 "labels": {
                     "alertname": name,
-                    "severity": "critical",
+                    "severity": "disaster",
                     "instance": "eventide-test"
                 },
                 "annotations": {
                     "summary": "控制台试推送：模拟告警触发"
                 },
-                "severity": "critical",
+                "severity": "disaster",
                 "value": 99.0
             }]
         })

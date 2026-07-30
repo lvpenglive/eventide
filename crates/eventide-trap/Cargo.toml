@@ -1,0 +1,33 @@
+[package]
+name = "eventide-trap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SNMP Trap receiver → normalize → Kafka (Eventide ingress)"
+
+[[bin]]
+name = "eventide-trap"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["multipart"] }
+chrono = { workspace = true }
+mib-rs = { version = "0.8", default-features = false }
+mysql = { workspace = true }
+reqwest = { workspace = true }
+rskafka = { workspace = true }
+rusty-s3 = "0.7"
+calamine = "0.26"
+rust_xlsxwriter = "0.79"
+serde = { workspace = true }
+serde_json = { workspace = true }
+snmp-parser = "0.11"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+url = "2"

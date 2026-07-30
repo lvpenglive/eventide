@@ -242,7 +242,7 @@ pub fn parse_generic(body: &GenericWebhook) -> Vec<IngressAlert> {
         .collect()
 }
 
-// ---------- Probe / 业务拨测告警（Jeecg probe-alert.log） ----------
+// ---------- Probe / ???????Jeecg probe-alert.log? ----------
 
 /// Detect Jeecg-style probe alert: `eventType` = fire|recover + `resultFlag`.
 pub fn looks_like_probe_alert(v: &serde_json::Value) -> bool {
@@ -287,7 +287,7 @@ pub fn parse_probe_alert(v: &serde_json::Value) -> Option<IngressAlert> {
     let category = json_str(v, "alertCategory").unwrap_or_default();
     let ret_code = json_any_str(v, "retCode").unwrap_or_default();
     let severity = if category.eq_ignore_ascii_case("infra") || ret_code == "10001" {
-        Severity::Critical
+        Severity::Disaster
     } else {
         Severity::Warning
     };
@@ -440,8 +440,23 @@ impl FieldMapping {
                 "recover", "resolved", "ok", "closed", "good", "success", "0", "false",
             ],
         );
-        let critical_values = split_csv(&get("map_critical"), &["critical", "crit", "p1", "fatal"]);
-        let warning_values = split_csv(&get("map_warning"), &["warning", "warn", "p2", "p3"]);
+        let critical_values = split_csv(
+            &get("map_critical"),
+            &[
+                "disaster",
+                "critical",
+                "crit",
+                "p1",
+                "fatal",
+                "high",
+                "5",
+                "4",
+            ],
+        );
+        let warning_values = split_csv(
+            &get("map_warning"),
+            &["warning", "warn", "average", "p2", "p3", "2", "3"],
+        );
 
         let labels = labels_raw
             .split(',')
@@ -580,7 +595,7 @@ pub fn parse_mapped_alert(v: &serde_json::Value, m: &FieldMapping) -> Option<Ing
         } else if value_in_list(&status_raw, &m.resolve_values) {
             AlertStatus::Resolved
         } else {
-            // unknown status string — treat non-empty non-resolve as firing if looks bad
+            // unknown status string ? treat non-empty non-resolve as firing if looks bad
             return None;
         }
     } else {
@@ -597,7 +612,7 @@ pub fn parse_mapped_alert(v: &serde_json::Value, m: &FieldMapping) -> Option<Ing
     let sev_raw = path_as_string(v, &m.severity).unwrap_or_default();
     let severity = if !sev_raw.is_empty() {
         if value_in_list(&sev_raw, &m.critical_values) {
-            Severity::Critical
+            Severity::Disaster
         } else if value_in_list(&sev_raw, &m.warning_values) {
             Severity::Warning
         } else {
@@ -610,7 +625,7 @@ pub fn parse_mapped_alert(v: &serde_json::Value, m: &FieldMapping) -> Option<Ing
     let mut labels: Labels = BTreeMap::new();
     labels.insert("alertname".into(), name);
     if !ip.is_empty() {
-        // Keep ip / alertIp / instance in sync — enrich lookups usually match on `ip`.
+        // Keep ip / alertIp / instance in sync ? enrich lookups usually match on `ip`.
         labels.insert("ip".into(), ip.clone());
         labels.insert("alertIp".into(), ip.clone());
         labels.insert("instance".into(), ip);
@@ -748,7 +763,7 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let t: String = s.chars().take(max).collect();
-        format!("{t}…")
+        format!("{t}?")
     }
 }
 
@@ -790,7 +805,7 @@ mod tests {
             fingerprint: Some("fp1".into()),
             labels,
             annotations: BTreeMap::new(),
-            severity: Severity::Critical,
+            severity: Severity::Disaster,
             value: Some(99.0),
             starts_at: None,
             ends_at: None,
@@ -838,8 +853,8 @@ mod tests {
             "eventType":"fire","eventTime":"2026-07-21 15:18:39",
             "alertIp":"127.0.0.1","bizPort":9000,"bizname":"oaec",
             "messageId":"2077682656462446593","resultFlag":"BAD","retCode":"4001",
-            "retMessage":"连接拒绝","retTimeMs":12976,"areacode":"jyq",
-            "applicationName":"办公管理系统","bizchainName":"业务拨测-办公管理系统",
+            "retMessage":"????","retTimeMs":12976,"areacode":"jyq",
+            "applicationName":"??????","bizchainName":"????-??????",
             "alertCategory":"business"
         }"#;
         let alerts = parse_ingress_payload(fire.as_bytes()).unwrap();
@@ -851,11 +866,11 @@ mod tests {
         );
         assert_eq!(
             alerts[0].labels.get("alertname").map(|s| s.as_str()),
-            Some("业务拨测-办公管理系统")
+            Some("????-??????")
         );
         assert_eq!(alerts[0].value, Some(12976.0));
 
-        let recover = r#"2026-07-21 17:00:29.175 [Worker] INFO  alertLogger - {"eventType":"recover","eventTime":"2026-07-21 17:00:28","messageId":"2077682656462446593","resultFlag":"GOOD","retCode":"4000","retMessage":"成功","retTimeMs":26010,"bizchainName":"业务拨测-办公管理系统","alertCategory":"business"}"#;
+        let recover = r#"2026-07-21 17:00:29.175 [Worker] INFO  alertLogger - {"eventType":"recover","eventTime":"2026-07-21 17:00:28","messageId":"2077682656462446593","resultFlag":"GOOD","retCode":"4000","retMessage":"??","retTimeMs":26010,"bizchainName":"????-??????","alertCategory":"business"}"#;
         let alerts = parse_ingress_payload(recover.as_bytes()).unwrap();
         assert_eq!(alerts[0].status, AlertStatus::Resolved);
         assert_eq!(
@@ -866,9 +881,9 @@ mod tests {
 
     #[test]
     fn parse_probe_infra_critical() {
-        let raw = r#"{"eventType":"fire","resultFlag":"BAD","retCode":"10001","retMessage":"代理失败","alertCategory":"infra","messageId":"m1","bizchainName":"链"}"#;
+        let raw = r#"{"eventType":"fire","resultFlag":"BAD","retCode":"10001","retMessage":"????","alertCategory":"infra","messageId":"m1","bizchainName":"?"}"#;
         let a = parse_probe_alert(&serde_json::from_str(raw).unwrap()).unwrap();
-        assert_eq!(a.severity, Severity::Critical);
+        assert_eq!(a.severity, Severity::Disaster);
     }
 
     #[test]
@@ -877,7 +892,7 @@ mod tests {
             "data": {
                 "items": [{
                     "state": "ALARM",
-                    "title": "磁盘满",
+                    "title": "???",
                     "msg": "disk > 90%",
                     "host": "10.0.0.8",
                     "metric": 93.5,
@@ -902,8 +917,8 @@ mod tests {
         let alerts = parse_ingress_payload_with_options(raw.as_bytes(), &opts).unwrap();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].status, AlertStatus::Firing);
-        assert_eq!(alerts[0].severity, Severity::Critical);
-        assert_eq!(alerts[0].labels.get("alertname").map(|s| s.as_str()), Some("磁盘满"));
+        assert_eq!(alerts[0].severity, Severity::Disaster);
+        assert_eq!(alerts[0].labels.get("alertname").map(|s| s.as_str()), Some("???"));
         assert_eq!(alerts[0].labels.get("alertIp").map(|s| s.as_str()), Some("10.0.0.8"));
         assert_eq!(alerts[0].value, Some(93.5));
         assert_eq!(alerts[0].fingerprint.as_deref(), Some("evt-1"));
@@ -967,7 +982,7 @@ mod tests {
         let alerts = parse_alertmanager(&body);
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].status, AlertStatus::Firing);
-        assert_eq!(alerts[0].severity, Severity::Critical);
+        assert_eq!(alerts[0].severity, Severity::Disaster);
         assert!(alerts[0].ends_at.is_none());
     }
 }
