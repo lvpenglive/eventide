@@ -184,17 +184,17 @@ impl MibStore {
         for row in result.by_ref() {
             let row = row.context("mib row")?;
             out.push(MibRow {
-                id: row.get("id").context("id")?,
-                filename: row.get("filename").context("filename")?,
-                object_key: row.get("object_key").context("object_key")?,
-                size: row.get("size").unwrap_or(0),
-                uploaded_at: row.get("uploaded_at").unwrap_or_default(),
-                parse_ok: row.get("parse_ok").unwrap_or(0),
-                error: row.get("error"),
-                notification_count: row.get("notification_count").unwrap_or(0),
-                node_count: row.get("node_count").unwrap_or(0),
-                module_oid: row.get("module_oid"),
-                updated_at: row.get("updated_at").unwrap_or_default(),
+                id: crate::db::row_string(&row, "id"),
+                filename: crate::db::row_string(&row, "filename"),
+                object_key: crate::db::row_string(&row, "object_key"),
+                size: crate::db::row_i64(&row, "size"),
+                uploaded_at: crate::db::row_string(&row, "uploaded_at"),
+                parse_ok: crate::db::row_i8(&row, "parse_ok"),
+                error: crate::db::row_string_opt(&row, "error"),
+                notification_count: crate::db::row_i32(&row, "notification_count"),
+                node_count: crate::db::row_i32(&row, "node_count"),
+                module_oid: crate::db::row_string_opt(&row, "module_oid"),
+                updated_at: crate::db::row_string(&row, "updated_at"),
             });
         }
         Ok(out)
@@ -258,17 +258,17 @@ impl MibStore {
         for row in result.by_ref() {
             let row = row.context("mib row")?;
             found = Some(MibRow {
-                id: row.get("id").context("id")?,
-                filename: row.get("filename").context("filename")?,
-                object_key: row.get("object_key").context("object_key")?,
-                size: row.get("size").unwrap_or(0),
-                uploaded_at: row.get("uploaded_at").unwrap_or_default(),
-                parse_ok: row.get("parse_ok").unwrap_or(0),
-                error: row.get("error"),
-                notification_count: row.get("notification_count").unwrap_or(0),
-                node_count: row.get("node_count").unwrap_or(0),
-                module_oid: row.get("module_oid"),
-                updated_at: row.get("updated_at").unwrap_or_default(),
+                id: crate::db::row_string(&row, "id"),
+                filename: crate::db::row_string(&row, "filename"),
+                object_key: crate::db::row_string(&row, "object_key"),
+                size: crate::db::row_i64(&row, "size"),
+                uploaded_at: crate::db::row_string(&row, "uploaded_at"),
+                parse_ok: crate::db::row_i8(&row, "parse_ok"),
+                error: crate::db::row_string_opt(&row, "error"),
+                notification_count: crate::db::row_i32(&row, "notification_count"),
+                node_count: crate::db::row_i32(&row, "node_count"),
+                module_oid: crate::db::row_string_opt(&row, "module_oid"),
+                updated_at: crate::db::row_string(&row, "updated_at"),
             });
             break;
         }

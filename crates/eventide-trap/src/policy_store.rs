@@ -489,49 +489,84 @@ impl PolicyStore {
 }
 
 fn policy_from_row(row: mysql::Row) -> Result<TrapPolicy> {
-    let id: String = row.get("id").context("id")?;
-    let name: String = row.get("name").context("name")?;
-    let trap_oid: String = row.get("trap_oid").context("trap_oid")?;
-    let match_mode: String = row.get("match_mode").context("match_mode")?;
-    let severity: String = row.get("severity").context("severity")?;
-    let enabled: i8 = row.get("enabled").unwrap_or(1);
-    let summary_template: String = row.get("summary_template").unwrap_or_default();
-    let description: String = row.get("description").unwrap_or_default();
-    let objects_json: String = row.get("objects_json").unwrap_or_else(|| "[]".into());
-    let object_oids_json: String = row.get("object_oids_json").unwrap_or_else(|| "{}".into());
-    let keywords_json: String = row.get("keywords_json").unwrap_or_else(|| "[]".into());
-    let module: String = row.get("module").unwrap_or_default();
-    let status: String = row.get("status").unwrap_or_default();
-    let resolve_oid: String = row.get("resolve_oid").unwrap_or_default();
-    let resolve_values_json: String = row
-        .get("resolve_values_json")
-        .unwrap_or_else(|| "[]".into());
-    let fingerprint_oids_json: String = row
-        .get("fingerprint_oids_json")
-        .unwrap_or_else(|| "[]".into());
-    let severity_oid: String = row.get("severity_oid").unwrap_or_default();
-    let severity_map_json: String = row.get("severity_map_json").unwrap_or_else(|| "{}".into());
-    let updated_at: String = row.get("updated_at").unwrap_or_default();
+    let id = crate::db::row_string(&row, "id");
+    if id.is_empty() {
+        anyhow::bail!("policy row missing id");
+    }
+    let objects_json = crate::db::row_string(&row, "objects_json");
+    let object_oids_json = crate::db::row_string(&row, "object_oids_json");
+    let keywords_json = crate::db::row_string(&row, "keywords_json");
+    let resolve_values_json = crate::db::row_string(&row, "resolve_values_json");
+    let fingerprint_oids_json = crate::db::row_string(&row, "fingerprint_oids_json");
+    let severity_map_json = crate::db::row_string(&row, "severity_map_json");
+    let enabled = match row.get_opt::<i8, _>("enabled") {
+        Some(Ok(v)) => v,
+        _ => 1,
+    };
     Ok(TrapPolicy {
         id,
-        name,
-        trap_oid,
-        match_mode,
-        severity,
+        name: crate::db::row_string(&row, "name"),
+        trap_oid: crate::db::row_string(&row, "trap_oid"),
+        match_mode: {
+            let m = crate::db::row_string(&row, "match_mode");
+            if m.is_empty() {
+                "exact".into()
+            } else {
+                m
+            }
+        },
+        severity: {
+            let s = crate::db::row_string(&row, "severity");
+            if s.is_empty() {
+                "warning".into()
+            } else {
+                s
+            }
+        },
         enabled: enabled != 0,
-        summary_template,
-        description,
-        objects: serde_json::from_str(&objects_json).unwrap_or_default(),
-        object_oids: serde_json::from_str(&object_oids_json).unwrap_or_default(),
-        keywords: serde_json::from_str(&keywords_json).unwrap_or_default(),
-        module,
-        status,
-        resolve_oid,
-        resolve_values: serde_json::from_str(&resolve_values_json).unwrap_or_default(),
-        fingerprint_oids: serde_json::from_str(&fingerprint_oids_json).unwrap_or_default(),
-        severity_oid,
-        severity_map: serde_json::from_str(&severity_map_json).unwrap_or_default(),
-        updated_at,
+        summary_template: crate::db::row_string(&row, "summary_template"),
+        description: crate::db::row_string(&row, "description"),
+        objects: serde_json::from_str(if objects_json.is_empty() {
+            "[]"
+        } else {
+            &objects_json
+        })
+        .unwrap_or_default(),
+        object_oids: serde_json::from_str(if object_oids_json.is_empty() {
+            "{}"
+        } else {
+            &object_oids_json
+        })
+        .unwrap_or_default(),
+        keywords: serde_json::from_str(if keywords_json.is_empty() {
+            "[]"
+        } else {
+            &keywords_json
+        })
+        .unwrap_or_default(),
+        module: crate::db::row_string(&row, "module"),
+        status: crate::db::row_string(&row, "status"),
+        resolve_oid: crate::db::row_string(&row, "resolve_oid"),
+        resolve_values: serde_json::from_str(if resolve_values_json.is_empty() {
+            "[]"
+        } else {
+            &resolve_values_json
+        })
+        .unwrap_or_default(),
+        fingerprint_oids: serde_json::from_str(if fingerprint_oids_json.is_empty() {
+            "[]"
+        } else {
+            &fingerprint_oids_json
+        })
+        .unwrap_or_default(),
+        severity_oid: crate::db::row_string(&row, "severity_oid"),
+        severity_map: serde_json::from_str(if severity_map_json.is_empty() {
+            "{}"
+        } else {
+            &severity_map_json
+        })
+        .unwrap_or_default(),
+        updated_at: crate::db::row_string(&row, "updated_at"),
     })
 }
 

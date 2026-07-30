@@ -65,6 +65,43 @@ pub fn conn(pool: &Pool) -> Result<PooledConn> {
     pool.get_conn().context("mysql get_conn")
 }
 
+/// Read a column as String; NULL / missing / bad type → empty (never panics).
+pub fn row_string(row: &mysql::Row, col: &str) -> String {
+    match row.get_opt::<String, _>(col) {
+        Some(Ok(s)) => s,
+        _ => String::new(),
+    }
+}
+
+/// Read a nullable string column; NULL → None.
+pub fn row_string_opt(row: &mysql::Row, col: &str) -> Option<String> {
+    match row.get_opt::<String, _>(col) {
+        Some(Ok(s)) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+pub fn row_i64(row: &mysql::Row, col: &str) -> i64 {
+    match row.get_opt::<i64, _>(col) {
+        Some(Ok(v)) => v,
+        _ => 0,
+    }
+}
+
+pub fn row_i32(row: &mysql::Row, col: &str) -> i32 {
+    match row.get_opt::<i32, _>(col) {
+        Some(Ok(v)) => v,
+        _ => 0,
+    }
+}
+
+pub fn row_i8(row: &mysql::Row, col: &str) -> i8 {
+    match row.get_opt::<i8, _>(col) {
+        Some(Ok(v)) => v,
+        _ => 0,
+    }
+}
+
 fn ensure_database(url: &str) -> Result<()> {
     let opts = Opts::from_url(url).context("parse mysql_url")?;
     let Some(db_name) = opts.get_db_name().map(|s| s.to_owned()) else {
