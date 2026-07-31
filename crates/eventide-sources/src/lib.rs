@@ -5,8 +5,9 @@ mod log;
 mod prometheus;
 
 pub use kafka::{
-    connect_client, earliest_offset, fetch_records_from, latest_offset, KafkaClientPool,
-    KafkaError, KafkaSource,
+    browse_messages, connect_client, create_topic, delete_topic, describe_topic, earliest_offset,
+    fetch_records_from, latest_offset, list_topics, produce_message, topic_partition_count,
+    BrowsedMessage, KafkaClientPool, KafkaError, KafkaSource, PartitionOffsets, TopicInfo,
 };
 pub use log::{LogClient, LogError};
 pub use prometheus::{PrometheusClient, PrometheusError, QueryResult};

@@ -30,6 +30,9 @@ degrade_notify_per_sec = 50
 enabled = true
 leader_key = "eventide:cluster:leader"
 lease_seconds = 15
+# Kafka Ingress 已改用 consumer group；以下两项保留兼容，运行时忽略
+ingress_partition_lease_seconds = 15
+ingress_max_claim = 0
 
 # Trap：运行态反代 + MIB/策略 CRUD（RustFS）
 [trap]

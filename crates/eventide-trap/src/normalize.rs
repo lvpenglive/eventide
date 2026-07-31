@@ -50,6 +50,7 @@ pub fn to_ingress_alert_with_policy(
     let mut labels: BTreeMap<String, String> = BTreeMap::new();
     labels.insert("alertname".into(), alertname);
     labels.insert("ip".into(), trap.peer_ip.clone());
+    labels.insert("alertIp".into(), trap.peer_ip.clone());
     labels.insert("trap_oid".into(), trap.trap_oid.clone());
     labels.insert("source".into(), "ingress:snmptrap".into());
     labels.insert("snmp_version".into(), trap.version.clone());
@@ -193,6 +194,7 @@ mod tests {
         assert_eq!(v["status"], "firing");
         assert_eq!(v["labels"]["source"], "ingress:snmptrap");
         assert_eq!(v["labels"]["ip"], "10.0.0.1");
+        assert_eq!(v["labels"]["alertIp"], "10.0.0.1");
         assert!(v["fingerprint"].as_str().unwrap().contains("10.0.0.1"));
     }
 

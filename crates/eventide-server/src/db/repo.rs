@@ -796,6 +796,8 @@ impl Db {
         Ok(())
     }
 
+    /// Legacy MySQL Kafka offsets (unused after consumer-group ingress).
+    #[allow(dead_code)]
     pub fn get_kafka_offset(&self, route_id: Uuid, partition: i32) -> Result<Option<i64>> {
         let mut conn = self.conn()?;
         let offset: Option<i64> = conn.exec_first(
@@ -805,6 +807,8 @@ impl Db {
         Ok(offset)
     }
 
+    /// Legacy MySQL Kafka offsets (unused after consumer-group ingress).
+    #[allow(dead_code)]
     pub fn set_kafka_offset(&self, route_id: Uuid, partition: i32, next_offset: i64) -> Result<()> {
         let mut conn = self.conn()?;
         conn.exec_drop(

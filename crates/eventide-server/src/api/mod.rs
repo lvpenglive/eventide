@@ -81,6 +81,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/ingress", get(list_ingress).post(create_ingress))
         .route(
+            "/api/ingress/kafka/partitions",
+            post(probe_kafka_partitions),
+        )
+        .route("/api/ingress/kafka/probe", post(probe_kafka_cluster))
+        .route("/api/ingress/kafka/topics", post(create_kafka_topic))
+        .route(
+            "/api/ingress/kafka/topics/delete",
+            post(delete_kafka_topic),
+        )
+        .route("/api/ingress/kafka/describe", post(describe_kafka_topic))
+        .route("/api/ingress/kafka/messages", post(browse_kafka_messages))
+        .route("/api/ingress/kafka/produce", post(produce_kafka_message))
+        .route("/api/ingress/kafka/groups", post(list_kafka_groups))
+        .route(
+            "/api/ingress/kafka/groups/describe",
+            post(describe_kafka_group),
+        )
+        .route(
             "/api/ingress/{id}",
             get(get_ingress).put(update_ingress).delete(delete_ingress),
         )
@@ -1476,6 +1494,418 @@ async fn delete_lookup(
 }
 
 // ---- ingress routes ----
+
+#[derive(Deserialize)]
+struct KafkaPartitionsProbe {
+    brokers: String,
+    topic: String,
+}
+
+async fn probe_kafka_partitions(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaPartitionsProbe>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers: Vec<String> = input
+        .brokers
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if brokers.is_empty() {
+        return Err(ApiError::bad("brokers required"));
+    }
+    let topic = input.topic.trim();
+    if topic.is_empty() {
+        return Err(ApiError::bad("topic required"));
+    }
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let partitions = eventide_sources::topic_partition_count(client.as_ref(), topic)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "topic": topic,
+        "partitions": partitions,
+    })))
+}
+
+#[derive(Deserialize)]
+struct KafkaClusterProbe {
+    brokers: String,
+    /// Optional: also report partition count for this topic.
+    #[serde(default)]
+    topic: String,
+}
+
+async fn probe_kafka_cluster(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaClusterProbe>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers: Vec<String> = input
+        .brokers
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if brokers.is_empty() {
+        return Err(ApiError::bad("brokers required"));
+    }
+    let started = std::time::Instant::now();
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(format!("connect failed: {e}")))?;
+    let topics = eventide_sources::list_topics(client.as_ref())
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    let topic = input.topic.trim();
+    let mut body = serde_json::json!({
+        "ok": true,
+        "brokers": brokers.join(","),
+        "latency_ms": latency_ms,
+        "topic_count": topics.len(),
+        "topics": topics.iter().map(|t| serde_json::json!({
+            "name": t.name,
+            "partitions": t.partitions,
+        })).collect::<Vec<_>>(),
+    });
+    if !topic.is_empty() {
+        match topics.iter().find(|t| t.name == topic) {
+            Some(t) => {
+                body["topic"] = serde_json::json!(topic);
+                body["partitions"] = serde_json::json!(t.partitions);
+                body["topic_found"] = serde_json::json!(true);
+            }
+            None => {
+                body["topic"] = serde_json::json!(topic);
+                body["topic_found"] = serde_json::json!(false);
+            }
+        }
+    }
+    Ok(Json(body))
+}
+
+#[derive(Deserialize)]
+struct KafkaCreateTopic {
+    brokers: String,
+    topic: String,
+    #[serde(default = "default_kafka_partitions")]
+    partitions: i32,
+    #[serde(default = "default_kafka_rf")]
+    replication_factor: i16,
+}
+
+fn default_kafka_partitions() -> i32 {
+    6
+}
+fn default_kafka_rf() -> i16 {
+    1
+}
+
+async fn create_kafka_topic(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaCreateTopic>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers: Vec<String> = input
+        .brokers
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if brokers.is_empty() {
+        return Err(ApiError::bad("brokers required"));
+    }
+    let topic = input.topic.trim();
+    if topic.is_empty() {
+        return Err(ApiError::bad("topic required"));
+    }
+    if input.partitions <= 0 {
+        return Err(ApiError::bad("partitions must be > 0"));
+    }
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    if let Ok(n) = eventide_sources::topic_partition_count(client.as_ref(), topic).await {
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "created": false,
+            "topic": topic,
+            "partitions": n,
+            "message": "topic already exists",
+        })));
+    }
+    eventide_sources::create_topic(
+        client.as_ref(),
+        topic,
+        input.partitions,
+        input.replication_factor,
+    )
+    .await
+    .map_err(|e| ApiError::bad(e.to_string()))?;
+    // Metadata may lag briefly after create.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let n = eventide_sources::topic_partition_count(client.as_ref(), topic)
+        .await
+        .unwrap_or(input.partitions);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "created": true,
+        "topic": topic,
+        "partitions": n,
+    })))
+}
+
+fn parse_brokers(raw: &str) -> ApiResult<Vec<String>> {
+    let brokers: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if brokers.is_empty() {
+        return Err(ApiError::bad("brokers required"));
+    }
+    Ok(brokers)
+}
+
+#[derive(Deserialize)]
+struct KafkaTopicRef {
+    brokers: String,
+    topic: String,
+}
+
+async fn delete_kafka_topic(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaTopicRef>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers = parse_brokers(&input.brokers)?;
+    let topic = input.topic.trim();
+    if topic.is_empty() {
+        return Err(ApiError::bad("topic required"));
+    }
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    eventide_sources::delete_topic(client.as_ref(), topic)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true, "deleted": topic })))
+}
+
+async fn describe_kafka_topic(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaTopicRef>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers = parse_brokers(&input.brokers)?;
+    let topic = input.topic.trim();
+    if topic.is_empty() {
+        return Err(ApiError::bad("topic required"));
+    }
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let parts = eventide_sources::describe_topic(client.as_ref(), topic)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "topic": topic,
+        "partitions": parts.iter().map(|p| serde_json::json!({
+            "partition": p.partition,
+            "earliest": p.earliest,
+            "latest": p.latest,
+            "lag_approx": (p.latest - p.earliest).max(0),
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct KafkaBrowseMessages {
+    brokers: String,
+    topic: String,
+    #[serde(default)]
+    partition: i32,
+    #[serde(default = "default_browse_max")]
+    max: i32,
+    /// latest | earliest | offset
+    #[serde(default = "default_browse_from")]
+    from: String,
+    offset: Option<i64>,
+}
+
+fn default_browse_max() -> i32 {
+    20
+}
+fn default_browse_from() -> String {
+    "latest".into()
+}
+
+async fn browse_kafka_messages(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaBrowseMessages>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers = parse_brokers(&input.brokers)?;
+    let topic = input.topic.trim();
+    if topic.is_empty() {
+        return Err(ApiError::bad("topic required"));
+    }
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    let (msgs, earliest, latest) = eventide_sources::browse_messages(
+        client.as_ref(),
+        topic,
+        input.partition.max(0),
+        input.max,
+        input.from.trim(),
+        input.offset,
+    )
+    .await
+    .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "topic": topic,
+        "partition": input.partition.max(0),
+        "earliest": earliest,
+        "latest": latest,
+        "messages": msgs.iter().map(|m| serde_json::json!({
+            "partition": m.partition,
+            "offset": m.offset,
+            "timestamp": m.timestamp,
+            "key": m.key,
+            "value": m.value,
+            "value_bytes": m.value_bytes,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct KafkaProduceMessage {
+    brokers: String,
+    topic: String,
+    #[serde(default)]
+    partition: i32,
+    key: Option<String>,
+    value: String,
+}
+
+async fn produce_kafka_message(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaProduceMessage>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers = parse_brokers(&input.brokers)?;
+    let topic = input.topic.trim();
+    if topic.is_empty() {
+        return Err(ApiError::bad("topic required"));
+    }
+    if input.value.is_empty() {
+        return Err(ApiError::bad("value required"));
+    }
+    if input.value.len() > 512_000 {
+        return Err(ApiError::bad("value too large (max 512KB)"));
+    }
+    let client = state
+        .kafka_pool
+        .get(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    eventide_sources::produce_message(
+        client.as_ref(),
+        topic,
+        input.partition.max(0),
+        input.key.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()),
+        &input.value,
+    )
+    .await
+    .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "topic": topic,
+        "partition": input.partition.max(0),
+    })))
+}
+
+#[derive(Deserialize)]
+struct KafkaGroupsList {
+    brokers: String,
+}
+
+async fn list_kafka_groups(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaGroupsList>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers = parse_brokers(&input.brokers)?;
+    let mut groups = crate::kafka_groups::list_consumer_groups(&brokers)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+
+    // Also surface group_ids from configured Kafka ingress routes.
+    if let Ok(routes) = state.db.list_ingress_routes() {
+        for r in routes {
+            if r.kind != IngressKind::Kafka {
+                continue;
+            }
+            let gid = r
+                .options
+                .get("group_id")
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("eventide-ingress-{}", r.id));
+            if !groups.iter().any(|g| g.group_id == gid) {
+                groups.push(crate::kafka_groups::ListedGroup {
+                    group_id: gid,
+                    protocol_type: "consumer".into(),
+                });
+            }
+        }
+    }
+    groups.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "groups": groups,
+    })))
+}
+
+#[derive(Deserialize)]
+struct KafkaGroupDescribe {
+    brokers: String,
+    group_id: String,
+    #[serde(default)]
+    topic: String,
+}
+
+async fn describe_kafka_group(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<KafkaGroupDescribe>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let brokers = parse_brokers(&input.brokers)?;
+    let group_id = input.group_id.trim();
+    if group_id.is_empty() {
+        return Err(ApiError::bad("group_id required"));
+    }
+    let topic = input.topic.trim();
+    let report = crate::kafka_groups::describe_consumer_group(
+        &brokers,
+        group_id,
+        if topic.is_empty() { None } else { Some(topic) },
+        &state.kafka_pool,
+    )
+    .await
+    .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(serde_json::json!(report)))
+}
 
 #[derive(Deserialize)]
 struct IngressInput {

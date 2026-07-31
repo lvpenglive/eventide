@@ -28,6 +28,9 @@ uuid = { workspace = true }
 jsonwebtoken = { workspace = true }
 sha2 = { workspace = true }
 futures = { workspace = true }
+tokio-stream = { workspace = true }
+bytes = { workspace = true }
+samsa = { workspace = true }
 eventide-core = { workspace = true }
 eventide-notify = { workspace = true }
 eventide-sources = { workspace = true }

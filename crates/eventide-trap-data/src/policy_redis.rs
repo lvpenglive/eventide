@@ -34,11 +34,37 @@ impl PolicyRedis {
             anyhow::bail!("redis_url is empty");
         }
         let client = redis::Client::open(redis_url).context("parse redis_url")?;
-        let conn = client.get_connection().context("redis connect")?;
+        let conn = client
+            .get_connection_with_timeout(std::time::Duration::from_secs(5))
+            .context("redis connect")?;
+        let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(5)));
         Ok(Self {
             client,
             conn: Mutex::new(conn),
         })
+    }
+
+    fn with_conn<T>(&self, mut f: impl FnMut(&mut redis::Connection) -> Result<T>) -> Result<T> {
+        let mut guard = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("redis mutex poisoned"))?;
+        match f(&mut guard) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // Stale / half-open TCP — reconnect once then retry.
+                tracing::debug!(error = %e, "redis command failed; reconnecting");
+                let fresh = self
+                    .client
+                    .get_connection_with_timeout(std::time::Duration::from_secs(5))
+                    .context("redis reconnect")?;
+                let _ = fresh.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let _ = fresh.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+                *guard = fresh;
+                f(&mut guard)
+            }
+        }
     }
 
     pub fn client(&self) -> &redis::Client {
@@ -59,16 +85,15 @@ impl PolicyRedis {
             policies: policies.to_vec(),
         };
         let raw = serde_json::to_string(&snap).context("serialize policy snapshot")?;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("redis mutex poisoned"))?;
-        let _: () = conn
-            .set(POLICY_SNAPSHOT_KEY, &raw)
-            .context("redis SET policy snapshot")?;
-        let _: i64 = conn
-            .publish(POLICY_CHANGED_CHANNEL, &stamp)
-            .context("redis PUBLISH policy changed")?;
+        self.with_conn(|conn| {
+            let _: () = conn
+                .set(POLICY_SNAPSHOT_KEY, &raw)
+                .context("redis SET policy snapshot")?;
+            let _: i64 = conn
+                .publish(POLICY_CHANGED_CHANNEL, &stamp)
+                .context("redis PUBLISH policy changed")?;
+            Ok(())
+        })?;
         tracing::info!(
             stamp = %stamp,
             count = policies.len(),
@@ -78,13 +103,10 @@ impl PolicyRedis {
     }
 
     pub fn load_snapshot(&self) -> Result<Option<PolicySnapshot>> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| anyhow::anyhow!("redis mutex poisoned"))?;
-        let raw: Option<String> = conn
-            .get(POLICY_SNAPSHOT_KEY)
-            .context("redis GET policy snapshot")?;
+        let raw: Option<String> = self.with_conn(|conn| {
+            conn.get(POLICY_SNAPSHOT_KEY)
+                .context("redis GET policy snapshot")
+        })?;
         let Some(raw) = raw.filter(|s| !s.is_empty()) else {
             return Ok(None);
         };

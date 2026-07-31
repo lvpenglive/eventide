@@ -207,9 +207,9 @@ pub struct GenericAlert {
     pub severity: Option<String>,
     #[serde(default)]
     pub value: Option<f64>,
-    #[serde(default)]
+    #[serde(default, alias = "startsAt")]
     pub starts_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, alias = "endsAt")]
     pub ends_at: Option<DateTime<Utc>>,
 }
 

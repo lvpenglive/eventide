@@ -1,0 +1,60 @@
+name: Rust
+on: 
+  push:
+    branches: [ "main" ]
+    tags:
+      - '*'
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:  
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.89.0
+
+jobs:
+  static_analysis:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: rustup
+        run: rustup default $RUST_VERSION
+      - name: cargo-fmt
+        run: |
+          set -euxo pipefail
+          rustup component add rustfmt 
+          rustfmt --version
+          cargo fmt --all -- --check
+      - name: cargo-clippy
+        run: rustup component add clippy && cargo clippy --all-targets --all-features -- --no-deps -D warnings
+
+  build:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+    - uses: actions/checkout@v3
+    - uses: adambirds/docker-compose-action@v1.5.0
+      with:
+        compose-file: "./docker-compose.yaml"
+    - name: rustup
+      run: rustup default $RUST_VERSION
+    - name: build
+      run: make
+    - name: test
+      run: |
+        set -euxo pipefail
+        cargo test --tests --all-features -- --show-output --test-threads=1
+
+
+  publish:
+      runs-on: ubuntu-latest
+      if: startsWith(github.event.ref, 'refs/tags/')
+      steps:
+        - uses: actions/checkout@v3
+        - name: rustup
+          run: rustup default $RUST_VERSION
+        - name: publish
+          env:
+            CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          run: cargo publish --token $CARGO_REGISTRY_TOKEN

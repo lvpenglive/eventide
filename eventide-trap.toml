@@ -4,8 +4,11 @@
 listen_http = "0.0.0.0:8081"
 listen_udp = "0.0.0.0:1162"
 
-kafka_brokers = "127.0.0.1:9092"
+kafka_brokers = "120.26.105.115:9092"
 kafka_topic = "eventide.snmptrap"
+# Must match topic partition count + Kafka Ingress options.partitions
+kafka_partitions = 6
+# Only used when kafka_partitions = 1
 kafka_partition = 0
 
 community = ""

@@ -169,9 +169,9 @@ eventide-server
 
 1. **HTTP 服务**：对外 API + 控制台页面（多实例均可）  
 2. **规则调度器**：按 `scheduler_tick_seconds` 轮询到期规则（仅 cluster leader）  
-3. **Kafka Ingress 轮询**：消费「告警消息」类 Topic（仅 leader）  
+3. **Kafka Ingress**：以 Kafka **consumer group** 消费告警 Topic（多实例自动 rebalance）  
 4. **MySQL**：配置与告警事件持久化  
-5. **Redis**：通知节流 / 聚合状态 + 调度选主 lease（多实例共享）  
+5. **Redis**：通知节流 / 聚合状态 + 调度选主（不再用于 Ingress 分区分配）  
 
 Kafka 仅作为可选数据源/接入；无消息中间件强依赖。
 
@@ -345,7 +345,7 @@ HTTP POST / Kafka 消费
 | `alert_events` | 告警事件（`fingerprint` UNIQUE） |
 | `silences` | 静默策略 |
 | `ingress_routes` | 接入路由（含 endpoint / options） |
-| `ingress_kafka_offsets` | Kafka Ingress 消费位点 |
+| `ingress_kafka_offsets` | （遗留）旧版 MySQL 位点表；现由 Kafka consumer group 管理位点 |
 | `enrich_rules` | 告警丰富规则 |
 | `lookup_tables` | 台账数据 |
 | `notify_logs` | 通知发送记录 |
@@ -463,11 +463,14 @@ token_ttl_hours = 24
 # [storm]
 # ...
 
-# 多实例调度选主（Redis lease）；单机可设 enabled = false
+# 多实例：规则调度选主（Kafka Ingress 用 consumer group）
 [cluster]
 enabled = true
 leader_key = "eventide:cluster:leader"
 lease_seconds = 15
+# 以下两项已废弃（保留兼容，运行时忽略）
+ingress_partition_lease_seconds = 15
+ingress_max_claim = 0
 ```
 
 | 字段 | 含义 |
@@ -476,10 +479,12 @@ lease_seconds = 15
 | `mysql_url` | MySQL 连接串（库不存在时会尝试自动创建） |
 | `redis_url` | Redis 连接串（风暴节流/聚合状态 + 选主） |
 | `static_dir` | 控制台静态资源目录 |
-| `scheduler_tick_seconds` | 调度与 Kafka Ingress 轮询基准间隔 |
+| `scheduler_tick_seconds` | 规则调度基准间隔 |
 | `auth.*` | 登录账号、JWT 密钥与有效期 |
 | `[storm]` | 通知节流 / 聚合 / 接入削峰（**改后需重启**；用法见 [§11.8](#118-抗告警风暴怎么用)） |
-| `[cluster]` | 多实例选主：仅 lease 持有者跑规则调度 / Kafka 拉取 / 聚合 flush；HTTP 与 webhook 仍全员服务 |
+| `[cluster]` | 多实例：仅 leader 跑规则调度 / 聚合 flush；**Kafka Ingress 用 consumer group 扩容**；HTTP 与 webhook 仍全员服务 |
+| `[cluster].ingress_partition_lease_seconds` | **已废弃**（忽略） |
+| `[cluster].ingress_max_claim` | **已废弃**（忽略） |
 | `[elasticsearch]` | 可选预置 ES 连接；**控制台「系统设置」也可改地址/账号**，并开关同步与默认「最近/历史事件」 |
 
 启动时可指定配置路径：
@@ -501,6 +506,8 @@ cargo run -p eventide-server -- /path/to/eventide.toml
 | 告警规则 | CRUD、试跑 |
 | 通知渠道 | Webhook / 钉钉 / 企微 / 飞书 |
 | 告警接入 | Alertmanager / Generic / Kafka；字段映射与帮助说明 |
+| Kafka | 轻量管理：连接、Topic 创建/删除、分区位点、消息浏览、试写（侧栏「工具」） |
+| SNMP Trap | Trap 服务状态、试推送、对接 Kafka Ingress |
 | 告警丰富 | 台账数据 + 丰富规则；试跑预览弹窗 |
 | 告警事件 | 按状态筛选、详情（含丰富后 labels） |
 | 静默策略 | 时间窗 + 标签匹配 |
@@ -684,7 +691,8 @@ Zabbix 风格示例：`map_ip=sourceciname|before:_`，`map_name=sourcealertkey`
   "options": {
     "topic": "alerts",
     "start": "latest",
-    "partitions": "8"
+    "partitions": "8",
+    "group_id": "eventide-ingress-alerts"
   },
   "channel_ids": ["<channel-uuid>"],
   "enabled": true
@@ -692,8 +700,9 @@ Zabbix 风格示例：`map_ip=sourceciname|before:_`，`map_name=sourcealertkey`
 ```
 
 消息体支持 Alertmanager JSON、Generic 批量/单条、Jeecg 拨测，以及带字段映射的自定义 JSON。  
-位点保存在 `ingress_kafka_offsets`；默认从 `latest` 开始，只消费新消息。  
-实现上会 **复用 Kafka client**，并在 leader 内 **并行 fetch 各 partition**（入库串行）；通知走 **异步队列**（先落库再发渠道），减轻连接开销与 HTTP 通知阻塞消费。
+位点由 Kafka **consumer group**（`__consumer_offsets`）管理；默认 `group_id = eventide-ingress-{route_id}`，可用 `options.group_id` 覆盖。新 group 无提交位点时按 `options.start`（`latest`/`earliest`）种子位点。  
+多实例共用同一 `group_id` 时由 Kafka rebalance 分摊分区；**不依赖 Redis**。通知走 **异步队列**（先落库再发渠道）。  
+订阅分区数优先从 Kafka **metadata 自动探测**；探测失败时回退到 `options.partitions`。Trap 侧 `kafka_partitions` 建议与 Topic 真实分区数一致。
 
 ### 11.5 告警丰富（台账 + 规则）
 
@@ -834,7 +843,7 @@ degrade_notify_per_sec = 50    # 通知尝试速率阈值（配合 degrade）
 - 海量日志/指标长期存储（应仍在 Loki / Prometheus）  
 - 超高 QPS 且无队列削峰的极端风暴——可先用 [§11.8](#118-抗告警风暴怎么用) 的节流/聚合/429；更重的削峰需外置 Kafka 等  
 
-多实例时：HTTP / webhook 可水平扩展；**规则调度、Kafka Ingress 轮询、聚合 flush** 由 Redis lease 选主，仅 leader 执行（见 `[cluster]`）。
+多实例时：HTTP / webhook 可水平扩展；**规则调度、聚合 flush** 由 Redis lease 选主；**Kafka Ingress** 用 consumer group 分摊（见 `[cluster]` / `options.group_id`）。
 
 瓶颈主要在 **MySQL 写并发**、**Redis 往返** 与 **单进程算力**，不在 Rust 语言本身。
 
@@ -1019,7 +1028,7 @@ degrade_skip_notify = false
                ▼
 ┌─────────────────────────────┐
 │  Eventide（现有）             │
-│  · Kafka Ingress（仅 leader） │
+│  · Kafka Ingress（consumer group）│
 │  · 台账丰富 / 静默 / 通知     │
 │  · 控制台「SNMP Trap」门户    │
 └─────────────────────────────┘
@@ -1055,11 +1064,13 @@ cargo run -p eventide-trap -- eventide-trap.toml
 
 # eventide-trap.toml：mysql_url 与 Eventide 同库；同样配置 S3 供热加载 MIB
 # redis_url 与 Eventide 同 Redis（策略快照 + pub/sub；失败回退 MySQL）
+# kafka_partitions 须与 Topic 分区数、Kafka Ingress options.partitions 一致（按 peer IP 散列）
 # policy_reload_secs 兜底轮询（Redis 优先，感知 Server 侧 CRUD）
 
 # 3. 控制台 → MIB 库 / Trap 策略（走 /api/...）
 # 4. 接入配置 → SNMP Trap →「试推送」（走 /trap-api/...）
-# 5. 「告警接入」新建 Kafka Ingress：brokers + options.topic=eventide.snmptrap
+# 5. 「告警接入」新建 Kafka Ingress：brokers + options.topic=eventide.snmptrap + partitions=8
+# 6. 扩分区示例：kafka-topics --alter --topic eventide.snmptrap --partitions 8
 ```
 
 无 Kafka 时可将 `eventide-trap.toml` 的 `kafka_brokers` 留空，用试推送勾选「仅预览 JSON」验证归一化字段。
@@ -1077,8 +1088,8 @@ cargo run -p eventide-trap -- eventide-trap.toml
 | MIB / 策略 **CRUD**、OID 树、xlsx 导入导出 | **Eventide** | JWT + IAM；写 MySQL + RustFS；策略同步 Redis |
 | MIB 正文（对象存储）+ 元数据（MySQL） | 共享存储 | Server 写；Trap 热加载读 |
 | Trap 策略匹配（内存） | **Trap 服务** | Redis 快照 + pub/sub；失败回退 MySQL |
-| 监听 UDP、解析、指纹、写入 Kafka | **Trap 服务** | UDP 扇入；多机可并行写同一 Topic |
-| Kafka Ingress 消费、入库、通知、静默 | **Eventide** | 复用现有能力 |
+| 监听 UDP、解析、指纹、写入 Kafka | **Trap 服务** | UDP 扇入；多机可并行写同一 Topic（按 peer IP 散列分区） |
+| Kafka Ingress 消费、入库、通知、静默 | **Eventide** | consumer group 多实例扩容；复用现有能力 |
 | IP→机房/负责人等**运营台账丰富** | **Eventide** | 现有「告警丰富 / 台账」 |
 | Trap **协议侧**丰富（OID→告警名、severity、`${var}` 摘要） | **Trap 服务**（写 Kafka 前完成） | 与台账丰富分层 |
 

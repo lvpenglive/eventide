@@ -9,12 +9,12 @@
 
   // Zabbix-aligned severities (0–5)
   const SEVERITIES = [
-    ["not_classified", "0 Not classified"],
-    ["information", "1 Information"],
-    ["warning", "2 Warning"],
-    ["average", "3 Average"],
-    ["high", "4 High"],
-    ["disaster", "5 Disaster"],
+    ["not_classified", "未分类"],
+    ["information", "信息"],
+    ["warning", "警告"],
+    ["average", "一般严重"],
+    ["high", "严重"],
+    ["disaster", "灾难"],
   ];
   function severityOptions(selected, fallback = "warning") {
     const cur = selected || fallback;
@@ -22,6 +22,10 @@
       ([v, label]) =>
         `<option value="${v}" ${cur === v ? "selected" : ""}>${label}</option>`
     ).join("");
+  }
+  function severityLabel(s) {
+    const hit = SEVERITIES.find(([v]) => v === s);
+    return hit ? hit[1] : s || "—";
   }
 
   const PAGE_GROUP = {
@@ -41,6 +45,7 @@
     roles: "system",
     departments: "system",
     settings: "system",
+    kafka: "tools",
   };
 
   const PAGE_PERM = {
@@ -50,6 +55,7 @@
     datasources: "datasources:read",
     rules: "rules:read",
     ingress: "ingress:read",
+    kafka: "ingress:read",
     trap: "trap:read",
     mib: "trap:read",
     policies: "trap:read",
@@ -69,6 +75,7 @@
     "datasources",
     "rules",
     "ingress",
+    "kafka",
     "trap",
     "mib",
     "policies",
@@ -94,6 +101,7 @@
     channels: ["通知渠道", "Webhook · 自定义 HTTP · 钉钉 · 企微 · 飞书 · Slack · TG"],
     notifies: ["通知日志", "发送记录 · 可查正文"],
     ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
+    kafka: ["Kafka", "连接 · Topic · 消息浏览 · 试写"],
     trap: ["SNMP Trap", "Trap 服务状态 · 试推送 · 对接 Kafka Ingress"],
     mib: ["MIB 库", "上传 MIB · OID 树浏览 · 导出 Trap 策略"],
     policies: ["Trap 策略", "导入 MIB 导出 · 匹配 OID · 摘要模板生效"],
@@ -885,8 +893,12 @@
     },
 
     async ingress(root) {
-      setActions(`<button class="primary" id="btn-add">新建接入</button>`);
+      setActions(`
+        <button class="ghost" id="btn-snmp-sample">SNMP Trap 样例</button>
+        <button class="primary" id="btn-add">新建接入</button>
+      `);
       document.getElementById("btn-add").onclick = () => editIngress();
+      document.getElementById("btn-snmp-sample").onclick = () => editIngressSnmpTrapSample();
       const [rows, chs] = await Promise.all([api("/api/ingress"), api("/api/channels")]);
       state.cache.channels = chs;
       const chMap = Object.fromEntries(chs.map((c) => [c.id, c]));
@@ -898,6 +910,7 @@
             <h3>配置告警接入</h3>
             <ol class="steps">
               <li>先在「通知渠道」配置至少一个机器人 / Webhook（可选，也可稍后绑定）</li>
+              <li>Kafka / SNMP Trap：可用「SNMP Trap 样例」一键生成；或先到「工具 → Kafka」确认 Topic</li>
               <li>创建接入：选择 Alertmanager / Generic（含拨测） / Kafka</li>
               <li>把外部平台 Webhook 指到下方生成的地址，或使用「试推送」验证</li>
               <li>在「告警事件」查看 firing / resolved 与通知结果</li>
@@ -1000,6 +1013,470 @@
       root.querySelectorAll("[data-test]").forEach((b) => {
         b.onclick = () => openIngressTest(rows.find((x) => x.id === b.dataset.test));
       });
+    },
+
+    async kafka(root) {
+      setActions(`<button class="ghost" id="btn-k-refresh">刷新 Topic</button>`);
+      const canWrite = can("ingress:write");
+      let brokers =
+        localStorage.getItem("eventide_kafka_brokers") || "120.26.105.115:9092";
+      let focusTopic =
+        localStorage.getItem("eventide_kafka_topic") || "eventide.snmptrap";
+      try {
+        const routes = await api("/api/ingress");
+        const kr = (routes || []).find((r) => r.kind === "kafka");
+        if (kr?.endpoint) brokers = localStorage.getItem("eventide_kafka_brokers") || kr.endpoint;
+        if (kr?.options?.topic)
+          focusTopic = localStorage.getItem("eventide_kafka_topic") || kr.options.topic;
+      } catch (_) {}
+
+      const persist = () => {
+        const b = String(document.getElementById("k-brokers")?.value || "").trim();
+        const t = String(document.getElementById("k-topic")?.value || "").trim();
+        if (b) localStorage.setItem("eventide_kafka_brokers", b);
+        if (t) localStorage.setItem("eventide_kafka_topic", t);
+      };
+
+      const renderShell = (statusHtml, topicsHtml, detailHtml) => {
+        root.innerHTML = `
+          <div class="panel" style="margin-bottom:16px">
+            <h3 style="margin:0 0 0.5rem;font-size:1rem">集群连接</h3>
+            <p class="hint" style="margin:0 0 12px">轻量 Kafka 管理：Topic、消费组积压、浏览消息、试写、创建/删除。</p>
+            <div class="row">
+              <div class="field" style="flex:2">
+                <label>Brokers</label>
+                <input id="k-brokers" value="${esc(brokers)}" placeholder="host:9092" />
+              </div>
+              <div class="field" style="flex:1">
+                <label>默认 Topic</label>
+                <input id="k-topic" value="${esc(focusTopic)}" placeholder="eventide.snmptrap" />
+              </div>
+            </div>
+            <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+              <button class="primary" type="button" id="k-connect">连接并列出 Topic</button>
+              <button type="button" id="k-groups">列出消费组</button>
+              ${
+                canWrite
+                  ? `<button type="button" id="k-create">创建 Topic</button>`
+                  : ""
+              }
+            </div>
+            <div id="k-status" style="margin-top:12px">${statusHtml || ""}</div>
+          </div>
+          <div class="row" style="align-items:flex-start;gap:16px;flex-wrap:wrap">
+            <div class="panel" style="flex:1;min-width:280px;margin:0">
+              <h3 style="margin:0 0 0.75rem;font-size:1rem">Topics</h3>
+              <div id="k-topics">${topicsHtml || `<p class="hint">点击「连接并列出 Topic」</p>`}</div>
+            </div>
+            <div class="panel" style="flex:2;min-width:320px;margin:0">
+              <h3 style="margin:0 0 0.75rem;font-size:1rem">详情 / 消息</h3>
+              <div id="k-detail">${detailHtml || `<p class="hint">选择左侧 Topic</p>`}</div>
+            </div>
+          </div>
+          <div class="panel" style="margin-top:16px">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">Consumer Groups</h3>
+            <div id="k-groups-panel"><p class="hint">点击「列出消费组」查看成员与积压（lag）</p></div>
+          </div>`;
+      };
+
+      const loadTopics = async (quiet = false) => {
+        persist();
+        brokers = String(document.getElementById("k-brokers").value || "").trim();
+        focusTopic = String(document.getElementById("k-topic").value || "").trim();
+        if (!brokers) {
+          toast("请填写 Brokers", true);
+          return;
+        }
+        document.getElementById("k-status").innerHTML = "连接中…";
+        try {
+          const data = await api("/api/ingress/kafka/probe", {
+            method: "POST",
+            body: JSON.stringify({ brokers, topic: focusTopic }),
+          });
+          const topics = data.topics || [];
+          document.getElementById("k-status").innerHTML = `
+            <span class="badge on">已连接</span>
+            延迟 ${esc(data.latency_ms)} ms · Topic ${esc(data.topic_count)}
+            ${
+              focusTopic
+                ? data.topic_found
+                  ? `· <code>${esc(focusTopic)}</code> ${esc(data.partitions)} 分区`
+                  : `· <span class="badge off">${esc(focusTopic)} 不存在</span>`
+                : ""
+            }`;
+          document.getElementById("k-topics").innerHTML = topics.length
+            ? `<table class="map-help-table" style="width:100%">
+                <thead><tr><th>名称</th><th>分区</th><th></th></tr></thead>
+                <tbody>
+                ${topics
+                  .map(
+                    (t) => `<tr>
+                      <td><code>${esc(t.name)}</code></td>
+                      <td>${esc(t.partitions)}</td>
+                      <td style="white-space:nowrap">
+                        <button type="button" data-open="${esc(t.name)}" data-parts="${esc(
+                      t.partitions
+                    )}">打开</button>
+                        ${
+                          canWrite
+                            ? `<button type="button" class="danger" data-del-topic="${esc(
+                                t.name
+                              )}">删除</button>`
+                            : ""
+                        }
+                      </td>
+                    </tr>`
+                  )
+                  .join("")}
+                </tbody></table>`
+            : `<p class="hint">暂无 Topic</p>`;
+          bindTopicActions();
+          if (!quiet) toast("已连接");
+          if (focusTopic && data.topic_found) {
+            openTopic(focusTopic, data.partitions || 1);
+          }
+        } catch (e) {
+          document.getElementById("k-status").innerHTML = `<span class="badge off">失败</span> ${esc(
+            e.message || e
+          )}`;
+          if (!quiet) toast(e.message || String(e), true);
+        }
+      };
+
+      const openTopic = async (name, partsHint) => {
+        persist();
+        brokers = String(document.getElementById("k-brokers").value || "").trim();
+        focusTopic = name;
+        localStorage.setItem("eventide_kafka_topic", name);
+        const topicInput = document.getElementById("k-topic");
+        if (topicInput) topicInput.value = name;
+        const detail = document.getElementById("k-detail");
+        detail.innerHTML = `<p class="hint">加载 <code>${esc(name)}</code> …</p>`;
+        try {
+          const desc = await api("/api/ingress/kafka/describe", {
+            method: "POST",
+            body: JSON.stringify({ brokers, topic: name }),
+          });
+          const parts = desc.partitions || [];
+          const partOpts = parts
+            .map((p) => `<option value="${p.partition}">p${p.partition}</option>`)
+            .join("");
+          detail.innerHTML = `
+            <div class="field"><label>Topic</label><div><code>${esc(name)}</code> · ${
+              parts.length || partsHint || "?"
+            } 分区</div></div>
+            <table class="map-help-table" style="width:100%;margin-bottom:12px">
+              <thead><tr><th>分区</th><th>earliest</th><th>latest</th><th>消息约数</th></tr></thead>
+              <tbody>
+                ${parts
+                  .map(
+                    (p) => `<tr>
+                      <td>${esc(p.partition)}</td>
+                      <td class="mono">${esc(p.earliest)}</td>
+                      <td class="mono">${esc(p.latest)}</td>
+                      <td>${esc(p.lag_approx)}</td>
+                    </tr>`
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+            <div class="seg" style="margin-bottom:12px">
+              <div class="seg-title">浏览消息</div>
+              <div class="row">
+                <div class="field"><label>分区</label><select id="kb-part">${partOpts ||
+                  '<option value="0">0</option>'}</select></div>
+                <div class="field"><label>起点</label>
+                  <select id="kb-from">
+                    <option value="latest">latest 最近</option>
+                    <option value="earliest">earliest</option>
+                    <option value="offset">指定 offset</option>
+                  </select>
+                </div>
+                <div class="field"><label>条数</label><input id="kb-max" type="number" min="1" max="200" value="20" /></div>
+                <div class="field"><label>offset</label><input id="kb-offset" type="number" placeholder="从 earliest 起" /></div>
+              </div>
+              <button type="button" class="primary" id="kb-load">加载消息</button>
+              <div id="kb-msgs" style="margin-top:10px"></div>
+            </div>
+            ${
+              canWrite
+                ? `<div class="seg">
+              <div class="seg-title">试写一条消息</div>
+              <div class="row">
+                <div class="field"><label>分区</label><select id="kp-part">${partOpts ||
+                  '<option value="0">0</option>'}</select></div>
+                <div class="field" style="flex:1"><label>Key（可选）</label><input id="kp-key" placeholder="peer IP 等" /></div>
+              </div>
+              <div class="field"><label>Value（JSON 文本）</label>
+                <textarea id="kp-value" rows="5" placeholder='{"status":"firing","labels":{"alertname":"test"}}'></textarea>
+              </div>
+              <button type="button" id="kp-send">发送</button>
+            </div>`
+                : `<p class="hint">需要 <code>ingress:write</code> 才能试写 / 删 Topic。</p>`
+            }`;
+
+          document.getElementById("kb-load").onclick = async () => {
+            const partition = Number(document.getElementById("kb-part").value || 0);
+            const from = document.getElementById("kb-from").value;
+            const max = Number(document.getElementById("kb-max").value || 20);
+            const offsetRaw = document.getElementById("kb-offset").value;
+            const body = { brokers, topic: name, partition, max, from };
+            if (from === "offset" && offsetRaw !== "") body.offset = Number(offsetRaw);
+            const box = document.getElementById("kb-msgs");
+            box.innerHTML = "加载中…";
+            try {
+              const data = await api("/api/ingress/kafka/messages", {
+                method: "POST",
+                body: JSON.stringify(body),
+              });
+              const msgs = data.messages || [];
+              box.innerHTML = msgs.length
+                ? `<p class="hint">earliest=${esc(data.earliest)} latest=${esc(
+                    data.latest
+                  )} · ${msgs.length} 条</p>
+                  ${msgs
+                    .map(
+                      (m) => `<details style="margin:8px 0;border-top:1px solid var(--border, #333);padding-top:8px">
+                        <summary class="mono" style="cursor:pointer">
+                          p${esc(m.partition)} @ ${esc(m.offset)} · ${esc(m.timestamp)}
+                          · ${esc(m.value_bytes)}B
+                          ${m.key ? ` · key=${esc(m.key)}` : ""}
+                        </summary>
+                        <pre class="mono" style="white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:240px;overflow:auto">${esc(
+                          m.value
+                        )}</pre>
+                      </details>`
+                    )
+                    .join("")}`
+                : `<p class="hint">该分区暂无消息（earliest=${esc(data.earliest)} latest=${esc(
+                    data.latest
+                  )}）</p>`;
+            } catch (e) {
+              box.innerHTML = `<span class="badge off">失败</span> ${esc(e.message || e)}`;
+            }
+          };
+
+          const sendBtn = document.getElementById("kp-send");
+          if (sendBtn) {
+            sendBtn.onclick = async () => {
+              const partition = Number(document.getElementById("kp-part").value || 0);
+              const key = String(document.getElementById("kp-key").value || "").trim();
+              const value = String(document.getElementById("kp-value").value || "");
+              if (!value) {
+                toast("请填写 Value", true);
+                return;
+              }
+              try {
+                await api("/api/ingress/kafka/produce", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    brokers,
+                    topic: name,
+                    partition,
+                    key: key || null,
+                    value,
+                  }),
+                });
+                toast("已发送");
+                document.getElementById("kb-load").click();
+              } catch (e) {
+                toast(e.message || String(e), true);
+              }
+            };
+          }
+        } catch (e) {
+          detail.innerHTML = `<span class="badge off">失败</span> ${esc(e.message || e)}`;
+        }
+      };
+
+      const bindTopicActions = () => {
+        root.querySelectorAll("[data-open]").forEach((b) => {
+          b.onclick = () => openTopic(b.dataset.open, Number(b.dataset.parts || 1));
+        });
+        root.querySelectorAll("[data-del-topic]").forEach((b) => {
+          b.onclick = async () => {
+            const name = b.dataset.delTopic;
+            if (!confirm(`确认删除 Topic「${name}」？此操作不可恢复。`)) return;
+            persist();
+            brokers = String(document.getElementById("k-brokers").value || "").trim();
+            try {
+              await api("/api/ingress/kafka/topics/delete", {
+                method: "POST",
+                body: JSON.stringify({ brokers, topic: name }),
+              });
+              toast("已删除");
+              document.getElementById("k-detail").innerHTML = `<p class="hint">Topic 已删除</p>`;
+              await loadTopics(true);
+            } catch (e) {
+              toast(e.message || String(e), true);
+            }
+          };
+        });
+      };
+
+      const openGroup = async (groupId) => {
+        persist();
+        brokers = String(document.getElementById("k-brokers").value || "").trim();
+        focusTopic = String(document.getElementById("k-topic").value || "").trim();
+        const panel = document.getElementById("k-groups-panel");
+        if (!panel) return;
+        panel.innerHTML = `<p class="hint">加载消费组 <code>${esc(groupId)}</code> …</p>`;
+        try {
+          const data = await api("/api/ingress/kafka/groups/describe", {
+            method: "POST",
+            body: JSON.stringify({
+              brokers,
+              group_id: groupId,
+              topic: focusTopic || undefined,
+            }),
+          });
+          const members = data.members || [];
+          const parts = data.partitions || [];
+          panel.innerHTML = `
+            <div class="row" style="gap:16px;flex-wrap:wrap;margin-bottom:12px">
+              <div><label class="hint">Group</label><div><code>${esc(data.group_id)}</code></div></div>
+              <div><label class="hint">状态</label><div>${esc(data.state || "—")}</div></div>
+              <div><label class="hint">协议</label><div>${esc(data.protocol_type || "—")} / ${esc(
+                data.protocol || "—"
+              )}</div></div>
+              <div><label class="hint">总积压 lag</label><div><strong>${esc(
+                data.total_lag ?? 0
+              )}</strong></div></div>
+            </div>
+            <div class="seg-title" style="margin-bottom:6px">成员 (${members.length})</div>
+            ${
+              members.length
+                ? `<table class="map-help-table" style="width:100%;margin-bottom:12px">
+                    <thead><tr><th>member_id</th><th>client_id</th><th>host</th></tr></thead>
+                    <tbody>${members
+                      .map(
+                        (m) => `<tr>
+                          <td class="mono" style="font-size:12px">${esc(m.member_id)}</td>
+                          <td>${esc(m.client_id)}</td>
+                          <td>${esc(m.client_host)}</td>
+                        </tr>`
+                      )
+                      .join("")}</tbody></table>`
+                : `<p class="hint">无活跃成员（Empty / Dead 或尚未加入）</p>`
+            }
+            <div class="seg-title" style="margin-bottom:6px">分区位点 / 积压${
+              focusTopic ? ` · 过滤 <code>${esc(focusTopic)}</code>` : ""
+            }</div>
+            ${
+              parts.length
+                ? `<table class="map-help-table" style="width:100%">
+                    <thead><tr><th>Topic</th><th>分区</th><th>已提交</th><th>latest</th><th>lag</th></tr></thead>
+                    <tbody>${parts
+                      .map(
+                        (p) => `<tr>
+                          <td><code>${esc(p.topic)}</code></td>
+                          <td>${esc(p.partition)}</td>
+                          <td class="mono">${esc(p.committed)}</td>
+                          <td class="mono">${esc(p.latest)}</td>
+                          <td><strong>${esc(p.lag)}</strong></td>
+                        </tr>`
+                      )
+                      .join("")}</tbody></table>
+                    <p class="hint" style="margin-top:8px">lag = max(0, latest − committed)；committed=-1 表示尚未提交，按 latest 计积压。</p>`
+                : `<p class="hint">该组暂无已提交位点${
+                    focusTopic ? "（或与当前 Topic 无关）" : ""
+                  }</p>`
+            }
+            <div class="actions" style="margin-top:12px">
+              <button type="button" id="k-groups-back">返回列表</button>
+              <button type="button" id="k-groups-refresh-one">刷新此组</button>
+            </div>`;
+          document.getElementById("k-groups-back").onclick = () => loadGroups(true);
+          document.getElementById("k-groups-refresh-one").onclick = () => openGroup(groupId);
+        } catch (e) {
+          panel.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
+            e.message || e
+          )}</p>
+            <button type="button" id="k-groups-back">返回列表</button>`;
+          document.getElementById("k-groups-back").onclick = () => loadGroups(true);
+          toast(e.message || String(e), true);
+        }
+      };
+
+      const loadGroups = async (quiet = false) => {
+        persist();
+        brokers = String(document.getElementById("k-brokers").value || "").trim();
+        if (!brokers) {
+          toast("请填写 Brokers", true);
+          return;
+        }
+        const panel = document.getElementById("k-groups-panel");
+        if (!panel) return;
+        panel.innerHTML = `<p class="hint">加载消费组…</p>`;
+        try {
+          const data = await api("/api/ingress/kafka/groups", {
+            method: "POST",
+            body: JSON.stringify({ brokers }),
+          });
+          const groups = data.groups || [];
+          panel.innerHTML = groups.length
+            ? `<table class="map-help-table" style="width:100%">
+                <thead><tr><th>Group ID</th><th>protocol</th><th></th></tr></thead>
+                <tbody>${groups
+                  .map(
+                    (g) => `<tr>
+                      <td><code>${esc(g.group_id)}</code></td>
+                      <td>${esc(g.protocol_type || "—")}</td>
+                      <td><button type="button" data-group="${esc(g.group_id)}">详情 / 积压</button></td>
+                    </tr>`
+                  )
+                  .join("")}</tbody></table>
+              <p class="hint" style="margin-top:8px">详情默认按上方「默认 Topic」过滤位点；清空 Topic 可看该组全部 Topic。</p>`
+            : `<p class="hint">未发现消费组</p>`;
+          panel.querySelectorAll("[data-group]").forEach((b) => {
+            b.onclick = () => openGroup(b.dataset.group);
+          });
+          if (!quiet) toast(`消费组 ${groups.length} 个`);
+        } catch (e) {
+          panel.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
+            e.message || e
+          )}</p>`;
+          if (!quiet) toast(e.message || String(e), true);
+        }
+      };
+
+      renderShell("", "", "");
+      document.getElementById("btn-k-refresh").onclick = () => loadTopics(false);
+      document.getElementById("k-connect").onclick = () => loadTopics(false);
+      document.getElementById("k-groups").onclick = () => loadGroups(false);
+      const createBtn = document.getElementById("k-create");
+      if (createBtn) {
+        createBtn.onclick = async () => {
+          persist();
+          brokers = String(document.getElementById("k-brokers").value || "").trim();
+          focusTopic = String(document.getElementById("k-topic").value || "").trim();
+          const partitions = Number(
+            prompt("分区数", "6") || "0"
+          );
+          if (!brokers || !focusTopic || partitions <= 0) {
+            toast("需要 Brokers、Topic 与有效分区数", true);
+            return;
+          }
+          if (!confirm(`创建 Topic「${focusTopic}」· ${partitions} 分区 · rf=1？`)) return;
+          try {
+            const data = await api("/api/ingress/kafka/topics", {
+              method: "POST",
+              body: JSON.stringify({
+                brokers,
+                topic: focusTopic,
+                partitions,
+                replication_factor: 1,
+              }),
+            });
+            toast(data.created ? "已创建" : "已存在");
+            await loadTopics(true);
+          } catch (e) {
+            toast(e.message || String(e), true);
+          }
+        };
+      }
+      // auto connect once
+      loadTopics(true);
     },
 
     async alerts(root) {
@@ -2836,7 +3313,7 @@
 
   function alertTargetIp(a) {
     const l = a.labels || {};
-    return l.alertIp || l.ipaddr || l.instance || l.host || l.hostname || "";
+    return l.alertIp || l.ip || l.ipaddr || l.instance || l.host || l.hostname || "";
   }
 
   function alertCards(rows, ingressMap) {
@@ -2850,7 +3327,7 @@
         const ip = alertTargetIp(a);
         const chips = labelChips(
           a.labels,
-          ["alertname", "severity", "source", "alertIp", "ipaddr", "instance", "host", "hostname"],
+          ["alertname", "severity", "source", "alertIp", "ip", "ipaddr", "instance", "host", "hostname"],
           3
         );
         return `<article class="alert-card status-${esc(a.status)} sev-${esc(
@@ -2861,7 +3338,7 @@
             <div class="ac-top">
               <div class="ac-title-row">
                 <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
-                <span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span>
+                <span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span>
                 <h3 class="ac-name">${esc(name)}</h3>
               </div>
               <button type="button" class="ghost ac-detail" data-alert-detail="${i}">详情</button>
@@ -2923,12 +3400,12 @@
         const ip = alertTargetIp(a);
         return `<tr data-alert-idx="${i}">
       <td><span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span></td>
-      <td><span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span></td>
+      <td><span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span></td>
       <td>
         <div class="alert-name">${esc(name)}</div>
         <div class="alert-labels">${labelChips(
           a.labels,
-          ["alertname", "severity", "source", "alertIp", "ipaddr", "instance", "host", "hostname"],
+          ["alertname", "severity", "source", "alertIp", "ip", "ipaddr", "instance", "host", "hostname"],
           3
         )}</div>
       </td>
@@ -3290,7 +3767,7 @@
         <h3>${esc(name)}</h3>
         <p class="desc">
           <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
-          <span class="sev sev-${esc(a.severity)}" style="margin-left:8px">${esc(a.severity)}</span>
+          <span class="sev sev-${esc(a.severity)}" style="margin-left:8px">${esc(severityLabel(a.severity))}</span>
           <span class="source-tag" style="margin-left:8px">${esc(srcLabel)}</span>
           ${ip ? `<span class="ac-ip" style="margin-left:8px">IP ${esc(ip)}</span>` : ""}
         </p>
@@ -4305,13 +4782,45 @@
       icon: "K",
       tone: "amber",
     },
+    {
+      id: "snmptrap",
+      name: "SNMP Trap",
+      desc: "Trap→Kafka 样例（字段已对齐）",
+      icon: "⌁",
+      tone: "blue",
+    },
   ];
+
+  function snmpTrapIngressDefaults() {
+    const brokers =
+      localStorage.getItem("eventide_kafka_brokers") || "120.26.105.115:9092";
+    const topic =
+      localStorage.getItem("eventide_kafka_topic") || "eventide.snmptrap";
+    return {
+      name: "SNMP Trap (Kafka)",
+      kind: "kafka",
+      endpoint: brokers,
+      enabled: true,
+      options: {
+        topic,
+        start: "latest",
+        partitions: "6",
+        // Trap 已写出 Generic 兼容 JSON，一般无需 map_*；下列仅作文档/对照
+        _preset: "snmptrap",
+      },
+      channel_ids: [],
+    };
+  }
+
+  function editIngressSnmpTrapSample() {
+    editIngress(snmpTrapIngressDefaults(), { kind: "kafka", preset: "snmptrap" });
+  }
 
   function pickIngressKind() {
     openModal(`
       <div class="modal-head">
         <h3>选择接入类型</h3>
-        <p class="desc">先选来源类型，再填写连接与字段映射。</p>
+        <p class="desc">先选来源类型，再填写连接与字段映射。SNMP Trap 请选样例，字段已与 Trap 写出对齐。</p>
       </div>
       <div class="modal-body">
         <div class="type-pick-grid">
@@ -4329,7 +4838,13 @@
       </div>`);
     document.getElementById("m-cancel").onclick = closeModal;
     document.querySelectorAll(".type-pick-card").forEach((btn) => {
-      btn.onclick = () => editIngress(null, { kind: btn.dataset.kind });
+      btn.onclick = () => {
+        if (btn.dataset.kind === "snmptrap") {
+          editIngressSnmpTrapSample();
+          return;
+        }
+        editIngress(null, { kind: btn.dataset.kind });
+      };
     });
   }
 
@@ -4339,9 +4854,15 @@
       return;
     }
     const chs = state.cache.channels || (await api("/api/channels"));
+    const preset = opts.preset || (row?.options && row.options._preset) || "";
     const kind = row?.kind || opts.kind || "alertmanager";
-    const typeMeta = INGRESS_TYPES.find((t) => t.id === kind) || INGRESS_TYPES[0];
-    const opt = row?.options || {};
+    const typeMeta =
+      preset === "snmptrap"
+        ? INGRESS_TYPES.find((t) => t.id === "snmptrap")
+        : INGRESS_TYPES.find((t) => t.id === kind) || INGRESS_TYPES[0];
+    const opt = { ...(row?.options || {}) };
+    // Don't persist internal preset marker into form as a map field
+    const snmpPreset = preset === "snmptrap" || opt._preset === "snmptrap";
     const mapOn = !!(
       opt.map_status ||
       opt.map_name ||
@@ -4352,19 +4873,43 @@
       opt.map_list ||
       opt.map_enabled === "1"
     );
+    const sampleJson = `{
+  "status": "firing",
+  "fingerprint": "10.0.0.1|1.3.6.1.6.3.1.1.5.3|…",
+  "severity": "warning",
+  "labels": {
+    "alertname": "linkDown",
+    "ip": "10.0.0.1",
+    "trap_oid": "1.3.6.1.6.3.1.1.5.3",
+    "source": "ingress:snmptrap",
+    "snmp_version": "v2c"
+  },
+  "annotations": {
+    "summary": "SNMP Trap … from 10.0.0.1",
+    "varbinds": "{…}"
+  },
+  "startsAt": "2026-07-31T08:00:00Z"
+}`;
     openModal(`
       <div class="modal-head">
-        <h3>${row ? "编辑告警接入" : "新建告警接入"}</h3>
-        <p class="desc">接入外部已判定的告警。非标准格式可配置字段映射。</p>
+        <h3>${row && row.id ? "编辑告警接入" : snmpPreset ? "新建 SNMP Trap 接入样例" : "新建告警接入"}</h3>
+        <p class="desc">${
+          snmpPreset
+            ? "Trap 服务已归一化为下方 JSON；本接入直接消费，一般无需字段映射。"
+            : "接入外部已判定的告警。非标准格式可配置字段映射。"
+        }</p>
       </div>
       <form id="f" class="modal-body">
         <div class="field">
           <label>名称</label>
-          <input name="name" required placeholder="例如：生产 AM" value="${esc(row?.name || "")}" />
+          <input name="name" required placeholder="例如：生产 AM" value="${esc(
+            row?.name || (snmpPreset ? "SNMP Trap (Kafka)" : "")
+          )}" />
         </div>
         <div class="field">
           <label>类型</label>
-          <input type="hidden" name="kind" value="${esc(kind)}" />
+          <input type="hidden" name="kind" value="${esc(kind === "snmptrap" ? "kafka" : kind)}" />
+          <input type="hidden" name="_preset" value="${esc(snmpPreset ? "snmptrap" : "")}" />
           <div class="type-picked">
             <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
               typeMeta.icon
@@ -4374,7 +4919,7 @@
               <div class="t-desc">${esc(typeMeta.desc)}</div>
             </div>
             ${
-              row
+              row && row.id
                 ? ""
                 : `<button type="button" class="ghost" id="ing-repick">重选类型</button>`
             }
@@ -4386,6 +4931,34 @@
             <span>启用此接入路由</span>
           </label>
         </div>
+
+        ${
+          snmpPreset
+            ? `<div class="panel" style="margin:0 0 14px;padding:12px;background:var(--surface-2,rgba(0,0,0,.04))">
+          <div class="seg-title" style="margin:0 0 8px">Trap → Kafka 字段对照（无需再 map）</div>
+          <table class="map-help-table" style="width:100%;font-size:12px">
+            <thead><tr><th>Trap JSON</th><th>告警含义</th></tr></thead>
+            <tbody>
+              <tr><td><code>status</code></td><td>firing / resolved（策略可恢复）</td></tr>
+              <tr><td><code>fingerprint</code></td><td>去重键（IP + OID + …）</td></tr>
+              <tr><td><code>severity</code></td><td>级别（策略 / 默认 warning）</td></tr>
+              <tr><td><code>labels.alertname</code></td><td>告警名（策略名或 OID 名）</td></tr>
+              <tr><td><code>labels.ip</code></td><td>设备 IP（peer）</td></tr>
+              <tr><td><code>labels.trap_oid</code></td><td>Trap OID</td></tr>
+              <tr><td><code>labels.source</code></td><td>固定 <code>ingress:snmptrap</code></td></tr>
+              <tr><td><code>annotations.summary</code></td><td>摘要（策略模板）</td></tr>
+              <tr><td><code>annotations.varbinds</code></td><td>变量绑定 JSON</td></tr>
+            </tbody>
+          </table>
+          <details style="margin-top:10px">
+            <summary style="cursor:pointer">样例报文（Trap 写出）</summary>
+            <pre class="mono" style="white-space:pre-wrap;font-size:11px;max-height:200px;overflow:auto;margin:8px 0 0">${esc(
+              sampleJson
+            )}</pre>
+          </details>
+        </div>`
+            : ""
+        }
 
         <div class="kind-panel" data-kinds="alertmanager,generic" id="ing-http">
           <div class="field">
@@ -4415,9 +4988,17 @@
             </div>
           </div>
           <div class="field">
-            <label>扫描分区数</label>
-            <input name="partitions" type="number" min="1" placeholder="8" value="${esc(opt.partitions || "8")}" />
-            <div class="hint">也可用 HTTP <code>/api/ingress/{id}/push</code> 测推，无需真实 Topic。</div>
+            <label>Consumer Group ID（可选）</label>
+            <input name="group_id" placeholder="默认 eventide-ingress-{route_id}" value="${esc(opt.group_id || "")}" />
+            <div class="hint">多实例共用同一 group_id 自动分摊分区；改 group_id 会按「起始位点」重新消费。</div>
+          </div>
+          <div class="field">
+            <label>分区数（订阅范围）</label>
+            <div class="row" style="align-items:center;gap:8px">
+              <input name="partitions" type="number" min="1" placeholder="自动探测" value="${esc(opt.partitions || "")}" style="flex:1" />
+              <button type="button" class="btn ghost" id="ing-probe-parts">自动获取</button>
+            </div>
+            <div class="hint" id="ing-parts-hint">须覆盖 Topic 全部分区（优先 metadata 探测）。消费位点由 Kafka consumer group 管理，不再依赖 Redis 租约。</div>
           </div>
         </div>
 
@@ -4425,9 +5006,13 @@
           <div class="seg">
             <div class="seg-title">字段映射（可选）</div>
             <div class="hint" style="margin-bottom:12px">
-              填写对方 JSON 的点分路径（如 <code>data.title</code>）。可用变换截取字符串，例如
+              ${
+                snmpPreset
+                  ? "SNMP Trap 样例<strong>不需要</strong>填写映射（Trap 已是 Eventide Generic JSON）。仅当改了 Trap 输出格式时才需要。"
+                  : `填写对方 JSON 的点分路径（如 <code>data.title</code>）。可用变换截取字符串，例如
               <code>sourceciname|before:_</code> → <code>82.12.161.32</code>。
-              任一路径非空即启用映射，并优先于内置 Generic/拨测解析。
+              任一路径非空即启用映射，并优先于内置 Generic/拨测解析。`
+              }
             </div>
             <details class="map-help">
               <summary>字段说明（点开查看）</summary>
@@ -4582,6 +5167,54 @@
     const repick = document.getElementById("ing-repick");
     if (repick) repick.onclick = () => pickIngressKind();
 
+    const probeParts = async (quiet = false) => {
+      const brokers = String(form.querySelector('[name="endpoint"]')?.value || "").trim();
+      const topic = String(form.querySelector('[name="topic"]')?.value || "").trim();
+      const hint = document.getElementById("ing-parts-hint");
+      if (!brokers || !topic) {
+        if (!quiet) toast("请先填写 Brokers 与 Topic", true);
+        return null;
+      }
+      try {
+        if (hint) hint.textContent = "正在从 Kafka 探测分区数…";
+        const data = await api("/api/ingress/kafka/partitions", {
+          method: "POST",
+          body: JSON.stringify({ brokers, topic }),
+        });
+        const n = data && data.partitions;
+        if (!n) throw new Error("未返回分区数");
+        const input = form.querySelector('[name="partitions"]');
+        if (input) input.value = String(n);
+        if (hint) {
+          hint.innerHTML = `已探测到 Topic <code>${esc(topic)}</code> 共 <strong>${esc(n)}</strong> 个分区（消费时也会再查 metadata）。`;
+        }
+        if (!quiet) toast(`已获取分区数：${n}`);
+        return n;
+      } catch (e) {
+        if (hint) {
+          hint.textContent = `自动获取失败：${e.message || e}（可手填；消费时也会尝试探测）`;
+        }
+        if (!quiet) toast(e.message || String(e), true);
+        return null;
+      }
+    };
+    const probeBtn = document.getElementById("ing-probe-parts");
+    if (probeBtn) probeBtn.onclick = () => probeParts(false);
+    const topicEl = form.querySelector('[name="topic"]');
+    const endpointEl = form.querySelector('[name="endpoint"]');
+    let probeTimer = null;
+    const scheduleProbe = () => {
+      clearTimeout(probeTimer);
+      probeTimer = setTimeout(() => probeParts(true), 500);
+    };
+    if (topicEl) topicEl.addEventListener("change", scheduleProbe);
+    if (endpointEl) endpointEl.addEventListener("change", scheduleProbe);
+    // Open existing kafka route: refresh partition count in background
+    if ((form.querySelector('input[name="kind"]')?.value || "") === "kafka") {
+      const cur = String(form.querySelector('[name="partitions"]')?.value || "").trim();
+      if (!cur) scheduleProbe();
+    }
+
     document.getElementById("m-cancel").onclick = closeModal;
     form.onsubmit = async (e) => {
       e.preventDefault();
@@ -4604,8 +5237,16 @@
         }
         options.topic = topic;
         options.start = String(fd.get("start") || "latest");
-        const parts = String(fd.get("partitions") || "").trim();
+        const groupId = String(fd.get("group_id") || "").trim();
+        if (groupId) options.group_id = groupId;
+        let parts = String(fd.get("partitions") || "").trim();
+        if (!parts) {
+          const n = await probeParts(true);
+          if (n) parts = String(n);
+        }
         if (parts) options.partitions = parts;
+        const preset = String(fd.get("_preset") || "").trim();
+        if (preset) options._preset = preset;
         token = "";
       }
       if (k === "generic" || k === "kafka") {

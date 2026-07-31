@@ -7,6 +7,9 @@ listen_udp = "0.0.0.0:1162"
 
 kafka_brokers = "127.0.0.1:9092"
 kafka_topic = "eventide.snmptrap"
+# Hash produce across N partitions (peer IP key). Align with topic + Ingress options.partitions.
+kafka_partitions = 6
+# Legacy fixed partition when kafka_partitions = 1
 kafka_partition = 0
 
 community = ""

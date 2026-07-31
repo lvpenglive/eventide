@@ -22,7 +22,7 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 mysql = "25"
-redis = { version = "0.27", features = ["script"] }
+redis = { version = "0.27", features = ["script", "keep-alive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -35,8 +35,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 jsonwebtoken = "9"
 rskafka = "0.6"
+samsa = "0.1"
 futures = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
 eventide-core = { path = "crates/eventide-core" }
 eventide-notify = { path = "crates/eventide-notify" }
 eventide-sources = { path = "crates/eventide-sources" }
 eventide-trap-data = { path = "crates/eventide-trap-data" }
+
+# samsa 0.1.8 FetchResponse: empty `records` must honor length prefix
+# (otherwise next partition bytes are mis-parsed as a record batch).
+[patch.crates-io]
+samsa = { path = "vendor/samsa" }

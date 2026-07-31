@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
     let kafka = KafkaOut::new(
         &config.kafka_brokers,
         config.kafka_topic.clone(),
+        config.kafka_partitions,
         config.kafka_partition,
     );
     if kafka.is_none() {
@@ -51,7 +52,8 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!(
             topic = %config.kafka_topic,
-            partition = config.kafka_partition,
+            partitions = config.kafka_partitions.max(1),
+            fixed_partition = config.kafka_partition,
             "kafka produce enabled"
         );
     }
@@ -189,6 +191,10 @@ async fn main() -> Result<()> {
 }
 
 /// Blocking Redis SUBSCRIBE → Notify → async reload.
+///
+/// Uses a read timeout so idle NAT/firewall drops are detected early; timeouts
+/// alone do **not** force reconnect (connection stays subscribed). Real I/O
+/// errors reconnect with backoff. Requires redis crate `keep-alive` feature.
 fn spawn_policy_pubsub(redis: Arc<PolicyRedis>, policies: Arc<PolicyStore>) {
     let notify = Arc::new(Notify::new());
     let notify_sub = notify.clone();
@@ -196,29 +202,46 @@ fn spawn_policy_pubsub(redis: Arc<PolicyRedis>, policies: Arc<PolicyStore>) {
     std::thread::Builder::new()
         .name("trap-policy-pubsub".into())
         .spawn(move || {
+            let mut backoff_secs = 1u64;
             loop {
-                match client.get_connection() {
+                match client.get_connection_with_timeout(Duration::from_secs(5)) {
                     Ok(mut conn) => {
+                        let _ = conn.set_write_timeout(Some(Duration::from_secs(5)));
                         let mut pubsub = conn.as_pubsub();
+                        // Idle wait: wake periodically so half-open sockets fail fast.
+                        if let Err(e) = pubsub.set_read_timeout(Some(Duration::from_secs(20))) {
+                            tracing::warn!(error = %e, "policy pubsub set_read_timeout failed");
+                        }
                         if let Err(e) = pubsub.subscribe(POLICY_CHANGED_CHANNEL) {
-                            tracing::warn!(error = %e, "policy pubsub subscribe failed; retry in 5s");
-                            std::thread::sleep(Duration::from_secs(5));
+                            tracing::warn!(error = %e, "policy pubsub subscribe failed; retry");
+                            std::thread::sleep(Duration::from_secs(backoff_secs));
+                            backoff_secs = (backoff_secs * 2).min(30);
                             continue;
                         }
                         tracing::info!(channel = POLICY_CHANGED_CHANNEL, "subscribed to policy changes");
+                        backoff_secs = 1;
                         loop {
                             match pubsub.get_message() {
                                 Ok(_msg) => notify_sub.notify_one(),
+                                Err(e) if e.is_timeout() => {
+                                    // Still subscribed; keep waiting (TCP keepalive + timeout probe).
+                                    continue;
+                                }
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "policy pubsub read failed; reconnect");
+                                    tracing::warn!(
+                                        error = %e,
+                                        "policy pubsub disconnected; reconnecting"
+                                    );
                                     break;
                                 }
                             }
                         }
+                        std::thread::sleep(Duration::from_secs(1));
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "policy pubsub connect failed; retry in 5s");
-                        std::thread::sleep(Duration::from_secs(5));
+                        tracing::warn!(error = %e, retry_in = backoff_secs, "policy pubsub connect failed");
+                        std::thread::sleep(Duration::from_secs(backoff_secs));
+                        backoff_secs = (backoff_secs * 2).min(30);
                     }
                 }
             }

@@ -9,6 +9,7 @@ mod elasticsearch;
 mod iam;
 mod ingress_api;
 mod kafka_ingress;
+mod kafka_groups;
 mod leader;
 mod notify_pipeline;
 mod password;

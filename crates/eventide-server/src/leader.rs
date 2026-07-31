@@ -1,8 +1,9 @@
 //! Redis lease-based leader election for cluster-safe background work.
 //!
 //! Only the holder of `eventide:cluster:leader` (or configured key) runs the
-//! rule scheduler, Kafka ingress poller, and aggregate flusher. All instances
-//! still serve HTTP API / ingress webhooks.
+//! rule scheduler and aggregate flusher. Kafka ingress scales out via Kafka
+//! consumer groups (no Redis partition leases).
+//! All instances still serve HTTP API / ingress webhooks.
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +28,12 @@ pub struct ClusterConfig {
     pub leader_key: String,
     #[serde(default = "default_lease_seconds")]
     pub lease_seconds: u64,
+    /// Deprecated: ignored. Kafka Ingress uses consumer groups.
+    #[serde(default = "default_ingress_lease_seconds")]
+    pub ingress_partition_lease_seconds: u64,
+    /// Deprecated: ignored. Kafka Ingress uses consumer groups.
+    #[serde(default)]
+    pub ingress_max_claim: u32,
 }
 
 fn default_cluster_enabled() -> bool {
@@ -38,6 +45,9 @@ fn default_leader_key() -> String {
 fn default_lease_seconds() -> u64 {
     15
 }
+fn default_ingress_lease_seconds() -> u64 {
+    15
+}
 
 impl Default for ClusterConfig {
     fn default() -> Self {
@@ -45,6 +55,8 @@ impl Default for ClusterConfig {
             enabled: true,
             leader_key: "eventide:cluster:leader".into(),
             lease_seconds: 15,
+            ingress_partition_lease_seconds: 15,
+            ingress_max_claim: 0,
         }
     }
 }

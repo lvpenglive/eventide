@@ -138,6 +138,22 @@
       "enabled": true,
       "_channels": ["Demo Webhook"],
       "_sample": "zabbix"
+    },
+    {
+      "name": "SNMP Trap (Kafka)",
+      "kind": "kafka",
+      "token": null,
+      "endpoint": "120.26.105.115:9092",
+      "options": {
+        "topic": "eventide.snmptrap",
+        "start": "latest",
+        "partitions": "6",
+        "_preset": "snmptrap"
+      },
+      "enabled": true,
+      "_channels": ["Demo Webhook"],
+      "_sample": "snmptrap",
+      "_note": "Trap 已写出 Generic JSON，无需 map_* 字段映射"
     }
   ],
   "sample_alerts": [

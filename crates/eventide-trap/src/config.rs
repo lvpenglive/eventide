@@ -15,6 +15,11 @@ pub struct TrapConfig {
     pub kafka_brokers: String,
     #[serde(default = "default_topic")]
     pub kafka_topic: String,
+    /// Produce across N partitions by hashing the Kafka key (peer IP). Must match
+    /// topic partition count and Kafka Ingress `options.partitions`.
+    #[serde(default = "default_kafka_partitions")]
+    pub kafka_partitions: i32,
+    /// Fixed partition when `kafka_partitions == 1` (legacy single-partition mode).
     #[serde(default)]
     pub kafka_partition: i32,
     /// If non-empty, only accept SNMPv1/v2c traps with this community.
@@ -65,6 +70,9 @@ fn default_udp() -> String {
 fn default_topic() -> String {
     "eventide.snmptrap".into()
 }
+fn default_kafka_partitions() -> i32 {
+    1
+}
 fn default_severity() -> String {
     "warning".into()
 }
@@ -97,6 +105,7 @@ impl Default for TrapConfig {
             listen_udp: default_udp(),
             kafka_brokers: String::new(),
             kafka_topic: default_topic(),
+            kafka_partitions: default_kafka_partitions(),
             kafka_partition: 0,
             community: String::new(),
             default_severity: default_severity(),
