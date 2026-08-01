@@ -111,7 +111,7 @@
     users: ["用户管理", "账号 · 部门 · 角色"],
     roles: ["权限管理", "角色与权限码"],
     departments: ["部门管理", "组织架构"],
-    settings: ["系统设置", "外观 · 告警历史 · Trap Token · 运行信息"],
+    settings: ["系统设置", "外观 · 抗风暴 · 告警历史 · Trap Token · 运行信息"],
   };
 
   function can(perm) {
@@ -3080,19 +3080,109 @@
         source: "empty",
         redis_synced: false,
       };
+      let storm = {
+        throttle_enabled: true,
+        min_interval_seconds: 60,
+        max_per_window: 20,
+        window_seconds: 60,
+        throttle_key: "fingerprint",
+        resolve_max_per_window: null,
+        aggregate_enabled: false,
+        aggregate_window_seconds: 30,
+        group_by: "alertname",
+        aggregate_mode: "head+summary",
+        aggregate_sample_labels: "ip,instance,alertIp",
+        aggregate_sample_limit: 10,
+        ingress_max_inflight: 100,
+        degrade_skip_notify: false,
+        degrade_notify_per_sec: 50,
+        source: "toml",
+      };
       try {
         hist = await api("/api/settings/alert-history");
       } catch (_) {}
       try {
         trapTok = await api("/api/settings/trap-token");
       } catch (_) {}
+      try {
+        storm = await api("/api/settings/storm");
+      } catch (_) {}
       const canWriteSettings = can("settings:write");
       const dis = canWriteSettings ? "" : "disabled";
+      const resolveMax =
+        storm.resolve_max_per_window == null || storm.resolve_max_per_window === ""
+          ? ""
+          : String(storm.resolve_max_per_window);
       root.innerHTML = `
         <div class="panel" style="max-width:720px;margin-bottom:16px">
           <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
           <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
           <div id="settings-theme"></div>
+        </div>
+        <div class="panel" style="max-width:720px;margin-bottom:16px">
+          <h3 style="margin:0 0 0.75rem;font-size:1rem">抗告警风暴</h3>
+          <p class="hint" style="margin:0 0 12px">
+            节流 / 聚合 / 接入削峰。保存后<strong>当前进程立即生效</strong>（写入 MySQL；多实例其他节点需重启或各自保存一次）。
+            来源 <code>${esc(storm.source || "toml")}</code>。详解见 README §11.8。
+          </p>
+          <h4 style="margin:8px 0 10px;font-size:0.92rem;color:var(--muted)">通知节流（P0）</h4>
+          <label class="check-row" style="margin:0 0 10px">
+            <input type="checkbox" id="storm-throttle-on" ${storm.throttle_enabled ? "checked" : ""} ${dis} />
+            <span>启用节流</span>
+          </label>
+          <div class="detail-grid" style="margin-bottom:8px">
+            <div class="field"><label>最短间隔（秒）</label>
+              <input id="storm-min-interval" type="number" min="1" value="${esc(String(storm.min_interval_seconds ?? 60))}" ${dis} /></div>
+            <div class="field"><label>窗口秒数</label>
+              <input id="storm-window" type="number" min="1" value="${esc(String(storm.window_seconds ?? 60))}" ${dis} /></div>
+            <div class="field"><label>窗口内最多发送</label>
+              <input id="storm-max-window" type="number" min="1" value="${esc(String(storm.max_per_window ?? 20))}" ${dis} /></div>
+            <div class="field"><label>恢复通知上限（可选）</label>
+              <input id="storm-resolve-max" type="number" min="1" placeholder="默认=最多发送" value="${esc(resolveMax)}" ${dis} /></div>
+          </div>
+          <div class="field"><label>节流键 throttle_key</label>
+            <input id="storm-throttle-key" type="text" placeholder="fingerprint 或 labels:alertname" value="${esc(storm.throttle_key || "fingerprint")}" ${dis} />
+          </div>
+          <h4 style="margin:16px 0 10px;font-size:0.92rem;color:var(--muted)">时间窗聚合（P1）</h4>
+          <label class="check-row" style="margin:0 0 10px">
+            <input type="checkbox" id="storm-agg-on" ${storm.aggregate_enabled ? "checked" : ""} ${dis} />
+            <span>启用聚合</span>
+          </label>
+          <div class="detail-grid" style="margin-bottom:8px">
+            <div class="field"><label>聚合窗口（秒）</label>
+              <input id="storm-agg-window" type="number" min="1" value="${esc(String(storm.aggregate_window_seconds ?? 30))}" ${dis} /></div>
+            <div class="field"><label>采样条数上限</label>
+              <input id="storm-agg-limit" type="number" min="1" value="${esc(String(storm.aggregate_sample_limit ?? 10))}" ${dis} /></div>
+          </div>
+          <div class="field"><label>分组 group_by</label>
+            <input id="storm-group-by" type="text" placeholder="alertname 或 alertname,namespace" value="${esc(storm.group_by || "alertname")}" ${dis} /></div>
+          <div class="field"><label>模式</label>
+            <select id="storm-agg-mode" ${dis}>
+              <option value="head+summary" ${storm.aggregate_mode === "head+summary" ? "selected" : ""}>head+summary（首条+摘要）</option>
+              <option value="summary_only" ${storm.aggregate_mode === "summary_only" ? "selected" : ""}>summary_only（仅摘要）</option>
+            </select>
+          </div>
+          <div class="field"><label>摘要采样标签</label>
+            <input id="storm-agg-samples" type="text" placeholder="ip,instance,alertIp" value="${esc(storm.aggregate_sample_labels || "")}" ${dis} /></div>
+          <h4 style="margin:16px 0 10px;font-size:0.92rem;color:var(--muted)">接入削峰（P2）</h4>
+          <div class="detail-grid" style="margin-bottom:8px">
+            <div class="field"><label>最大并发 inflight（0=不限）</label>
+              <input id="storm-inflight" type="number" min="0" value="${esc(String(storm.ingress_max_inflight ?? 100))}" ${dis} /></div>
+            <div class="field"><label>降级通知速率阈值 / 秒</label>
+              <input id="storm-degrade-rate" type="number" min="1" value="${esc(String(storm.degrade_notify_per_sec ?? 50))}" ${dis} /></div>
+          </div>
+          <label class="check-row" style="margin:10px 0">
+            <input type="checkbox" id="storm-degrade-skip" ${storm.degrade_skip_notify ? "checked" : ""} ${dis} />
+            <span>高压时只落库不发通知（degrade_skip_notify）</span>
+          </label>
+          ${
+            canWriteSettings
+              ? `<div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+                  <button class="primary" id="storm-save">保存</button>
+                  <button id="storm-reset">恢复 toml 默认</button>
+                </div>`
+              : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
+          }
         </div>
         <div class="panel" style="max-width:720px;margin-bottom:16px">
           <h3 style="margin:0 0 0.75rem;font-size:1rem">Trap HTTP Token</h3>
@@ -3267,6 +3357,55 @@
               body: JSON.stringify(body),
             });
             toast("告警历史设置已保存");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const stormSave = document.getElementById("storm-save");
+      if (stormSave) {
+        stormSave.onclick = async () => {
+          try {
+            const resolveRaw = (document.getElementById("storm-resolve-max")?.value || "").trim();
+            const body = {
+              throttle_enabled: !!document.getElementById("storm-throttle-on")?.checked,
+              min_interval_seconds: Number(document.getElementById("storm-min-interval")?.value || 60),
+              max_per_window: Number(document.getElementById("storm-max-window")?.value || 20),
+              window_seconds: Number(document.getElementById("storm-window")?.value || 60),
+              throttle_key: (document.getElementById("storm-throttle-key")?.value || "").trim(),
+              resolve_max_per_window: resolveRaw === "" ? null : Number(resolveRaw),
+              aggregate_enabled: !!document.getElementById("storm-agg-on")?.checked,
+              aggregate_window_seconds: Number(document.getElementById("storm-agg-window")?.value || 30),
+              group_by: (document.getElementById("storm-group-by")?.value || "").trim(),
+              aggregate_mode: document.getElementById("storm-agg-mode")?.value || "head+summary",
+              aggregate_sample_labels: (document.getElementById("storm-agg-samples")?.value || "").trim(),
+              aggregate_sample_limit: Number(document.getElementById("storm-agg-limit")?.value || 10),
+              ingress_max_inflight: Number(document.getElementById("storm-inflight")?.value || 100),
+              degrade_skip_notify: !!document.getElementById("storm-degrade-skip")?.checked,
+              degrade_notify_per_sec: Number(document.getElementById("storm-degrade-rate")?.value || 50),
+            };
+            await api("/api/settings/storm", {
+              method: "PUT",
+              body: JSON.stringify(body),
+            });
+            toast("抗风暴配置已保存并生效");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const stormReset = document.getElementById("storm-reset");
+      if (stormReset) {
+        stormReset.onclick = async () => {
+          if (!confirm("清除控制台覆盖，恢复为 eventide.toml [storm]？")) return;
+          try {
+            await api("/api/settings/storm", {
+              method: "PUT",
+              body: JSON.stringify({ reset: true }),
+            });
+            toast("已恢复 toml [storm]");
             renderPage();
           } catch (e) {
             toast(e.message, true);

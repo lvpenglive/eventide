@@ -275,8 +275,9 @@ async fn run_channel_notifies(
     transition: AlertTransition,
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    let sample_labels = &state.aggregate.config().sample_labels;
-    let group_by = &state.aggregate.config().group_by;
+    let agg_cfg = state.aggregate.config();
+    let sample_labels = &agg_cfg.sample_labels;
+    let group_by = &agg_cfg.group_by;
     for ch_id in channel_ids {
         if let Some(ch) = state.db.get_channel(*ch_id)? {
             let body = format_notify_log_body(&ch, rule, event, transition);
@@ -318,7 +319,7 @@ async fn run_channel_notifies(
                 build_group_key(group_by, &event.labels)
             } else {
                 build_throttle_key(
-                    &state.config.storm.throttle_key,
+                    &state.storm_prefs().throttle_key,
                     &event.fingerprint,
                     &event.labels,
                 )

@@ -65,39 +65,56 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%pong, redis = %config.redis_url, "redis ready");
     }
 
+    let storm_runtime = {
+        use crate::state::STORM_CONFIG_KEY;
+        match db.get_kv(STORM_CONFIG_KEY) {
+            Ok(Some(s)) => match serde_json::from_str::<crate::config::StormConfig>(&s) {
+                Ok(c) => {
+                    tracing::info!("storm config loaded from app_kv (console)");
+                    c.normalize()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "storm app_kv invalid; using eventide.toml [storm]");
+                    config.storm.clone()
+                }
+            },
+            _ => config.storm.clone(),
+        }
+    };
+
     let throttle = eventide_core::RedisThrottleGate::new(
-        config.storm.throttle_config(),
+        storm_runtime.throttle_config(),
         &redis_client,
     )
     .context("redis throttle")?;
     let aggregate = eventide_core::RedisAggregateBuffer::new(
-        config.storm.aggregate_config(),
+        storm_runtime.aggregate_config(),
         &redis_client,
     )
     .context("redis aggregate")?;
-    let pressure = eventide_core::IngressPressure::new(config.storm.pressure_config());
+    let pressure = eventide_core::IngressPressure::new(storm_runtime.pressure_config());
 
-    if config.storm.throttle_enabled {
+    if storm_runtime.throttle_enabled {
         tracing::info!(
-            min_interval = config.storm.min_interval_seconds,
-            max_per_window = config.storm.max_per_window,
-            window = config.storm.window_seconds,
-            key = %config.storm.throttle_key,
+            min_interval = storm_runtime.min_interval_seconds,
+            max_per_window = storm_runtime.max_per_window,
+            window = storm_runtime.window_seconds,
+            key = %storm_runtime.throttle_key,
             "storm throttle enabled (redis)"
         );
     }
-    if config.storm.aggregate_enabled {
+    if storm_runtime.aggregate_enabled {
         tracing::info!(
-            window = config.storm.aggregate_window_seconds,
-            group_by = %config.storm.group_by,
-            mode = %config.storm.aggregate_mode,
+            window = storm_runtime.aggregate_window_seconds,
+            group_by = %storm_runtime.group_by,
+            mode = %storm_runtime.aggregate_mode,
             "storm aggregate enabled (redis)"
         );
     }
     tracing::info!(
-        max_inflight = config.storm.ingress_max_inflight,
-        degrade_skip_notify = config.storm.degrade_skip_notify,
-        degrade_notify_per_sec = config.storm.degrade_notify_per_sec,
+        max_inflight = storm_runtime.ingress_max_inflight,
+        degrade_skip_notify = storm_runtime.degrade_skip_notify,
+        degrade_notify_per_sec = storm_runtime.degrade_notify_per_sec,
         "storm ingress pressure configured"
     );
     tracing::info!(mysql = %config.mysql_url, "mysql ready");
@@ -187,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
         throttle,
         aggregate,
         pressure,
+        storm: Arc::new(std::sync::RwLock::new(storm_runtime)),
         leader,
         kafka_pool: Arc::new(eventide_sources::KafkaClientPool::new()),
         notify_queue,

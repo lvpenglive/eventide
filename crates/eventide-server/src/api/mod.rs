@@ -135,6 +135,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/settings/trap-token",
             get(settings::get_trap_token).put(settings::put_trap_token),
         )
+        .route(
+            "/api/settings/storm",
+            get(settings::get_storm).put(settings::put_storm),
+        )
         .route("/api/trap/instances", get(list_trap_instances))
         .merge(mib_admin::routes())
         .merge(policy_admin::routes())

@@ -1,7 +1,8 @@
-//! Settings API: alert history + Trap HTTP api_token.
+//! Settings API: alert history + Trap HTTP api_token + storm.
 
 use crate::alert_history::ALERT_HISTORY_KEY;
-use crate::state::AppState;
+use crate::config::StormConfig;
+use crate::state::{AppState, STORM_CONFIG_KEY};
 use crate::trap_token::{
     generate_token, mask_token, TrapApiTokenPrefs, TRAP_API_TOKEN_KEY,
 };
@@ -222,5 +223,61 @@ fn trap_token_view(state: &AppState, reveal: Option<String>) -> TrapTokenView {
         source: source.into(),
         token: reveal,
         redis_synced: state.policy_redis.is_some(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StormSettingsView {
+    #[serde(flatten)]
+    pub storm: StormConfig,
+    /// `runtime` (app_kv) | `toml`
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StormSettingsUpdate {
+    #[serde(flatten)]
+    pub storm: StormConfig,
+    /// Clear app_kv and revert to `eventide.toml` `[storm]`.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+pub async fn get_storm(State(state): State<Arc<AppState>>) -> ApiResult<Json<StormSettingsView>> {
+    Ok(Json(storm_view(&state)))
+}
+
+pub async fn put_storm(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<StormSettingsUpdate>,
+) -> ApiResult<Json<StormSettingsView>> {
+    if body.reset {
+        state
+            .db
+            .delete_kv(STORM_CONFIG_KEY)
+            .map_err(ApiError::internal)?;
+        state.set_storm_prefs(state.config.storm.clone());
+        return Ok(Json(storm_view(&state)));
+    }
+
+    let storm = body.storm.normalize();
+    storm.validate().map_err(ApiError::bad)?;
+    let json = serde_json::to_string(&storm).map_err(ApiError::internal)?;
+    state
+        .db
+        .set_kv(STORM_CONFIG_KEY, &json)
+        .map_err(ApiError::internal)?;
+    state.set_storm_prefs(storm);
+    Ok(Json(storm_view(&state)))
+}
+
+fn storm_view(state: &AppState) -> StormSettingsView {
+    let source = match state.db.get_kv(STORM_CONFIG_KEY) {
+        Ok(Some(_)) => "runtime",
+        _ => "toml",
+    };
+    StormSettingsView {
+        storm: state.storm_prefs(),
+        source: source.into(),
     }
 }

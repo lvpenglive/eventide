@@ -481,7 +481,7 @@ ingress_max_claim = 0
 | `static_dir` | 控制台静态资源目录 |
 | `scheduler_tick_seconds` | 规则调度基准间隔 |
 | `auth.*` | 登录账号、JWT 密钥与有效期 |
-| `[storm]` | 通知节流 / 聚合 / 接入削峰（**改后需重启**；用法见 [§11.8](#118-抗告警风暴怎么用)） |
+| `[storm]` | 通知节流 / 聚合 / 接入削峰的**默认值**；控制台「系统设置」可覆盖并热生效（见 [§11.8](#118-抗告警风暴怎么用)） |
 | `[cluster]` | 多实例：仅 leader 跑规则调度 / 聚合 flush；**Kafka Ingress 用 consumer group 扩容**；HTTP 与 webhook 仍全员服务 |
 | `[cluster].ingress_partition_lease_seconds` | **已废弃**（忽略） |
 | `[cluster].ingress_max_claim` | **已废弃**（忽略） |
@@ -512,7 +512,7 @@ cargo run -p eventide-server -- /path/to/eventide.toml
 | 告警事件 | 按状态筛选、详情（含丰富后 labels） |
 | 静默策略 | 时间窗 + 标签匹配 |
 | 用户 / 部门 / 角色 | 账号与权限（按部署启用） |
-| 系统设置 | 只读运行信息（改密码 / `[storm]` 改 toml 后重启） |
+| 系统设置 | 外观、抗风暴、告警历史 ES、Trap Token、运行信息 |
 
 ### 11.2 数据源配置示例
 
@@ -758,8 +758,12 @@ curl -s http://127.0.0.1:8080/api/overview \
 
 ### 11.8 抗告警风暴怎么用
 
-短时间涌入大量相似告警时，靠 **节流 → 聚合 → 接入削峰** 保护通知渠道与进程。  
-配置写在 `eventide.toml` 的 `[storm]`（**控制台暂不可改**；修改后必须重启服务）。
+短时间涌入大量相似告警时，靠 **节流 → 聚合 → 接入削峰** 保护通知渠道与进程。
+
+- **默认值**：`eventide.toml` 的 `[storm]`
+- **运行时覆盖**：控制台 **系统设置 → 抗告警风暴**（写入 MySQL `app_kv`，**当前进程立即热生效**，无需重启）
+- **恢复默认**：设置页「恢复 toml 默认」会删除覆盖，回退到 toml
+- **多实例**：节流/聚合状态在 Redis 共享；配置本身按实例内存生效——其他节点需重启（启动时读 `app_kv`）或各自保存一次
 
 #### 推荐默认（仓库 `eventide.toml` 已接近此配置）
 
@@ -813,7 +817,7 @@ degrade_notify_per_sec = 50    # 通知尝试速率阈值（配合 degrade）
 
 #### 如何确认生效
 
-1. 重启后日志可见：`storm throttle enabled` / `storm aggregate enabled` / `storm ingress pressure configured`  
+1. 启动或控制台保存后日志可见：`storm throttle enabled` / `storm aggregate enabled` / `storm ingress pressure configured`（控制台保存后当前进程已热加载，不一定有新日志行）  
 2. 通知记录（`notify_logs`）中：  
    - `error=throttled`：被节流  
    - `error=aggregated`：计入聚合窗口、未单发  

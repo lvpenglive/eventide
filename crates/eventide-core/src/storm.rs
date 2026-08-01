@@ -424,7 +424,7 @@ impl Default for IngressPressureConfig {
 /// Tracks ingress concurrency and recent notify attempt rate.
 #[derive(Debug)]
 pub struct IngressPressure {
-    config: IngressPressureConfig,
+    config: Mutex<IngressPressureConfig>,
     inflight: std::sync::atomic::AtomicUsize,
     rate: Mutex<(DateTime<Utc>, u32)>,
 }
@@ -444,14 +444,23 @@ impl Drop for IngressPermit<'_> {
 impl IngressPressure {
     pub fn new(config: IngressPressureConfig) -> Self {
         Self {
-            config,
+            config: Mutex::new(config),
             inflight: std::sync::atomic::AtomicUsize::new(0),
             rate: Mutex::new((Utc::now(), 0)),
         }
     }
 
-    pub fn config(&self) -> &IngressPressureConfig {
-        &self.config
+    pub fn config(&self) -> IngressPressureConfig {
+        self.config
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_config(&self, config: IngressPressureConfig) {
+        if let Ok(mut g) = self.config.lock() {
+            *g = config;
+        }
     }
 
     pub fn inflight(&self) -> usize {
@@ -461,13 +470,14 @@ impl IngressPressure {
     /// Acquire a permit or `None` if at capacity (caller should return HTTP 429).
     pub fn try_enter(&self) -> Option<IngressPermit<'_>> {
         use std::sync::atomic::Ordering;
-        if self.config.max_inflight == 0 {
+        let max = self.config().max_inflight;
+        if max == 0 {
             self.inflight.fetch_add(1, Ordering::SeqCst);
             return Some(IngressPermit { pressure: self });
         }
         loop {
             let cur = self.inflight.load(Ordering::Relaxed);
-            if cur >= self.config.max_inflight {
+            if cur >= max {
                 return None;
             }
             if self
@@ -507,16 +517,17 @@ impl IngressPressure {
 
     /// Whether to skip sending (persist still happens).
     pub fn should_skip_notify(&self, now: DateTime<Utc>) -> bool {
-        if !self.config.degrade_skip_notify {
+        let cfg = self.config();
+        if !cfg.degrade_skip_notify {
             return false;
         }
         let inflight = self.inflight();
-        let busy = if self.config.max_inflight == 0 {
+        let busy = if cfg.max_inflight == 0 {
             false
         } else {
-            inflight * 10 >= self.config.max_inflight * 8
+            inflight * 10 >= cfg.max_inflight * 8
         };
-        let hot = self.notify_rate(now) >= self.config.degrade_notify_per_sec.max(1);
+        let hot = self.notify_rate(now) >= cfg.degrade_notify_per_sec.max(1);
         busy || hot
     }
 }

@@ -261,6 +261,70 @@ impl Default for StormConfig {
 }
 
 impl StormConfig {
+    /// Normalize strings / clamp zeros before persist or apply.
+    pub fn normalize(mut self) -> Self {
+        self.throttle_key = self.throttle_key.trim().to_string();
+        if self.throttle_key.is_empty() {
+            self.throttle_key = default_throttle_key();
+        }
+        self.group_by = self.group_by.trim().to_string();
+        if self.group_by.is_empty() {
+            self.group_by = default_group_by();
+        }
+        let mode = self.aggregate_mode.trim().to_ascii_lowercase();
+        self.aggregate_mode = match mode.as_str() {
+            "summary_only" | "summary-only" => "summary_only".into(),
+            _ => "head+summary".into(),
+        };
+        self.aggregate_sample_labels = self
+            .aggregate_sample_labels
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        if self.min_interval_seconds == 0 {
+            self.min_interval_seconds = default_min_interval();
+        }
+        if self.max_per_window == 0 {
+            self.max_per_window = default_max_per_window();
+        }
+        if self.window_seconds == 0 {
+            self.window_seconds = default_window_seconds();
+        }
+        if self.aggregate_window_seconds == 0 {
+            self.aggregate_window_seconds = default_agg_window();
+        }
+        if self.aggregate_sample_limit == 0 {
+            self.aggregate_sample_limit = default_agg_sample_limit();
+        }
+        if self.degrade_notify_per_sec == 0 {
+            self.degrade_notify_per_sec = default_degrade_notify_per_sec();
+        }
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let key = self.throttle_key.trim();
+        if key.is_empty() {
+            return Err("throttle_key 不能为空".into());
+        }
+        if !(key == "fingerprint" || key.starts_with("labels:")) {
+            return Err("throttle_key 须为 fingerprint 或 labels:字段[,字段…]".into());
+        }
+        if self.group_by.trim().is_empty() {
+            return Err("group_by 不能为空".into());
+        }
+        let mode = self.aggregate_mode.trim().to_ascii_lowercase();
+        if !matches!(
+            mode.as_str(),
+            "head+summary" | "head_summary" | "summary_only" | "summary-only"
+        ) {
+            return Err("aggregate_mode 须为 head+summary 或 summary_only".into());
+        }
+        Ok(())
+    }
+
     pub fn throttle_config(&self) -> ThrottleConfig {
         ThrottleConfig {
             enabled: self.throttle_enabled,

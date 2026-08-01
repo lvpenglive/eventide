@@ -1,7 +1,7 @@
 //! Shared application state.
 
 use crate::alert_history::AlertHistoryPrefs;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, StormConfig};
 use crate::db::Db;
 use crate::elasticsearch::EsClient;
 use crate::leader::LeaderElection;
@@ -12,6 +12,8 @@ use eventide_sources::KafkaClientPool;
 use eventide_trap_data::{MibStore, PolicyRedis, PolicyStore};
 use std::sync::{Arc, RwLock};
 
+pub const STORM_CONFIG_KEY: &str = "storm_config";
+
 pub struct AppState {
     pub db: Db,
     pub config: AppConfig,
@@ -19,6 +21,8 @@ pub struct AppState {
     pub throttle: RedisThrottleGate,
     pub aggregate: RedisAggregateBuffer,
     pub pressure: IngressPressure,
+    /// Runtime `[storm]` prefs (console / app_kv); hot-applied to throttle/aggregate/pressure.
+    pub storm: Arc<RwLock<StormConfig>>,
     pub leader: Arc<LeaderElection>,
     pub kafka_pool: Arc<KafkaClientPool>,
     pub notify_queue: NotifyQueue,
@@ -63,6 +67,24 @@ impl AppState {
             tracing::warn!(error = %e, "failed to publish trap api_token to redis");
         }
     }
+
+    pub fn storm_prefs(&self) -> StormConfig {
+        self.storm
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| self.config.storm.clone())
+    }
+
+    /// Hot-apply storm prefs to in-memory gates (throttle / aggregate / pressure).
+    pub fn set_storm_prefs(&self, storm: StormConfig) {
+        if let Ok(mut g) = self.storm.write() {
+            *g = storm.clone();
+        }
+        self.throttle.set_config(storm.throttle_config());
+        self.aggregate.set_config(storm.aggregate_config());
+        self.pressure.set_config(storm.pressure_config());
+    }
+
     pub fn alert_history_prefs(&self) -> AlertHistoryPrefs {
         self.alert_history
             .read()

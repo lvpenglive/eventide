@@ -36,7 +36,7 @@ return 0
 
 /// Redis-backed throttle gate (shared across instances).
 pub struct RedisThrottleGate {
-    config: ThrottleConfig,
+    config: Mutex<ThrottleConfig>,
     conn: Mutex<redis::Connection>,
     prefix: String,
 }
@@ -44,14 +44,23 @@ pub struct RedisThrottleGate {
 impl RedisThrottleGate {
     pub fn new(config: ThrottleConfig, client: &redis::Client) -> redis::RedisResult<Self> {
         Ok(Self {
-            config,
+            config: Mutex::new(config),
             conn: Mutex::new(client.get_connection()?),
             prefix: "eventide:throttle:".into(),
         })
     }
 
-    pub fn config(&self) -> &ThrottleConfig {
-        &self.config
+    pub fn config(&self) -> ThrottleConfig {
+        self.config
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_config(&self, config: ThrottleConfig) {
+        if let Ok(mut g) = self.config.lock() {
+            *g = config;
+        }
     }
 
     pub fn allow(
@@ -61,7 +70,8 @@ impl RedisThrottleGate {
         transition: AlertTransition,
         now: DateTime<Utc>,
     ) -> ThrottleDecision {
-        if !self.config.enabled {
+        let cfg = self.config();
+        if !cfg.enabled {
             return ThrottleDecision::Disabled;
         }
         if !matches!(
@@ -75,13 +85,13 @@ impl RedisThrottleGate {
             _ => "firing",
         };
         let max = match transition {
-            AlertTransition::BecameResolved => self.config.resolve_max_per_window,
-            _ => self.config.max_per_window,
+            AlertTransition::BecameResolved => cfg.resolve_max_per_window,
+            _ => cfg.max_per_window,
         };
         let key = format!("{}{}|{}|{}", self.prefix, channel_id, side, throttle_key);
         let now_ms = now.timestamp_millis();
-        let min_gap = (self.config.min_interval_seconds as i64) * 1000;
-        let window = (self.config.window_seconds as i64) * 1000;
+        let min_gap = (cfg.min_interval_seconds as i64) * 1000;
+        let window = (cfg.window_seconds as i64) * 1000;
 
         let mut conn = match self.conn.lock() {
             Ok(c) => c,
@@ -105,7 +115,7 @@ impl RedisThrottleGate {
 
 /// Redis-backed aggregation buffer.
 pub struct RedisAggregateBuffer {
-    config: AggregateConfig,
+    config: Mutex<AggregateConfig>,
     conn: Mutex<redis::Connection>,
     prefix: String,
 }
@@ -113,18 +123,27 @@ pub struct RedisAggregateBuffer {
 impl RedisAggregateBuffer {
     pub fn new(config: AggregateConfig, client: &redis::Client) -> redis::RedisResult<Self> {
         Ok(Self {
-            config,
+            config: Mutex::new(config),
             conn: Mutex::new(client.get_connection()?),
             prefix: "eventide:agg:".into(),
         })
     }
 
-    pub fn config(&self) -> &AggregateConfig {
-        &self.config
+    pub fn config(&self) -> AggregateConfig {
+        self.config
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_config(&self, config: AggregateConfig) {
+        if let Ok(mut g) = self.config.lock() {
+            *g = config;
+        }
     }
 
     pub fn enabled(&self) -> bool {
-        self.config.enabled
+        self.config().enabled
     }
 
     fn bucket_key(&self, channel_id: &str, group_key: &str) -> String {
@@ -143,13 +162,14 @@ impl RedisAggregateBuffer {
         sample: impl Into<String>,
         now: DateTime<Utc>,
     ) -> AggregatePushResult {
-        if !self.config.enabled {
+        let cfg = self.config();
+        if !cfg.enabled {
             return AggregatePushResult::Bypass;
         }
         let sample = sample.into();
-        let window_ms = (self.config.window_seconds.max(1) as i64) * 1000;
-        let limit = self.config.sample_limit.max(1);
-        let mode_head = matches!(self.config.mode, AggregateMode::HeadSummary);
+        let window_ms = (cfg.window_seconds.max(1) as i64) * 1000;
+        let limit = cfg.sample_limit.max(1);
+        let mode_head = matches!(cfg.mode, AggregateMode::HeadSummary);
         let member = format!("{channel_id}|{group_key}");
         let bkey = self.bucket_key(channel_id, group_key);
         let idx = self.index_key();
@@ -225,7 +245,8 @@ impl RedisAggregateBuffer {
     }
 
     pub fn take_due(&self, now: DateTime<Utc>) -> Vec<AggregateSummary> {
-        if !self.config.enabled {
+        let cfg = self.config();
+        if !cfg.enabled {
             return Vec::new();
         }
         let now_ms = now.timestamp_millis() as f64;
@@ -249,7 +270,7 @@ impl RedisAggregateBuffer {
             let samples: Vec<String> = serde_json::from_str(&samples_raw).unwrap_or_default();
             let _: Result<(), _> = conn.del(&bkey);
 
-            if matches!(self.config.mode, AggregateMode::HeadSummary) && head == 1 && count <= 1 {
+            if matches!(cfg.mode, AggregateMode::HeadSummary) && head == 1 && count <= 1 {
                 continue;
             }
             if count == 0 {

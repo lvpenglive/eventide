@@ -862,6 +862,15 @@ impl Db {
         )?;
         Ok(())
     }
+
+    pub fn delete_kv(&self, key: &str) -> Result<()> {
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "DELETE FROM app_kv WHERE `key`=?",
+            positional(vec![v(key)]),
+        )?;
+        Ok(())
+    }
 }
 
 fn map_datasource(row: &Row) -> Result<Datasource> {
