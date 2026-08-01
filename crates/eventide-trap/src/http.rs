@@ -4,8 +4,11 @@ use crate::config::TrapConfig;
 use crate::kafka_out::KafkaOut;
 use crate::normalize::{simulate_parsed, to_ingress_alert_with_policy, to_kafka_payload_with_policy};
 use crate::stats::{RecentBuffer, RecentItem, TrapStats};
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, Request, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -14,7 +17,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tower_http::cors::CorsLayer;
 
 pub struct AppState {
@@ -25,29 +28,99 @@ pub struct AppState {
     pub mibs: Arc<MibStore>,
     pub policies: Arc<PolicyStore>,
     pub policy_redis: Option<Arc<PolicyRedis>>,
+    /// Hot-swappable Trap HTTP token (toml bootstrap + Redis from console).
+    pub api_token: Arc<RwLock<String>>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
+    let protected = Router::new()
         .route("/api/stats", get(stats))
         .route("/api/recent", get(recent))
         .route("/api/simulate", post(simulate))
         .route("/api/mibs/reload", post(reload_mibs))
         .route("/api/policies/reload", post(reload_policies))
+        .route_layer(from_fn_with_state(state.clone(), require_api_token));
+
+    Router::new()
+        .route("/api/health", get(health))
+        .merge(protected)
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// When `api_token` is set, require `Authorization: Bearer <token>` or `X-Eventide-Trap-Token`.
+async fn require_api_token(
+    State(st): State<Arc<AppState>>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    let expected = st
+        .api_token
+        .read()
+        .map(|g| g.trim().to_string())
+        .unwrap_or_default();
+    if expected.is_empty() {
+        return next.run(req).await;
+    }
+    let provided = extract_token(req.headers());
+    if provided.as_deref().is_some_and(|p| token_eq(&expected, p)) {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": "unauthorized: missing or invalid Trap api_token (Bearer / X-Eventide-Trap-Token)"
+        })),
+    )
+        .into_response()
+}
+
+fn extract_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(v) = headers.get("x-eventide-trap-token").and_then(|v| v.to_str().ok()) {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let auth = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let rest = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer "))?;
+    let t = rest.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn token_eq(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected
+        .as_bytes()
+        .iter()
+        .zip(provided.as_bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "eventide-trap",
+        "instance_id": st.config.resolve_instance_id(),
         "listen_udp": st.config.listen_udp,
+        "listen_http": st.config.listen_http,
+        "ha_vip": st.config.ha_vip,
         "kafka_enabled": st.kafka.is_some(),
         "kafka_topic": st.config.kafka_topic,
         "policy_count": st.policies.list().await.len(),
         "snmpv3_users": st.config.snmpv3_users.len(),
+        "auth_required": st
+            .api_token
+            .read()
+            .map(|g| !g.trim().is_empty())
+            .unwrap_or(false),
     }))
 }
 
@@ -176,4 +249,16 @@ async fn simulate(
         })),
         "alert": alert,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_eq_rejects_mismatch() {
+        assert!(token_eq("abc", "abc"));
+        assert!(!token_eq("abc", "abd"));
+        assert!(!token_eq("abc", "ab"));
+    }
 }

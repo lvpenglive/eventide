@@ -32,9 +32,37 @@ pub struct AppState {
     pub policies: Option<Arc<PolicyStore>>,
     /// Redis snapshot publisher for Trap policy distribution.
     pub policy_redis: Option<Arc<PolicyRedis>>,
+    /// Runtime Trap HTTP api_token (MySQL `app_kv` / console); falls back to toml.
+    pub trap_api_token: Arc<RwLock<String>>,
 }
 
 impl AppState {
+    /// Effective token for `/trap-api` proxy: runtime (console) > toml.
+    pub fn effective_trap_api_token(&self) -> String {
+        if let Ok(g) = self.trap_api_token.read() {
+            let t = g.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+        self.config.trap.api_token.trim().to_string()
+    }
+
+    pub fn set_trap_api_token(&self, token: String) {
+        if let Ok(mut g) = self.trap_api_token.write() {
+            *g = token;
+        }
+    }
+
+    pub fn sync_trap_api_token_to_redis(&self) {
+        let Some(redis) = self.policy_redis.as_ref() else {
+            return;
+        };
+        let token = self.effective_trap_api_token();
+        if let Err(e) = redis.publish_api_token(&token) {
+            tracing::warn!(error = %e, "failed to publish trap api_token to redis");
+        }
+    }
     pub fn alert_history_prefs(&self) -> AlertHistoryPrefs {
         self.alert_history
             .read()

@@ -37,6 +37,8 @@ ingress_max_claim = 0
 # Trap：运行态反代 + MIB/策略 CRUD（RustFS）
 [trap]
 api_url = "http://127.0.0.1:8081"
+# Must match eventide-trap.toml api_token (injected as Bearer on /trap-api)
+api_token = "eventide-trap-shared-token"
 s3_endpoint = "http://120.26.105.115:9000"
 s3_access_key = "admin"
 s3_secret_key = "admin123"

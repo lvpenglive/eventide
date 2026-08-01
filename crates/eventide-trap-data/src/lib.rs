@@ -17,7 +17,9 @@ pub use mib_store::{
 };
 pub use parsed::ParsedTrap;
 pub use policy_redis::{
-    PolicyRedis, PolicySnapshot, POLICY_CHANGED_CHANNEL, POLICY_SNAPSHOT_KEY,
+    PolicyRedis, PolicySnapshot, TrapInstanceHeartbeat, POLICY_CHANGED_CHANNEL,
+    POLICY_SNAPSHOT_KEY, TRAP_API_TOKEN_CHANNEL, TRAP_API_TOKEN_KEY,
+    TRAP_INSTANCE_KEY_PREFIX,
 };
 pub use policy_store::{
     build_fingerprint, build_template_vars, normalize_event_status, render_template,

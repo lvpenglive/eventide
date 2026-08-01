@@ -2,7 +2,13 @@
 # Run: cargo run -p eventide-trap -- eventide-trap.toml
 
 listen_http = "0.0.0.0:8081"
+# Must match eventide.toml [trap] api_token. Empty = open HTTP (dev only).
+api_token = "eventide-trap-shared-token"
 listen_udp = "0.0.0.0:1162"
+# Multi-instance + UDP LB (optional): unique id per host — see deploy/trap-ha/
+# instance_id = "trap-1"
+# ha_vip = "10.0.0.100"   # LB front IP (display)
+heartbeat_secs = 5
 
 kafka_brokers = "120.26.105.115:9092"
 kafka_topic = "eventide.snmptrap"

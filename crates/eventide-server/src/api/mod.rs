@@ -131,6 +131,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/settings/alert-history",
             get(settings::get_alert_history).put(settings::put_alert_history),
         )
+        .route(
+            "/api/settings/trap-token",
+            get(settings::get_trap_token).put(settings::put_trap_token),
+        )
+        .route("/api/trap/instances", get(list_trap_instances))
         .merge(mib_admin::routes())
         .merge(policy_admin::routes())
         // Trap service BFF (runtime health / simulate only)
@@ -194,6 +199,25 @@ impl IntoResponse for ApiError {
 
 fn parse_id(id: &str) -> ApiResult<Uuid> {
     Uuid::parse_str(id).map_err(|_| ApiError::bad("invalid uuid"))
+}
+
+/// Trap cluster registry (Redis heartbeats from eventide-trap instances).
+async fn list_trap_instances(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(redis) = state.policy_redis.as_ref() else {
+        return Ok(Json(serde_json::json!({
+            "items": [],
+            "redis": false,
+            "hint": "redis unavailable — Trap heartbeats disabled",
+        })));
+    };
+    let items = redis.list_instances().map_err(ApiError::internal)?;
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "redis": true,
+        "count": items.len(),
+    })))
 }
 
 // ---- datasources ----

@@ -1003,7 +1003,7 @@ degrade_skip_notify = false
 - [ ] Ingress 更多平台适配器（开箱预设）  
 - [x] **SNMP Trap 接入骨架**（独立 Trap 服务 → Kafka → Kafka Ingress；统一门户试推送）—— 详见 [§13.3](#133-snmp-trap-接入)  
 - [x] SNMP Trap：SNMPv3 USM 接收（TOML `[[snmpv3_users]]`；MD5/SHA/SHA256 + DES/AES128）
-- [ ] SNMP Trap：UDP VIP HA
+- [x] SNMP Trap：多机同时收（UDP LB 推荐）+ VIP 主备备选；Redis 心跳 / 控制台集群视图
 - [x] SNMP Trap：策略 MySQL + MIB RustFS + 多实例热加载
 
 ### 13.3 SNMP Trap 接入
@@ -1037,18 +1037,18 @@ degrade_skip_notify = false
 
 **原则：服务可拆，门户合一。** 浏览器只面对 Eventide。  
 - **MIB / Trap 策略 CRUD**（上传、OID 树、xlsx 导入导出）在 **Eventide**（`/api/mibs`、`/api/policies`），需配置 `[trap]` 的 S3。  
-- Trap **运行态**（health / stats / recent / simulate）经同域 `/trap-api/*` 反代（`[trap] api_url`）。
+- Trap **运行态**（health / stats / recent / simulate）经同域 `/trap-api/*` 反代（`[trap] api_url` + 可选 `api_token`）。
 
 #### 当前已实现（骨架）
 
 | 能力 | 状态 |
 |------|------|
 | `eventide-trap`：UDP v1/v2c/v3(USM) 解析 → Generic Ingress JSON → Kafka | ✅ |
-| Trap HTTP：`/api/health` `/api/stats` `/api/recent` `/api/simulate`（+ 可选 reload） | ✅ |
+| Trap HTTP：`/api/health`（探针开放）+ stats/recent/simulate/reload（`api_token` Bearer） | ✅ |
 | Eventide：`/api/mibs` `/api/policies` CRUD + OID 浏览；`/trap-api` 反代运行态 | ✅ |
 | MIB 正文 RustFS + 元数据/策略 MySQL；策略经 Redis 快照分发；Trap 多实例热加载 | ✅ |
 | SNMPv3 USM（`[[snmpv3_users]]`） | ✅ |
-| UDP VIP HA | ⏳ |
+| 多机 Trap 同时收（UDP LB）+ VIP 主备备选；Redis 心跳 / 控制台集群 | ✅ |
 
 #### 本地联调
 
@@ -1061,6 +1061,7 @@ cargo run -p eventide-trap -- eventide-trap.toml
 
 # eventide.toml [trap]
 # api_url = "http://127.0.0.1:8081"
+# api_token = "…"   # 与 eventide-trap.toml api_token 一致；反代注入 Bearer
 # s3_endpoint / s3_access_key / s3_secret_key / s3_bucket = RustFS
 # mib_cache_dir = "data/mib-cache"
 
@@ -1083,6 +1084,15 @@ cargo run -p eventide-trap -- eventide-trap.toml
 1. **MySQL `trap_policies`**：唯一真相源；控制台 CRUD 写库。
 2. **Eventide** 启动及每次策略变更后：写入 Redis 键 `eventide:trap:policies:snapshot`，并向 `eventide:trap:policies:changed` **PUBLISH**。
 3. **Trap**：启动优先读 Redis 快照；订阅 channel 近实时重载；`policy_reload_secs` 轮询兜底；Redis 不可用时回退 MySQL。
+
+#### 多机 Trap 同时收（HA）
+
+**推荐**：前面挂 **UDP 负载均衡**（云 NLB / Nginx stream / LVS），三台及以上 Trap **并行收包** → 同一 Kafka Topic。  
+**备选**：无 UDP LB 时用 Keepalived VIP（同时只有 MASTER 收包）。  
+
+- 部署说明与示例：[`deploy/trap-ha/`](deploy/trap-ha/)（含 `nginx-udp.conf.example`、Keepalived）
+- Trap 配置：每机不同 `instance_id`；`ha_vip` 可填 LB 入口；`heartbeat_secs` 开心跳
+- 控制台 **SNMP Trap → 集群心跳**（`GET /api/trap/instances`）
 
 #### 职责划分
 
@@ -1107,12 +1117,13 @@ Trap 服务写出单条告警对象（可被 Generic / 自动识别），至少�
 #### 推荐实现顺序
 
 1. [x] Trap 服务骨架：收 Trap（v1/v2c）→ 固定字段 JSON → 写 Kafka；门户试推送  
-2. [x] 统一门户：Eventide 侧栏入口 + `/trap-api` 反代（JWT 登录后访问；Trap 侧鉴权后续加强）  
+2. [x] 统一门户：Eventide 侧栏入口 + `/trap-api` 反代（JWT）；Trap HTTP `api_token`（系统设置可轮换，Redis 热更新）  
 3. [x] MIB / 策略 CRUD 在 Eventide（`/api/mibs`、`/api/policies`）；Trap 热加载；OID 树与 xlsx 导出  
 4. [x] Trap 策略 CRUD、摘要 `${变量}` 生效、Excel(xlsx) 导入导出  
 5. [x] SNMPv3 USM 接收（`eventide-trap.toml` → `[[snmpv3_users]]`）  
-6. [ ] UDP VIP 高可用、与台账丰富联调  
-7. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控   
+6. [x] 多机 Trap 同时收（UDP LB）+ VIP 主备备选；实例心跳  
+7. [ ] 与台账丰富联调  
+8. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控   
 
 #### 明确不做（本阶段）
 

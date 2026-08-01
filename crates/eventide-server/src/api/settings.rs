@@ -1,7 +1,10 @@
-//! Alert history settings API (ES connection + write toggle + search store).
+//! Settings API: alert history + Trap HTTP api_token.
 
 use crate::alert_history::ALERT_HISTORY_KEY;
 use crate::state::AppState;
+use crate::trap_token::{
+    generate_token, mask_token, TrapApiTokenPrefs, TRAP_API_TOKEN_KEY,
+};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -131,5 +134,93 @@ fn view(state: &AppState) -> AlertHistorySettingsView {
         es_index: prefs.es_index.clone(),
         es_username: prefs.es_username.clone(),
         es_password_set: !prefs.es_password.is_empty(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrapTokenView {
+    pub configured: bool,
+    pub token_preview: String,
+    pub token_length: usize,
+    /// `runtime` | `toml` | `empty`
+    pub source: String,
+    /// Only set after rotate/save in the same response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    pub redis_synced: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TrapTokenUpdate {
+    /// Set explicit token (trimmed). Ignored when `rotate` / `clear`.
+    pub token: Option<String>,
+    /// Generate a new random token.
+    #[serde(default)]
+    pub rotate: bool,
+    /// Clear runtime token (falls back to toml; empty toml = open HTTP).
+    #[serde(default)]
+    pub clear: bool,
+}
+
+pub async fn get_trap_token(State(state): State<Arc<AppState>>) -> ApiResult<Json<TrapTokenView>> {
+    Ok(Json(trap_token_view(&state, None)))
+}
+
+pub async fn put_trap_token(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TrapTokenUpdate>,
+) -> ApiResult<Json<TrapTokenView>> {
+    let new_token = if body.clear {
+        String::new()
+    } else if body.rotate {
+        generate_token()
+    } else if let Some(t) = body.token {
+        let t = t.trim().to_string();
+        if t.len() < 8 {
+            return Err(ApiError::bad("token 至少 8 个字符"));
+        }
+        t
+    } else {
+        return Err(ApiError::bad("请提供 token、rotate=true 或 clear=true"));
+    };
+
+    let prefs = TrapApiTokenPrefs::from_token(&new_token);
+    let json = serde_json::to_string(&prefs).map_err(ApiError::internal)?;
+    state
+        .db
+        .set_kv(TRAP_API_TOKEN_KEY, &json)
+        .map_err(ApiError::internal)?;
+    state.set_trap_api_token(new_token.clone());
+    state.sync_trap_api_token_to_redis();
+
+    let reveal = if body.clear {
+        None
+    } else {
+        Some(new_token)
+    };
+    Ok(Json(trap_token_view(&state, reveal)))
+}
+
+fn trap_token_view(state: &AppState, reveal: Option<String>) -> TrapTokenView {
+    let runtime = state
+        .trap_api_token
+        .read()
+        .map(|g| g.trim().to_string())
+        .unwrap_or_default();
+    let toml = state.config.trap.api_token.trim().to_string();
+    let (source, effective) = if !runtime.is_empty() {
+        ("runtime", runtime)
+    } else if !toml.is_empty() {
+        ("toml", toml)
+    } else {
+        ("empty", String::new())
+    };
+    TrapTokenView {
+        configured: !effective.is_empty(),
+        token_preview: mask_token(&effective),
+        token_length: effective.len(),
+        source: source.into(),
+        token: reveal,
+        redis_synced: state.policy_redis.is_some(),
     }
 }

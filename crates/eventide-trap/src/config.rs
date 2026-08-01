@@ -33,9 +33,24 @@ pub struct TrapConfig {
     /// HTTP API listen address (health / simulate / stats).
     #[serde(default = "default_http")]
     pub listen_http: String,
+    /// Shared secret for Trap HTTP API (Bearer / X-Eventide-Trap-Token).
+    /// Empty = no auth (dev only). Must match eventide.toml `[trap] api_token`.
+    #[serde(default)]
+    pub api_token: String,
     /// UDP Trap listen address. Prefer `0.0.0.0:1162` in dev (162 needs privilege).
+    /// For VIP HA: bind the VIP on the Keepalived MASTER only (or `0.0.0.0:162`).
     #[serde(default = "default_udp")]
     pub listen_udp: String,
+    /// Unique id for this Trap process (Redis heartbeat / console cluster view).
+    /// Empty = hostname or generated id at startup.
+    #[serde(default)]
+    pub instance_id: String,
+    /// Optional VIP address advertised in health/heartbeat (for operators; not bound here).
+    #[serde(default)]
+    pub ha_vip: String,
+    /// Redis heartbeat interval seconds (0 = disable). TTL = 3× interval.
+    #[serde(default = "default_heartbeat_secs")]
+    pub heartbeat_secs: u64,
     /// Kafka broker list, comma-separated. Empty = parse-only (no produce).
     #[serde(default)]
     pub kafka_brokers: String,
@@ -126,12 +141,19 @@ fn default_mib_cache_dir() -> String {
 fn default_reload_secs() -> u64 {
     10
 }
+fn default_heartbeat_secs() -> u64 {
+    5
+}
 
 impl Default for TrapConfig {
     fn default() -> Self {
         Self {
             listen_http: default_http(),
+            api_token: String::new(),
             listen_udp: default_udp(),
+            instance_id: String::new(),
+            ha_vip: String::new(),
+            heartbeat_secs: default_heartbeat_secs(),
             kafka_brokers: String::new(),
             kafka_topic: default_topic(),
             kafka_partitions: default_kafka_partitions(),
@@ -162,5 +184,19 @@ impl TrapConfig {
         let cfg: Self = toml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("parse config `{path}`: {e}"))?;
         Ok(cfg)
+    }
+
+    pub fn resolve_instance_id(&self) -> String {
+        let id = self.instance_id.trim();
+        if !id.is_empty() {
+            return id.to_string();
+        }
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!("trap-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+            })
     }
 }

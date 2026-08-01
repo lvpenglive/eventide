@@ -16,6 +16,7 @@ mod password;
 mod scheduler;
 mod state;
 mod trap_proxy;
+mod trap_token;
 
 use anyhow::Context;
 use axum::Router;
@@ -162,6 +163,23 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let trap_api_token_runtime = {
+        use crate::trap_token::{TrapApiTokenPrefs, TRAP_API_TOKEN_KEY};
+        match db.get_kv(TRAP_API_TOKEN_KEY) {
+            Ok(Some(s)) => serde_json::from_str::<TrapApiTokenPrefs>(&s)
+                .map(|p| p.token)
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    if !trap_api_token_runtime.trim().is_empty() {
+        tracing::info!("trap api_token loaded from app_kv (console)");
+    } else if !config.trap.api_token.trim().is_empty() {
+        tracing::info!("trap api_token from eventide.toml [trap]");
+    } else {
+        tracing::warn!("trap api_token empty — /trap-api upstream auth off until set in 系统设置");
+    }
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -177,9 +195,11 @@ async fn main() -> anyhow::Result<()> {
         mibs,
         policies,
         policy_redis,
+        trap_api_token: Arc::new(std::sync::RwLock::new(trap_api_token_runtime)),
     });
     // Seed Redis snapshot so Trap instances can boot without waiting for a CRUD.
     state.sync_policies_to_redis().await;
+    state.sync_trap_api_token_to_redis();
     crate::notify_pipeline::spawn_notify_workers(state.clone(), notify_rx);
 
     spawn_scheduler(state.clone());

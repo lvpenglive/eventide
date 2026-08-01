@@ -3,7 +3,14 @@
 # Run: cargo run -p eventide-trap -- eventide-trap.toml
 
 listen_http = "0.0.0.0:8081"
+# Shared with eventide.toml [trap] api_token. Protects stats/recent/simulate/reload.
+# Empty = no HTTP auth. /api/health always open for probes / Keepalived.
+api_token = "CHANGE_ME"
 listen_udp = "0.0.0.0:1162"
+# Multi-instance (UDP LB active-active): unique id per host — see deploy/trap-ha/
+# instance_id = "trap-1"
+# ha_vip = "10.0.0.100"   # optional: LB front IP (display only)
+# heartbeat_secs = 5
 
 kafka_brokers = "127.0.0.1:9092"
 kafka_topic = "eventide.snmptrap"

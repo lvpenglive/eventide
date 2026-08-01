@@ -41,6 +41,9 @@ pub struct TrapProxyConfig {
     /// e.g. `http://127.0.0.1:8081`. Empty disables `/trap-api` proxy.
     #[serde(default)]
     pub api_url: String,
+    /// Shared with Trap `api_token`; injected as Bearer when proxying `/trap-api`.
+    #[serde(default)]
+    pub api_token: String,
     /// RustFS / S3 for MIB object bodies (CRUD on this server).
     #[serde(default)]
     pub s3_endpoint: String,
@@ -71,6 +74,7 @@ impl Default for TrapProxyConfig {
     fn default() -> Self {
         Self {
             api_url: String::new(),
+            api_token: String::new(),
             s3_endpoint: String::new(),
             s3_access_key: String::new(),
             s3_secret_key: String::new(),

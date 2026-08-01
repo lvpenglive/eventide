@@ -1,0 +1,36 @@
+# ALTERNATIVE: active-passive VIP (only MASTER receives).
+# Prefer UDP LB active-active — see README.md + nginx-udp.conf.example.
+#
+# Copy to /etc/keepalived/keepalived.conf and edit.
+# MASTER: priority 100 · BACKUP: priority 90 (or lower).
+# Requires: check_trap.sh executable, eventide-trap listening on HTTP.
+
+global_defs {
+    router_id eventide_trap_ha
+}
+
+vrrp_script chk_trap {
+    script "/etc/keepalived/check_trap.sh"
+    interval 2
+    weight -30
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_TRAP {
+    state MASTER                 # BACKUP on the peer
+    interface eth0               # NIC that owns the VIP
+    virtual_router_id 51         # unique per VRRP group (1–255)
+    priority 100                 # BACKUP: e.g. 90
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass change_me
+    }
+    virtual_ipaddress {
+        10.0.0.100/24            # ← Trap VIP (devices send SNMP Trap here)
+    }
+    track_script {
+        chk_trap
+    }
+}

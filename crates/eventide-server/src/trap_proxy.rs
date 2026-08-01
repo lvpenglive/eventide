@@ -70,13 +70,23 @@ async fn forward_inner(state: Arc<AppState>, path: String, req: Request) -> Resp
         let name = k.as_str();
         if matches!(
             name,
-            "host" | "connection" | "content-length" | "transfer-encoding" | "authorization"
+            "host"
+                | "connection"
+                | "content-length"
+                | "transfer-encoding"
+                | "authorization"
+                | "x-eventide-trap-token"
         ) {
             continue;
         }
         if let Ok(v) = v.to_str() {
             builder = builder.header(name, v);
         }
+    }
+    // Inject Trap service token (browser JWT must not leak to Trap).
+    let trap_token = state.effective_trap_api_token();
+    if !trap_token.is_empty() {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {trap_token}"));
     }
 
     let upstream = match builder.body(body_bytes).send().await {

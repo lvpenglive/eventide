@@ -1,0 +1,31 @@
+# Nginx stream UDP → 多台 eventide-trap 同时收（active-active）
+# Requires nginx built with --with-stream and --with-stream_udp
+#
+#   nginx -t -c /path/to/this.conf
+#   Devices send SNMP Trap to this host:162
+
+worker_processes auto;
+error_log /var/log/nginx/trap-udp-error.log warn;
+pid /run/nginx-trap-udp.pid;
+
+events {
+    worker_connections 1024;
+}
+
+stream {
+    upstream trap_udp {
+        # Equal weight — each datagram to one backend
+        server 10.0.0.11:162;
+        server 10.0.0.12:162;
+        server 10.0.0.13:162;
+        # Optional: least_conn; or hash $remote_addr consistent;
+    }
+
+    server {
+        listen 162 udp;
+        proxy_pass trap_udp;
+        proxy_timeout 1s;
+        proxy_responses 0;   # SNMP Trap is fire-and-forget (no app response)
+        error_log /var/log/nginx/trap-udp-stream.log;
+    }
+}

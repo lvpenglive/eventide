@@ -231,7 +231,11 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
             "settings:read"
         });
     }
-    if path.starts_with("/api/mibs") || path.starts_with("/api/policies") || path.starts_with("/trap-api") {
+    if path.starts_with("/api/mibs")
+        || path.starts_with("/api/policies")
+        || path.starts_with("/api/trap")
+        || path.starts_with("/trap-api")
+    {
         return Some(if write { "trap:write" } else { "trap:read" });
     }
     // Unknown protected route: require login only

@@ -111,7 +111,7 @@
     users: ["用户管理", "账号 · 部门 · 角色"],
     roles: ["权限管理", "角色与权限码"],
     departments: ["部门管理", "组织架构"],
-    settings: ["系统设置", "外观 · 告警历史 · 运行信息"],
+    settings: ["系统设置", "外观 · 告警历史 · Trap Token · 运行信息"],
   };
 
   function can(perm) {
@@ -1838,6 +1838,7 @@
         let health = null;
         let stats = null;
         let recent = { items: [] };
+        let cluster = { items: [], redis: false };
         let err = null;
         try {
           health = await api("/trap-api/api/health");
@@ -1846,6 +1847,9 @@
         } catch (e) {
           err = e.message || String(e);
         }
+        try {
+          cluster = await api("/api/trap/instances");
+        } catch (_) {}
 
         if (err) {
           root.innerHTML = `
@@ -1862,12 +1866,15 @@
         }
 
         const items = recent.items || [];
+        const peers = cluster.items || [];
         root.innerHTML = `
           <div class="panel" style="max-width:900px;margin-bottom:16px">
             <h3 style="margin:0 0 0.75rem;font-size:1rem">服务状态</h3>
             <p class="hint" style="margin:0 0 12px">
               <span class="badge on">在线</span>
-              UDP <code>${esc(health.listen_udp || "—")}</code>
+              实例 <code>${esc(health.instance_id || "—")}</code>
+              · UDP <code>${esc(health.listen_udp || "—")}</code>
+              ${health.ha_vip ? `· VIP <code>${esc(health.ha_vip)}</code>` : ""}
               · Kafka ${
                 health.kafka_enabled
                   ? `<span class="badge on">已启用</span> <code>${esc(health.kafka_topic || "")}</code>`
@@ -1882,6 +1889,29 @@
               <span>Kafka 失败 ${esc(stats.kafka_err ?? 0)}</span>
               <span>试推送 ${esc(stats.simulated ?? 0)}</span>
             </div>
+          </div>
+          <div class="panel" style="max-width:900px;margin-bottom:16px">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">集群心跳（多机同时收）</h3>
+            <p class="hint" style="margin:0 0 12px">
+              多机 Trap 经 Redis 上报心跳。推荐前面挂 UDP LB 分流（三台同时收）；见仓库 <code>deploy/trap-ha/</code>。
+              Redis ${cluster.redis ? `<span class="badge on">可用</span>` : `<span class="badge off">不可用</span>`}
+            </p>
+            ${
+              peers.length
+                ? `<table class="data"><thead><tr><th>实例</th><th>UDP</th><th>VIP</th><th>接收</th><th>心跳</th></tr></thead>
+                  <tbody>${peers
+                    .map(
+                      (p) => `<tr>
+                    <td class="mono">${esc(p.instance_id)}</td>
+                    <td class="mono">${esc(p.listen_udp)}</td>
+                    <td class="mono">${esc(p.ha_vip || "—")}</td>
+                    <td>${esc(p.received ?? 0)}</td>
+                    <td>${esc(fmtTime(p.updated_at))}</td>
+                  </tr>`
+                    )
+                    .join("")}</tbody></table>`
+                : `<p class="hint">暂无心跳（确认 Trap 配了 <code>redis_url</code> 且 <code>heartbeat_secs &gt; 0</code>）。</p>`
+            }
           </div>
           <div class="panel" style="max-width:900px;margin-bottom:16px">
             <h3 style="margin:0 0 0.75rem;font-size:1rem">试推送（模拟 Trap）</h3>
@@ -3043,8 +3073,18 @@
         es_username: "",
         es_password_set: false,
       };
+      let trapTok = {
+        configured: false,
+        token_preview: "",
+        token_length: 0,
+        source: "empty",
+        redis_synced: false,
+      };
       try {
         hist = await api("/api/settings/alert-history");
+      } catch (_) {}
+      try {
+        trapTok = await api("/api/settings/trap-token");
       } catch (_) {}
       const canWriteSettings = can("settings:write");
       const dis = canWriteSettings ? "" : "disabled";
@@ -3053,6 +3093,40 @@
           <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
           <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
           <div id="settings-theme"></div>
+        </div>
+        <div class="panel" style="max-width:720px;margin-bottom:16px">
+          <h3 style="margin:0 0 0.75rem;font-size:1rem">Trap HTTP Token</h3>
+          <p class="hint" style="margin:0 0 12px">
+            保护 Trap 服务的 stats / recent / simulate / reload（health 始终开放）。
+            控制台经 <code>/trap-api</code> 反代时自动带上；变更会写入 MySQL，并经 Redis 热更新到 Trap。
+          </p>
+          <div class="field"><label>状态</label>
+            <div>${
+              trapTok.configured
+                ? `<span class="badge on">已启用</span>`
+                : `<span class="badge off">未启用（HTTP 接口开放）</span>`
+            }
+            · 来源 <code>${esc(trapTok.source || "empty")}</code>
+            · Redis ${trapTok.redis_synced ? "已同步" : "不可用"}</div>
+          </div>
+          <div class="field"><label>当前 Token（脱敏）</label>
+            <div class="mono" id="trap-tok-preview">${esc(trapTok.token_preview || "—")}
+              ${trapTok.token_length ? `（${trapTok.token_length} 字符）` : ""}</div>
+          </div>
+          <div class="field"><label>手动设置</label>
+            <input id="trap-tok-input" type="text" autocomplete="off" placeholder="至少 8 位，或点下方生成"
+              ${dis} />
+          </div>
+          ${
+            canWriteSettings
+              ? `<div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+                  <button class="primary" id="trap-tok-rotate">生成并保存</button>
+                  <button id="trap-tok-save">保存输入</button>
+                  <button class="danger" id="trap-tok-clear">清除（关闭鉴权）</button>
+                </div>
+                <pre id="trap-tok-reveal" class="mono" style="display:none;margin-top:12px;padding:10px;background:var(--panel-2);border-radius:6px;word-break:break-all"></pre>`
+              : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
+          }
         </div>
         <div class="panel" style="max-width:720px;margin-bottom:16px">
           <h3 style="margin:0 0 0.75rem;font-size:1rem">告警历史仓库</h3>
@@ -3119,6 +3193,63 @@
           </p>
         </div>`;
       bindThemeHost(document.getElementById("settings-theme"), "cards");
+      const revealTok = (tok) => {
+        const el = document.getElementById("trap-tok-reveal");
+        if (!el || !tok) return;
+        el.style.display = "block";
+        el.textContent = `新 Token（请立即复制，刷新后不再明文显示）：\n${tok}`;
+      };
+      const applyTrapTok = async (body) => {
+        const r = await api("/api/settings/trap-token", {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+        if (r.token) revealTok(r.token);
+        else renderPage();
+        return r;
+      };
+      const rotateBtn = document.getElementById("trap-tok-rotate");
+      if (rotateBtn) {
+        rotateBtn.onclick = async () => {
+          try {
+            await applyTrapTok({ rotate: true });
+            toast("已生成并同步 Trap Token");
+            document.getElementById("trap-tok-preview").textContent = "(见下方明文，请复制)";
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const saveTokBtn = document.getElementById("trap-tok-save");
+      if (saveTokBtn) {
+        saveTokBtn.onclick = async () => {
+          try {
+            const token = (document.getElementById("trap-tok-input")?.value || "").trim();
+            if (token.length < 8) {
+              toast("token 至少 8 个字符", true);
+              return;
+            }
+            await applyTrapTok({ token });
+            toast("Trap Token 已保存");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const clearTokBtn = document.getElementById("trap-tok-clear");
+      if (clearTokBtn) {
+        clearTokBtn.onclick = async () => {
+          if (!confirm("清除后 Trap HTTP（除 health）将不再校验 Token，确定？")) return;
+          try {
+            await applyTrapTok({ clear: true });
+            toast("已清除 Trap Token");
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
       const saveBtn = document.getElementById("hist-save");
       if (saveBtn) {
         saveBtn.onclick = async () => {
