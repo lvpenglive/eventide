@@ -6,6 +6,7 @@ mod kafka_out;
 mod normalize;
 mod parse;
 mod stats;
+mod usm;
 
 use crate::config::TrapConfig;
 use crate::http::AppState;
@@ -103,6 +104,14 @@ async fn main() -> Result<()> {
         count = policies.list().await.len(),
         "trap policies ready (mysql)"
     );
+    if config.snmpv3_users.is_empty() {
+        tracing::info!("snmpv3_users empty — SNMPv3 traps rejected (v1/v2c ok)");
+    } else {
+        tracing::info!(
+            count = config.snmpv3_users.len(),
+            "snmpv3 USM users loaded"
+        );
+    }
 
     let policy_redis = if config.redis_url.trim().is_empty() {
         tracing::warn!("redis_url empty — policies load from MySQL only");
@@ -284,9 +293,17 @@ async fn run_udp(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
         let (n, peer) = sock.recv_from(&mut buf).await?;
         state.stats.received.fetch_add(1, Ordering::Relaxed);
         let datagram = &buf[..n];
-        match parse_udp_datagram(datagram, peer, &state.config.community) {
+        match parse_udp_datagram(
+            datagram,
+            peer,
+            &state.config.community,
+            &state.config.snmpv3_users,
+        ) {
             Ok(trap) => {
                 state.stats.parsed_ok.fetch_add(1, Ordering::Relaxed);
+                if trap.version == "v3" {
+                    state.stats.v3_ok.fetch_add(1, Ordering::Relaxed);
+                }
                 let policy = state.policies.match_trap(&trap).await;
                 let alert = to_ingress_alert_with_policy(&trap, &state.config, policy.as_ref());
                 let payload = to_kafka_payload_with_policy(&trap, &state.config, policy.as_ref());
@@ -323,6 +340,10 @@ async fn run_udp(addr: SocketAddr, state: Arc<AppState>) -> Result<()> {
             }
             Err(e) => {
                 state.stats.parse_err.fetch_add(1, Ordering::Relaxed);
+                let es = e.to_string();
+                if es.contains("usm") || es.contains("snmpv3") || es.contains("authentication") {
+                    state.stats.v3_auth_fail.fetch_add(1, Ordering::Relaxed);
+                }
                 tracing::debug!(%peer, "snmp parse: {e}");
             }
         }

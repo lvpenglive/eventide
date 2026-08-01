@@ -16,6 +16,15 @@ community = ""
 default_severity = "warning"
 recent_limit = 50
 
+# SNMPv3 USM users (empty = reject v3; v1/v2c still work)
+# [[snmpv3_users]]
+# user = "trapuser"
+# auth_protocol = "sha256"   # none | md5 | sha | sha256
+# auth_password = "authpass"
+# priv_protocol = "aes128"   # none | des | aes128
+# priv_password = "privpass"
+# # engine_id = "80001f8880…"  # optional hex filter; empty = any
+
 # Shared Eventide MySQL (trap_policies + trap_mibs)
 mysql_url = "mysql://eventide:eventide@127.0.0.1:3306/eventide"
 

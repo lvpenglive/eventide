@@ -47,6 +47,7 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
         "kafka_enabled": st.kafka.is_some(),
         "kafka_topic": st.config.kafka_topic,
         "policy_count": st.policies.list().await.len(),
+        "snmpv3_users": st.config.snmpv3_users.len(),
     }))
 }
 

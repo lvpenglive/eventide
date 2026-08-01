@@ -14,6 +14,8 @@ pub struct TrapStats {
     pub kafka_ok: AtomicU64,
     pub kafka_err: AtomicU64,
     pub simulated: AtomicU64,
+    pub v3_ok: AtomicU64,
+    pub v3_auth_fail: AtomicU64,
 }
 
 #[derive(Clone, Serialize)]
@@ -61,6 +63,8 @@ impl TrapStats {
             "kafka_ok": self.kafka_ok.load(Ordering::Relaxed),
             "kafka_err": self.kafka_err.load(Ordering::Relaxed),
             "simulated": self.simulated.load(Ordering::Relaxed),
+            "v3_ok": self.v3_ok.load(Ordering::Relaxed),
+            "v3_auth_fail": self.v3_auth_fail.load(Ordering::Relaxed),
         })
     }
 }

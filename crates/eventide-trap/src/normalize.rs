@@ -54,7 +54,11 @@ pub fn to_ingress_alert_with_policy(
     labels.insert("trap_oid".into(), trap.trap_oid.clone());
     labels.insert("source".into(), "ingress:snmptrap".into());
     labels.insert("snmp_version".into(), trap.version.clone());
-    if !trap.community.is_empty() {
+    if trap.version == "v3" {
+        if !trap.community.is_empty() {
+            labels.insert("snmp_user".into(), trap.community.clone());
+        }
+    } else if !trap.community.is_empty() {
         labels.insert("community".into(), trap.community.clone());
     }
     if let Some(mid) = policy_id {
@@ -178,7 +182,7 @@ pub fn simulate_parsed(
 mod tests {
     use super::*;
     use crate::config::TrapConfig;
-    use crate::policy_store::TrapPolicy;
+    use eventide_trap_data::TrapPolicy;
 
     #[test]
     fn ingress_shape() {

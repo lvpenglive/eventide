@@ -15,6 +15,14 @@ community = ""
 default_severity = "warning"
 recent_limit = 50
 
+# SNMPv3 USM — uncomment and fill to accept v3 traps
+# [[snmpv3_users]]
+# user = "trapuser"
+# auth_protocol = "sha256"
+# auth_password = "authpass"
+# priv_protocol = "aes128"
+# priv_password = "privpass"
+
 # Same MySQL as eventide.toml
 mysql_url = "mysql://root:886363@120.26.105.115:3306/eventide"
 

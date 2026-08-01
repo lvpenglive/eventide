@@ -2,6 +2,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// SNMPv3 USM user (Trap receiver credentials).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnmpV3User {
+    pub user: String,
+    /// `none` | `md5` | `sha` | `sha1` | `sha256`
+    #[serde(default = "default_auth_none")]
+    pub auth_protocol: String,
+    #[serde(default)]
+    pub auth_password: String,
+    /// `none` | `des` | `aes` | `aes128`
+    #[serde(default = "default_priv_none")]
+    pub priv_protocol: String,
+    #[serde(default)]
+    pub priv_password: String,
+    /// Optional authoritative engine ID filter (hex, with or without `:` / spaces). Empty = any.
+    #[serde(default)]
+    pub engine_id: String,
+}
+
+fn default_auth_none() -> String {
+    "none".into()
+}
+fn default_priv_none() -> String {
+    "none".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrapConfig {
     /// HTTP API listen address (health / simulate / stats).
@@ -59,6 +85,9 @@ pub struct TrapConfig {
     /// Same Redis as Eventide server — policy snapshot + pub/sub. Empty = MySQL-only.
     #[serde(default)]
     pub redis_url: String,
+    /// SNMPv3 USM users. Empty = reject v3 (v1/v2c only).
+    #[serde(default)]
+    pub snmpv3_users: Vec<SnmpV3User>,
 }
 
 fn default_http() -> String {
@@ -121,6 +150,7 @@ impl Default for TrapConfig {
             mib_cache_dir: default_mib_cache_dir(),
             policy_reload_secs: default_reload_secs(),
             redis_url: String::new(),
+            snmpv3_users: Vec::new(),
         }
     }
 }

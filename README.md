@@ -1002,7 +1002,8 @@ degrade_skip_notify = false
 - [ ] 更多日志后端（ES 等）  
 - [ ] Ingress 更多平台适配器（开箱预设）  
 - [x] **SNMP Trap 接入骨架**（独立 Trap 服务 → Kafka → Kafka Ingress；统一门户试推送）—— 详见 [§13.3](#133-snmp-trap-接入)  
-- [ ] SNMP Trap：SNMPv3 / UDP VIP HA
+- [x] SNMP Trap：SNMPv3 USM 接收（TOML `[[snmpv3_users]]`；MD5/SHA/SHA256 + DES/AES128）
+- [ ] SNMP Trap：UDP VIP HA
 - [x] SNMP Trap：策略 MySQL + MIB RustFS + 多实例热加载
 
 ### 13.3 SNMP Trap 接入
@@ -1017,8 +1018,8 @@ degrade_skip_notify = false
         ▼
 ┌─────────────────────────────┐
 │  eventide-trap（独立进程）    │
-│  · 收 Trap / 解析 v1·v2c     │
-│  · （后续）MIB · Trap 策略   │
+│  · 收 Trap / 解析 v1·v2c·v3  │
+│  · 策略匹配（Redis/MySQL）   │
 │  · OID→字段归一化 · 写 Kafka │
 └──────────────┬──────────────┘
                │  告警 JSON（与 Ingress 对齐）
@@ -1042,11 +1043,12 @@ degrade_skip_notify = false
 
 | 能力 | 状态 |
 |------|------|
-| `eventide-trap`：UDP v1/v2c 解析 → Generic Ingress JSON → Kafka | ✅ |
+| `eventide-trap`：UDP v1/v2c/v3(USM) 解析 → Generic Ingress JSON → Kafka | ✅ |
 | Trap HTTP：`/api/health` `/api/stats` `/api/recent` `/api/simulate`（+ 可选 reload） | ✅ |
 | Eventide：`/api/mibs` `/api/policies` CRUD + OID 浏览；`/trap-api` 反代运行态 | ✅ |
 | MIB 正文 RustFS + 元数据/策略 MySQL；策略经 Redis 快照分发；Trap 多实例热加载 | ✅ |
-| SNMPv3 / UDP VIP HA | ⏳ |
+| SNMPv3 USM（`[[snmpv3_users]]`） | ✅ |
+| UDP VIP HA | ⏳ |
 
 #### 本地联调
 
@@ -1064,6 +1066,7 @@ cargo run -p eventide-trap -- eventide-trap.toml
 
 # eventide-trap.toml：mysql_url 与 Eventide 同库；同样配置 S3 供热加载 MIB
 # redis_url 与 Eventide 同 Redis（策略快照 + pub/sub；失败回退 MySQL）
+# [[snmpv3_users]] 配置 USM 用户后可收 SNMPv3 Trap（authNoPriv / authPriv）
 # kafka_partitions 须与 Topic 分区数、Kafka Ingress options.partitions 一致（按 peer IP 散列）
 # policy_reload_secs 兜底轮询（Redis 优先，感知 Server 侧 CRUD）
 
@@ -1107,8 +1110,9 @@ Trap 服务写出单条告警对象（可被 Generic / 自动识别），至少�
 2. [x] 统一门户：Eventide 侧栏入口 + `/trap-api` 反代（JWT 登录后访问；Trap 侧鉴权后续加强）  
 3. [x] MIB / 策略 CRUD 在 Eventide（`/api/mibs`、`/api/policies`）；Trap 热加载；OID 树与 xlsx 导出  
 4. [x] Trap 策略 CRUD、摘要 `${变量}` 生效、Excel(xlsx) 导入导出  
-5. [ ] SNMPv3、UDP VIP 高可用、与台账丰富联调  
-6. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控  
+5. [x] SNMPv3 USM 接收（`eventide-trap.toml` → `[[snmpv3_users]]`）  
+6. [ ] UDP VIP 高可用、与台账丰富联调  
+7. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控   
 
 #### 明确不做（本阶段）
 
