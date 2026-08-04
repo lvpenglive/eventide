@@ -5,6 +5,7 @@ use crate::config::{AppConfig, StormConfig};
 use crate::db::Db;
 use crate::elasticsearch::EsClient;
 use crate::leader::LeaderElection;
+use crate::license::LicenseGate;
 use crate::notify_pipeline::NotifyQueue;
 use eventide_core::{IngressPressure, RedisAggregateBuffer, RedisThrottleGate};
 use eventide_notify::Notifier;
@@ -38,6 +39,8 @@ pub struct AppState {
     pub policy_redis: Option<Arc<PolicyRedis>>,
     /// Runtime Trap HTTP api_token (MySQL `app_kv` / console); falls back to toml.
     pub trap_api_token: Arc<RwLock<String>>,
+    /// Product license / trial gate.
+    pub license: Arc<LicenseGate>,
 }
 
 impl AppState {

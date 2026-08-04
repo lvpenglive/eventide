@@ -35,3 +35,5 @@ eventide-core = { workspace = true }
 eventide-notify = { workspace = true }
 eventide-sources = { workspace = true }
 eventide-trap-data = { workspace = true }
+eventide-license = { workspace = true }
+snmp2 = { version = "0.5", default-features = false, features = ["tokio"] }

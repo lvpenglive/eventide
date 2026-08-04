@@ -204,6 +204,47 @@
       "write_labels": true,
       "enabled": true,
       "priority": 10
+    },
+    {
+      "name": "Trap 设备台账丰富",
+      "kind": "composite",
+      "matchers": { "source": "ingress:snmptrap" },
+      "match_key": "",
+      "_lookup": "trap_hosts",
+      "templates": {},
+      "mappings": {},
+      "field_templates": {
+        "summary": "{{labels.ip}} · {{labels.trap_hosts.主机名}}（{{labels.trap_hosts.机房}} / {{labels.trap_hosts.联系人}}）· {{annotations.summary}}"
+      },
+      "write_labels": true,
+      "enabled": true,
+      "priority": 5,
+      "_note": "匹配 Trap 的 labels.ip；台账 key_label=ip，表名 trap_hosts"
+    }
+  ],
+  "lookups": [
+    {
+      "name": "trap_hosts",
+      "description": "SNMP Trap 按设备 IP 补主机名/机房/联系人（联调样例）",
+      "key_label": "ip",
+      "enabled": true,
+      "rows": {
+        "10.0.0.1": {
+          "主机名": "trap-demo-01",
+          "机房": "DC-A",
+          "联系人": "ops"
+        },
+        "10.0.0.88": {
+          "主机名": "sw-core-88",
+          "机房": "DC-A",
+          "联系人": "netops"
+        },
+        "10.0.0.99": {
+          "主机名": "sw-access-99",
+          "机房": "DC-B",
+          "联系人": "netops"
+        }
+      }
     }
   ],
   "silence": {

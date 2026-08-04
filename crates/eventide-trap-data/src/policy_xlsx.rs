@@ -23,7 +23,7 @@ const HEADERS: &[&str] = &[
     "模块",
     "恢复OID",
     "恢复值",
-    "指纹OID",
+    "告警标识OID",
     "级别OID",
     "级别映射",
 ];
@@ -200,7 +200,8 @@ fn map_header(h: &str) -> Option<&'static str> {
         "状态" | "status" => Some("status"),
         "恢复oid" | "resolveoid" | "resolve_oid" | "恢复判定oid" => Some("resolve_oid"),
         "恢复值" | "resolvevalues" | "resolve_values" | "恢复判定值" => Some("resolve_values"),
-        "指纹oid" | "fingerprintoid" | "fingerprint_oids" | "指纹" | "流水号oid" => {
+        "指纹oid" | "fingerprintoid" | "fingerprint_oids" | "指纹" | "流水号oid"
+        | "告警标识oid" | "告警标识" | "标识oid" => {
             Some("fingerprint_oids")
         }
         "级别oid" | "severityoid" | "severity_oid" => Some("severity_oid"),

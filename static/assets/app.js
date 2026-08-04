@@ -5,6 +5,8 @@
   const SIDEBAR_KEY = "eventide_sidebar_collapsed";
   const NAV_GROUPS_KEY = "eventide_nav_groups";
   const ALERT_VIEW_KEY = "eventide_alert_view"; // cards | table
+  const ALERT_AUTO_KEY = "eventide_alert_auto"; // "0" | "15" | "30" | "60"
+  const ALERT_PAGE_SIZE = 50;
   const THEME_KEY = "eventide_theme"; // light | dark | system
 
   // Zabbix-aligned severities (0–5)
@@ -111,7 +113,7 @@
     users: ["用户管理", "账号 · 部门 · 角色"],
     roles: ["权限管理", "角色与权限码"],
     departments: ["部门管理", "组织架构"],
-    settings: ["系统设置", "外观 · 抗风暴 · 告警历史 · Trap Token · 运行信息"],
+    settings: ["系统设置", "许可 · 外观 · 抗风暴 · 告警历史 · Trap Token · 运行信息"],
   };
 
   function can(perm) {
@@ -165,7 +167,16 @@
     } catch {
       data = { error: text };
     }
-    if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
+    if (!res.ok) {
+      const err = new Error((data && data.error) || text || res.statusText);
+      if (data && data.code) err.code = data.code;
+      if (res.status === 402 || data?.code === "license_readonly") {
+        err.code = "license_readonly";
+        err.message =
+          (data && data.error) || "许可证无效或已过期，当前为只读宽限。请到「系统设置」导入许可证。";
+      }
+      throw err;
+    }
     return data;
   }
 
@@ -176,6 +187,100 @@
     el.classList.add("show");
     clearTimeout(toast._t);
     toast._t = setTimeout(() => el.classList.remove("show"), 2800);
+  }
+
+  let ctxMenuEl = null;
+  let ctxMenuCleanups = [];
+
+  function hideCtxMenu() {
+    if (ctxMenuEl) {
+      ctxMenuEl.remove();
+      ctxMenuEl = null;
+    }
+    ctxMenuCleanups.forEach((fn) => {
+      try {
+        fn();
+      } catch (_) {}
+    });
+    ctxMenuCleanups = [];
+  }
+
+  /** Floating right-click menu. items: { label, onClick, disabled? } | { sep: true } */
+  function showCtxMenu(clientX, clientY, items) {
+    hideCtxMenu();
+    const menu = document.createElement("div");
+    menu.className = "ctx-menu";
+    menu.setAttribute("role", "menu");
+    (items || []).forEach((it) => {
+      if (it && it.sep) {
+        const hr = document.createElement("div");
+        hr.className = "ctx-sep";
+        menu.appendChild(hr);
+        return;
+      }
+      if (!it || !it.label) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ctx-item" + (it.disabled ? " disabled" : "");
+      btn.setAttribute("role", "menuitem");
+      btn.textContent = it.label;
+      btn.disabled = !!it.disabled;
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        if (btn.disabled) return;
+        hideCtxMenu();
+        try {
+          it.onClick && it.onClick();
+        } catch (err) {
+          toast(err.message || String(err), true);
+        }
+      };
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    ctxMenuEl = menu;
+
+    const rect = menu.getBoundingClientRect();
+    let left = clientX;
+    let top = clientY;
+    if (left + rect.width > window.innerWidth - 8) left = window.innerWidth - rect.width - 8;
+    if (top + rect.height > window.innerHeight - 8) top = window.innerHeight - rect.height - 8;
+    if (left < 8) left = 8;
+    if (top < 8) top = 8;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+
+    const onDown = (ev) => {
+      if (ctxMenuEl && !ctxMenuEl.contains(ev.target)) hideCtxMenu();
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") hideCtxMenu();
+    };
+    const onScroll = () => hideCtxMenu();
+    setTimeout(() => {
+      document.addEventListener("mousedown", onDown, true);
+      document.addEventListener("keydown", onKey, true);
+      window.addEventListener("scroll", onScroll, true);
+      ctxMenuCleanups.push(() => {
+        document.removeEventListener("mousedown", onDown, true);
+        document.removeEventListener("keydown", onKey, true);
+        window.removeEventListener("scroll", onScroll, true);
+      });
+    }, 0);
+  }
+
+  async function copyText(text, label) {
+    const t = String(text ?? "").trim();
+    if (!t) {
+      toast(`无可复制的${label || "内容"}`, true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(t);
+      toast(`已复制${label || ""}`);
+    } catch {
+      toast("复制失败（浏览器权限或非 HTTPS）", true);
+    }
   }
 
   function esc(s) {
@@ -215,6 +320,59 @@
     }
     applySidebarState();
     applyNavPermissions();
+    refreshLicenseBanner();
+  }
+
+  function licenseKindLabel(kind) {
+    if (kind === "trial") return "试用";
+    if (kind === "licensed") return "已授权";
+    if (kind === "expired") return "已过期";
+    return kind || "—";
+  }
+
+  async function refreshLicenseBanner() {
+    const el = document.getElementById("license-banner");
+    if (!el) return;
+    if (!token()) {
+      el.hidden = true;
+      el.innerHTML = "";
+      return;
+    }
+    try {
+      const lic = await api("/api/license");
+      state.license = lic;
+      const days = lic.days_left;
+      let show = false;
+      let cls = "info";
+      let text = "";
+      if (lic.kind === "expired" || !lic.writable) {
+        show = true;
+        cls = "warn";
+        text =
+          lic.reason ||
+          "许可证无效或已过期，当前为只读宽限。可查看数据，配置变更已禁用。";
+      } else if (lic.kind === "trial") {
+        show = true;
+        cls = days != null && days <= 7 ? "warn" : "info";
+        text = `试用中，剩余约 ${days ?? "—"} 天（到期 ${fmtTime(lic.expires_at) || "—"}）。`;
+      } else if (lic.kind === "licensed" && days != null && days <= 7) {
+        show = true;
+        cls = "warn";
+        text = `许可证即将到期：剩余约 ${days} 天（${esc(lic.customer || "")} · ${fmtTime(lic.expires_at) || "—"}）。`;
+      }
+      if (!show) {
+        el.hidden = true;
+        el.innerHTML = "";
+        return;
+      }
+      el.hidden = false;
+      el.className = `license-banner ${cls}`;
+      el.innerHTML = `<span>${text}</span><button type="button" class="ghost" id="license-banner-go">去导入许可证</button>`;
+      const btn = document.getElementById("license-banner-go");
+      if (btn) btn.onclick = () => navigate("settings");
+    } catch (_) {
+      el.hidden = true;
+    }
   }
 
   function applySidebarState() {
@@ -403,11 +561,21 @@
     }
   }
 
+  let alertsTimer = null;
+  function stopAlertsTimer() {
+    if (alertsTimer) {
+      clearInterval(alertsTimer);
+      alertsTimer = null;
+    }
+  }
+
   function navigate(page) {
     if (!canPage(page)) {
       page = firstAllowedPage();
     }
+    hideCtxMenu();
     if (page !== "overview") stopOverviewTimer();
+    if (page !== "alerts") stopAlertsTimer();
     state.page = page;
     applyNavPermissions();
     document.querySelectorAll(".nav-item").forEach((b) => {
@@ -425,6 +593,7 @@
     document.getElementById("page-sub").textContent = s;
     document.getElementById("page-actions").innerHTML = "";
     renderPage();
+    refreshLicenseBanner();
   }
 
   applyNavGroups();
@@ -523,6 +692,9 @@
           severity: "",
           source: "",
           q: "",
+          ip: "",
+          store: "",
+          page: 1,
         };
         navigate("alerts");
       };
@@ -1006,7 +1178,7 @@
       });
       root.querySelectorAll("[data-alerts]").forEach((b) => {
         b.onclick = () => {
-          state.alertFilters = { source: "ingress", q: "" };
+          state.alertFilters = { source: "ingress", q: "", ip: "", page: 1 };
           navigate("alerts");
         };
       });
@@ -1063,19 +1235,24 @@
             </div>
             <div id="k-status" style="margin-top:12px">${statusHtml || ""}</div>
           </div>
-          <div class="row" style="align-items:flex-start;gap:16px;flex-wrap:wrap">
-            <div class="panel" style="flex:1;min-width:280px;margin:0">
-              <h3 style="margin:0 0 0.75rem;font-size:1rem">Topics</h3>
-              <div id="k-topics">${topicsHtml || `<p class="hint">点击「连接并列出 Topic」</p>`}</div>
+          <div class="kafka-split">
+            <div class="kafka-side">
+              <div class="panel kafka-topics">
+                <h3 style="margin:0 0 0.75rem;font-size:1rem">Topics</h3>
+                <div id="k-topics">${topicsHtml || `<p class="hint">点击「连接并列出 Topic」</p>`}</div>
+              </div>
+              <div class="panel kafka-groups">
+                <div class="kafka-groups-head">
+                  <h3 style="margin:0;font-size:1rem">Consumer Groups</h3>
+                  <button type="button" class="ghost" id="k-groups-side" style="height:auto;min-height:0;padding:4px 10px">列出</button>
+                </div>
+                <div id="k-groups-panel"><p class="hint" style="margin:8px 0 0">点击上方「列出消费组」或本栏「列出」</p></div>
+              </div>
             </div>
-            <div class="panel" style="flex:2;min-width:320px;margin:0">
+            <div class="panel kafka-detail">
               <h3 style="margin:0 0 0.75rem;font-size:1rem">详情 / 消息</h3>
-              <div id="k-detail">${detailHtml || `<p class="hint">选择左侧 Topic</p>`}</div>
+              <div id="k-detail">${detailHtml || `<p class="hint">选择左侧 Topic，或查看消费组积压</p>`}</div>
             </div>
-          </div>
-          <div class="panel" style="margin-top:16px">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">Consumer Groups</h3>
-            <div id="k-groups-panel"><p class="hint">点击「列出消费组」查看成员与积压（lag）</p></div>
           </div>`;
       };
 
@@ -1318,9 +1495,9 @@
         persist();
         brokers = String(document.getElementById("k-brokers").value || "").trim();
         focusTopic = String(document.getElementById("k-topic").value || "").trim();
-        const panel = document.getElementById("k-groups-panel");
-        if (!panel) return;
-        panel.innerHTML = `<p class="hint">加载消费组 <code>${esc(groupId)}</code> …</p>`;
+        const detail = document.getElementById("k-detail");
+        if (!detail) return;
+        detail.innerHTML = `<p class="hint">加载消费组 <code>${esc(groupId)}</code> …</p>`;
         try {
           const data = await api("/api/ingress/kafka/groups/describe", {
             method: "POST",
@@ -1332,68 +1509,74 @@
           });
           const members = data.members || [];
           const parts = data.partitions || [];
-          panel.innerHTML = `
-            <div class="row" style="gap:16px;flex-wrap:wrap;margin-bottom:12px">
-              <div><label class="hint">Group</label><div><code>${esc(data.group_id)}</code></div></div>
-              <div><label class="hint">状态</label><div>${esc(data.state || "—")}</div></div>
-              <div><label class="hint">协议</label><div>${esc(data.protocol_type || "—")} / ${esc(
-                data.protocol || "—"
-              )}</div></div>
-              <div><label class="hint">总积压 lag</label><div><strong>${esc(
-                data.total_lag ?? 0
-              )}</strong></div></div>
-            </div>
-            <div class="seg-title" style="margin-bottom:6px">成员 (${members.length})</div>
-            ${
-              members.length
-                ? `<table class="map-help-table" style="width:100%;margin-bottom:12px">
-                    <thead><tr><th>member_id</th><th>client_id</th><th>host</th></tr></thead>
-                    <tbody>${members
-                      .map(
-                        (m) => `<tr>
-                          <td class="mono" style="font-size:12px">${esc(m.member_id)}</td>
-                          <td>${esc(m.client_id)}</td>
-                          <td>${esc(m.client_host)}</td>
-                        </tr>`
-                      )
-                      .join("")}</tbody></table>`
-                : `<p class="hint">无活跃成员（Empty / Dead 或尚未加入）</p>`
-            }
-            <div class="seg-title" style="margin-bottom:6px">分区位点 / 积压${
-              focusTopic ? ` · 过滤 <code>${esc(focusTopic)}</code>` : ""
-            }</div>
-            ${
-              parts.length
-                ? `<table class="map-help-table" style="width:100%">
-                    <thead><tr><th>Topic</th><th>分区</th><th>已提交</th><th>latest</th><th>lag</th></tr></thead>
-                    <tbody>${parts
-                      .map(
-                        (p) => `<tr>
-                          <td><code>${esc(p.topic)}</code></td>
-                          <td>${esc(p.partition)}</td>
-                          <td class="mono">${esc(p.committed)}</td>
-                          <td class="mono">${esc(p.latest)}</td>
-                          <td><strong>${esc(p.lag)}</strong></td>
-                        </tr>`
-                      )
-                      .join("")}</tbody></table>
-                    <p class="hint" style="margin-top:8px">lag = max(0, latest − committed)；committed=-1 表示尚未提交，按 latest 计积压。</p>`
-                : `<p class="hint">该组暂无已提交位点${
-                    focusTopic ? "（或与当前 Topic 无关）" : ""
-                  }</p>`
-            }
-            <div class="actions" style="margin-top:12px">
-              <button type="button" id="k-groups-back">返回列表</button>
-              <button type="button" id="k-groups-refresh-one">刷新此组</button>
+          detail.innerHTML = `
+            <div class="kafka-group-detail">
+              <div class="kafka-group-meta">
+                <div>
+                  <div class="hint">消费组</div>
+                  <code class="kafka-gid-full">${esc(data.group_id)}</code>
+                </div>
+                <div>
+                  <div class="hint">状态</div>
+                  <div>${esc(data.state || "—")}</div>
+                </div>
+                <div>
+                  <div class="hint">协议</div>
+                  <div>${esc(data.protocol_type || "—")} / ${esc(data.protocol || "—")}</div>
+                </div>
+                <div>
+                  <div class="hint">总积压 lag</div>
+                  <div class="kafka-lag-n">${esc(data.total_lag ?? 0)}</div>
+                </div>
+              </div>
+              <div class="seg-title" style="margin:14px 0 6px">成员 (${members.length})</div>
+              ${
+                members.length
+                  ? `<div class="alert-table-scroll"><table class="data kafka-lag-table">
+                      <thead><tr><th>member_id</th><th>client_id</th><th>host</th></tr></thead>
+                      <tbody>${members
+                        .map(
+                          (m) => `<tr>
+                            <td class="mono" title="${esc(m.member_id)}">${esc(m.member_id)}</td>
+                            <td>${esc(m.client_id)}</td>
+                            <td>${esc(m.client_host)}</td>
+                          </tr>`
+                        )
+                        .join("")}</tbody></table></div>`
+                  : `<p class="hint">无活跃成员（Empty / Dead 或尚未加入）</p>`
+              }
+              <div class="seg-title" style="margin:14px 0 6px">分区位点 / 积压${
+                focusTopic ? ` · 过滤 <code>${esc(focusTopic)}</code>` : ""
+              }</div>
+              ${
+                parts.length
+                  ? `<div class="alert-table-scroll"><table class="data kafka-lag-table">
+                      <thead><tr><th>Topic</th><th>分区</th><th>已提交</th><th>latest</th><th>lag</th></tr></thead>
+                      <tbody>${parts
+                        .map(
+                          (p) => `<tr>
+                            <td><code title="${esc(p.topic)}">${esc(p.topic)}</code></td>
+                            <td>${esc(p.partition)}</td>
+                            <td class="mono">${esc(p.committed)}</td>
+                            <td class="mono">${esc(p.latest)}</td>
+                            <td><strong>${esc(p.lag)}</strong></td>
+                          </tr>`
+                        )
+                        .join("")}</tbody></table></div>
+                      <p class="hint" style="margin-top:8px">lag = max(0, latest − committed)；committed=-1 表示尚未提交，按 latest 计积压。</p>`
+                  : `<p class="hint">该组暂无已提交位点${
+                      focusTopic ? "（或与当前 Topic 无关）" : ""
+                    }</p>`
+              }
+              <div class="actions" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+                <button type="button" id="k-groups-refresh-one">刷新此组</button>
+              </div>
             </div>`;
-          document.getElementById("k-groups-back").onclick = () => loadGroups(true);
           document.getElementById("k-groups-refresh-one").onclick = () => openGroup(groupId);
         } catch (e) {
-          panel.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
+          detail.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
             e.message || e
-          )}</p>
-            <button type="button" id="k-groups-back">返回列表</button>`;
-          document.getElementById("k-groups-back").onclick = () => loadGroups(true);
+          )}</p>`;
           toast(e.message || String(e), true);
         }
       };
@@ -1415,18 +1598,20 @@
           });
           const groups = data.groups || [];
           panel.innerHTML = groups.length
-            ? `<table class="map-help-table" style="width:100%">
-                <thead><tr><th>Group ID</th><th>protocol</th><th></th></tr></thead>
-                <tbody>${groups
-                  .map(
-                    (g) => `<tr>
-                      <td><code>${esc(g.group_id)}</code></td>
-                      <td>${esc(g.protocol_type || "—")}</td>
-                      <td><button type="button" data-group="${esc(g.group_id)}">详情 / 积压</button></td>
-                    </tr>`
-                  )
-                  .join("")}</tbody></table>
-              <p class="hint" style="margin-top:8px">详情默认按上方「默认 Topic」过滤位点；清空 Topic 可看该组全部 Topic。</p>`
+            ? `<ul class="kafka-group-list">${groups
+                .map(
+                  (g) => `<li>
+                    <div class="kafka-group-item">
+                      <code class="kafka-gid" title="${esc(g.group_id)}">${esc(g.group_id)}</code>
+                      <span class="hint">${esc(g.protocol_type || "consumer")}</span>
+                      <button type="button" class="ghost kafka-gid-btn" data-group="${esc(
+                        g.group_id
+                      )}">积压</button>
+                    </div>
+                  </li>`
+                )
+                .join("")}</ul>
+              <p class="hint" style="margin-top:8px">积压按「默认 Topic」过滤；清空 Topic 可看全部。</p>`
             : `<p class="hint">未发现消费组</p>`;
           panel.querySelectorAll("[data-group]").forEach((b) => {
             b.onclick = () => openGroup(b.dataset.group);
@@ -1443,7 +1628,12 @@
       renderShell("", "", "");
       document.getElementById("btn-k-refresh").onclick = () => loadTopics(false);
       document.getElementById("k-connect").onclick = () => loadTopics(false);
-      document.getElementById("k-groups").onclick = () => loadGroups(false);
+      const bindGroupsBtn = (id) => {
+        const el = document.getElementById(id);
+        if (el) el.onclick = () => loadGroups(false);
+      };
+      bindGroupsBtn("k-groups");
+      bindGroupsBtn("k-groups-side");
       const createBtn = document.getElementById("k-create");
       if (createBtn) {
         createBtn.onclick = async () => {
@@ -1480,39 +1670,67 @@
     },
 
     async alerts(root) {
-      const f = state.alertFilters || { status: "", severity: "", source: "", q: "", store: "" };
+      const f = state.alertFilters || {
+        status: "",
+        severity: "",
+        source: "",
+        q: "",
+        ip: "",
+        store: "",
+        page: 1,
+      };
       setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
 
-      const load = async () => {
+      const load = async (opts = {}) => {
+        const soft = !!opts.soft;
+        if (soft) {
+          const ae = document.activeElement;
+          if (ae && (ae.id === "alert-q" || ae.id === "alert-ip")) return;
+        }
+
         const status = state.alertFilters?.status || "";
-        const severity = root.querySelector("#alert-sev")?.value ?? state.alertFilters?.severity ?? "";
-        const source = root.querySelector("#alert-source")?.value ?? state.alertFilters?.source ?? "";
+        const severity =
+          root.querySelector("#alert-sev")?.value ?? state.alertFilters?.severity ?? "";
+        const source =
+          root.querySelector("#alert-source")?.value ?? state.alertFilters?.source ?? "";
         const q = (root.querySelector("#alert-q")?.value ?? state.alertFilters?.q ?? "").trim();
+        const ip = (root.querySelector("#alert-ip")?.value ?? state.alertFilters?.ip ?? "").trim();
         const store =
           root.querySelector("#alert-store")?.value ?? state.alertFilters?.store ?? "";
-        state.alertFilters = { status, severity, source, q, store };
+        let page = Number(state.alertFilters?.page) || 1;
+        if (page < 1) page = 1;
+        const limit = ALERT_PAGE_SIZE;
+        state.alertFilters = { status, severity, source, q, ip, store, page };
 
         const params = new URLSearchParams();
         if (status) params.set("status", status);
         if (severity) params.set("severity", severity);
         if (source) params.set("source", source);
         if (q) params.set("q", q);
+        if (ip) params.set("ip", ip);
         if (store) params.set("store", store);
+        params.set("page", String(page));
+        params.set("limit", String(limit));
 
-        const countParams = new URLSearchParams();
-        if (store) countParams.set("store", store);
-
-        const [rows, allRows, ingressRows] = await Promise.all([
-          api("/api/alerts" + (params.toString() ? `?${params}` : "")),
-          api("/api/alerts" + (countParams.toString() ? `?${countParams}` : "")).catch(() => []),
+        const [data, ingressRows] = await Promise.all([
+          api("/api/alerts?" + params.toString()),
           api("/api/ingress").catch(() => []),
         ]);
+        const list = normalizeAlertList(data);
+        const rows = list.items;
+        const total = list.total;
+        const nFire = list.status_counts.firing;
+        const nPend = list.status_counts.pending;
+        const nRes = list.status_counts.resolved;
         const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
-        const nFire = allRows.filter((a) => a.status === "firing").length;
-        const nPend = allRows.filter((a) => a.status === "pending").length;
-        const nRes = allRows.filter((a) => a.status === "resolved").length;
+        const pages = Math.max(1, Math.ceil(total / limit) || 1);
+        if (page > pages) {
+          state.alertFilters = { ...(state.alertFilters || {}), page: pages };
+          return load(opts);
+        }
 
         const view = getAlertView();
+        const auto = getAlertAutoRefresh();
         root.innerHTML = `
           <div class="alert-toolbar">
             <div class="alert-tabs" role="tablist">
@@ -1527,6 +1745,7 @@
                 <button type="button" class="view-btn ${view === "table" ? "on" : ""}" data-view="table" title="表格列表">表格</button>
               </div>
               <input id="alert-q" placeholder="搜索名称、描述…" value="${esc(q)}" />
+              <input id="alert-ip" class="alert-ip-input" placeholder="IP / 主机" value="${esc(ip)}" title="按告警 IP / instance / host 筛选" />
               <select id="alert-sev">
                 <option value="" ${!severity ? "selected" : ""}>全部级别</option>
                 ${severityOptions(severity, "")}
@@ -1541,6 +1760,15 @@
                 <option value="mysql" ${store === "mysql" ? "selected" : ""}>最近事件</option>
                 <option value="es" ${store === "es" ? "selected" : ""}>历史事件</option>
               </select>
+              <label class="alert-auto" title="定时刷新列表">
+                <span>自动刷新</span>
+                <select id="alert-auto">
+                  <option value="0" ${auto === 0 ? "selected" : ""}>关</option>
+                  <option value="15" ${auto === 15 ? "selected" : ""}>15 秒</option>
+                  <option value="30" ${auto === 30 ? "selected" : ""}>30 秒</option>
+                  <option value="60" ${auto === 60 ? "selected" : ""}>60 秒</option>
+                </select>
+              </label>
             </div>
           </div>
           ${
@@ -1552,13 +1780,15 @@
                   暂无告警。去「告警接入」试推送，或等待规则触发。
                   <div style="margin-top:12px"><button class="primary" id="go-ingress">去告警接入</button></div>
                 </div>`
-          }`;
+          }
+          ${alertPagerHtml(page, pages, total, limit)}`;
 
         root.querySelectorAll(".alert-tab").forEach((tab) => {
           tab.onclick = () => {
             state.alertFilters = {
               ...(state.alertFilters || {}),
               status: tab.dataset.st || "",
+              page: 1,
             };
             load();
           };
@@ -1573,33 +1803,68 @@
         else bindAlertCards(root, rows, ingressMap);
         const go = document.getElementById("go-ingress");
         if (go) go.onclick = () => navigate("ingress");
+        bindAlertPager(root, () => load());
+
         let t;
         const qEl = root.querySelector("#alert-q");
         qEl.oninput = () => {
           clearTimeout(t);
           t = setTimeout(() => {
-            state.alertFilters = { ...(state.alertFilters || {}), q: qEl.value.trim() };
+            state.alertFilters = {
+              ...(state.alertFilters || {}),
+              q: qEl.value.trim(),
+              page: 1,
+            };
+            load();
+          }, 280);
+        };
+        const ipEl = root.querySelector("#alert-ip");
+        let tip;
+        ipEl.oninput = () => {
+          clearTimeout(tip);
+          tip = setTimeout(() => {
+            state.alertFilters = {
+              ...(state.alertFilters || {}),
+              ip: ipEl.value.trim(),
+              page: 1,
+            };
             load();
           }, 280);
         };
         root.querySelector("#alert-sev").onchange = (e) => {
-          state.alertFilters = { ...(state.alertFilters || {}), severity: e.target.value };
+          state.alertFilters = {
+            ...(state.alertFilters || {}),
+            severity: e.target.value,
+            page: 1,
+          };
           load();
         };
         root.querySelector("#alert-source").onchange = (e) => {
-          state.alertFilters = { ...(state.alertFilters || {}), source: e.target.value };
+          state.alertFilters = {
+            ...(state.alertFilters || {}),
+            source: e.target.value,
+            page: 1,
+          };
           load();
         };
         root.querySelector("#alert-store").onchange = (e) => {
-          state.alertFilters = { ...(state.alertFilters || {}), store: e.target.value };
+          state.alertFilters = {
+            ...(state.alertFilters || {}),
+            store: e.target.value,
+            page: 1,
+          };
           load();
+        };
+        root.querySelector("#alert-auto").onchange = (e) => {
+          setAlertAutoRefresh(e.target.value);
+          scheduleAlertsAutoRefresh(() => load({ soft: true }));
         };
       };
 
       document.getElementById("btn-refresh").onclick = () => load();
-      // seed filters from initial f
-      state.alertFilters = { ...f };
+      state.alertFilters = { ...f, page: Number(f.page) || 1, ip: f.ip || "" };
       await load();
+      scheduleAlertsAutoRefresh(() => load({ soft: true }));
     },
 
     async enrich(root) {
@@ -1867,8 +2132,83 @@
 
         const items = recent.items || [];
         const peers = cluster.items || [];
+        const recv = Number(stats.received ?? 0);
+        const parseErr = Number(stats.parse_err ?? 0);
+        const errRate =
+          recv > 0 ? ((parseErr / recv) * 100).toFixed(1) : "0.0";
+
+        // Kafka lag for snmptrap ingress (best-effort)
+        let lagHtml = `<p class="hint">加载积压…</p>`;
+        let lagBlockId = "trap-lag-panel";
+        try {
+          const routes = await api("/api/ingress").catch(() => []);
+          const trapRoute = (routes || []).find((r) => {
+            if (r.kind !== "kafka") return false;
+            const opt = r.options || {};
+            const topic = String(opt.topic || "");
+            const preset = String(opt._preset || "");
+            return (
+              preset === "snmptrap" ||
+              topic === "eventide.snmptrap" ||
+              topic === (health.kafka_topic || "")
+            );
+          });
+          if (!trapRoute) {
+            lagHtml = `<p class="hint">未找到 SNMP Trap 的 Kafka Ingress。请在「告警接入」配置 Topic（默认 <code>eventide.snmptrap</code>）。</p>`;
+          } else {
+            const opt = trapRoute.options || {};
+            const brokers = String(trapRoute.endpoint || "").trim();
+            const topic = String(opt.topic || health.kafka_topic || "eventide.snmptrap");
+            const groupId =
+              String(opt.group_id || "").trim() || `eventide-ingress-${trapRoute.id}`;
+            if (!brokers) {
+              lagHtml = `<p class="hint">Ingress「${esc(trapRoute.name)}」未配置 brokers。</p>`;
+            } else {
+              try {
+                const data = await api("/api/ingress/kafka/groups/describe", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    brokers,
+                    group_id: groupId,
+                    topic,
+                  }),
+                });
+                const parts = data.partitions || [];
+                lagHtml = `
+                  <p class="hint" style="margin:0 0 10px">
+                    路由 <code>${esc(trapRoute.name)}</code>
+                    · Group <code>${esc(groupId)}</code>
+                    · Topic <code>${esc(topic)}</code>
+                    · 总积压 <strong>${esc(data.total_lag ?? 0)}</strong>
+                    · 状态 ${esc(data.state || "—")}
+                  </p>
+                  ${
+                    parts.length
+                      ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
+                          <th>分区</th><th>committed</th><th>latest</th><th>lag</th>
+                        </tr></thead><tbody>${parts
+                          .map(
+                            (p) => `<tr>
+                            <td>${esc(p.partition)}</td>
+                            <td class="mono">${esc(p.committed)}</td>
+                            <td class="mono">${esc(p.latest)}</td>
+                            <td><strong>${esc(p.lag)}</strong></td>
+                          </tr>`
+                          )
+                          .join("")}</tbody></table></div>`
+                      : `<p class="hint">无分区位点（消费组可能尚未提交 offset）。</p>`
+                  }`;
+              } catch (e) {
+                lagHtml = `<p class="hint">查询积压失败：${esc(e.message || e)}</p>`;
+              }
+            }
+          }
+        } catch (e) {
+          lagHtml = `<p class="hint">无法加载 Ingress：${esc(e.message || e)}</p>`;
+        }
+
         root.innerHTML = `
-          <div class="panel" style="max-width:900px;margin-bottom:16px">
+          <div class="panel" style="max-width:960px;margin-bottom:16px">
             <h3 style="margin:0 0 0.75rem;font-size:1rem">服务状态</h3>
             <p class="hint" style="margin:0 0 12px">
               <span class="badge on">在线</span>
@@ -1880,17 +2220,22 @@
                   ? `<span class="badge on">已启用</span> <code>${esc(health.kafka_topic || "")}</code>`
                   : `<span class="badge off">未配置 brokers</span>`
               }
+              · 解析失败率 ${esc(errRate)}%
             </p>
-            <div class="stat-row" style="display:flex;flex-wrap:wrap;gap:12px;font-size:0.9rem">
-              <span>接收 ${esc(stats.received ?? 0)}</span>
-              <span>解析成功 ${esc(stats.parsed_ok ?? 0)}</span>
-              <span>解析失败 ${esc(stats.parse_err ?? 0)}</span>
-              <span>Kafka 成功 ${esc(stats.kafka_ok ?? 0)}</span>
-              <span>Kafka 失败 ${esc(stats.kafka_err ?? 0)}</span>
-              <span>试推送 ${esc(stats.simulated ?? 0)}</span>
+            <div class="trap-stat-cards">
+              <div class="trap-stat"><div class="n">${esc(stats.received ?? 0)}</div><div class="l">接收</div></div>
+              <div class="trap-stat"><div class="n">${esc(stats.parsed_ok ?? 0)}</div><div class="l">解析成功</div></div>
+              <div class="trap-stat"><div class="n">${esc(stats.parse_err ?? 0)}</div><div class="l">解析失败</div></div>
+              <div class="trap-stat"><div class="n">${esc(stats.kafka_ok ?? 0)}</div><div class="l">Kafka 成功</div></div>
+              <div class="trap-stat"><div class="n">${esc(stats.kafka_err ?? 0)}</div><div class="l">Kafka 失败</div></div>
+              <div class="trap-stat"><div class="n">${esc(stats.simulated ?? 0)}</div><div class="l">试推送</div></div>
             </div>
           </div>
-          <div class="panel" style="max-width:900px;margin-bottom:16px">
+          <div class="panel" style="max-width:960px;margin-bottom:16px">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">Kafka 消费积压</h3>
+            <div id="${lagBlockId}">${lagHtml}</div>
+          </div>
+          <div class="panel" style="max-width:960px;margin-bottom:16px">
             <h3 style="margin:0 0 0.75rem;font-size:1rem">集群心跳（多机同时收）</h3>
             <p class="hint" style="margin:0 0 12px">
               多机 Trap 经 Redis 上报心跳。推荐前面挂 UDP LB 分流（三台同时收）；见仓库 <code>deploy/trap-ha/</code>。
@@ -1913,7 +2258,7 @@
                 : `<p class="hint">暂无心跳（确认 Trap 配了 <code>redis_url</code> 且 <code>heartbeat_secs &gt; 0</code>）。</p>`
             }
           </div>
-          <div class="panel" style="max-width:900px;margin-bottom:16px">
+          <div class="panel" style="max-width:960px;margin-bottom:16px">
             <h3 style="margin:0 0 0.75rem;font-size:1rem">试推送（模拟 Trap）</h3>
             <p class="hint" style="margin:0 0 12px">写出与 Kafka Ingress Generic 对齐的 JSON，用于联调（不依赖真实设备）。</p>
             <div class="field"><label>设备 IP</label>
@@ -1941,7 +2286,7 @@
             }
             <pre id="trap-sim-out" class="mono" style="margin-top:12px;white-space:pre-wrap;font-size:0.8rem;max-height:240px;overflow:auto"></pre>
           </div>
-          <div class="panel" style="max-width:900px">
+          <div class="panel" style="max-width:960px">
             <h3 style="margin:0 0 0.75rem;font-size:1rem">最近事件</h3>
             <p class="hint" style="margin:0 0 12px">点击「详情」查看完整 OID / 变量名 / Varbind。</p>
             ${
@@ -2204,7 +2549,33 @@
                         nd.objects.join(", ")
                       )}</div></div>`
                     : ""
-                }`;
+                }
+                <div class="field mib-snmp-get">
+                  <label>SNMP Get（v2c）</label>
+                  <p class="hint" style="margin:0 0 8px">向设备主动查询当前 OID，用于核对；非 Trap 接收。</p>
+                  <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
+                    <div class="field" style="margin:0;flex:1.2;min-width:120px">
+                      <label>目标 IP</label>
+                      <input id="mib-snmp-host" type="text" placeholder="10.0.0.1" value="${esc(
+                        localStorage.getItem("eventide_snmp_host") || ""
+                      )}" />
+                    </div>
+                    <div class="field" style="margin:0;width:88px">
+                      <label>端口</label>
+                      <input id="mib-snmp-port" type="number" min="1" max="65535" value="${esc(
+                        localStorage.getItem("eventide_snmp_port") || "161"
+                      )}" />
+                    </div>
+                    <div class="field" style="margin:0;flex:1;min-width:100px">
+                      <label>Community</label>
+                      <input id="mib-snmp-community" type="text" value="${esc(
+                        localStorage.getItem("eventide_snmp_community") || "public"
+                      )}" />
+                    </div>
+                    <button type="button" class="primary" id="btn-mib-snmp-get">Get</button>
+                  </div>
+                  <pre id="mib-snmp-out" class="mono summary-box" style="margin-top:10px;min-height:2.5em;white-space:pre-wrap;font-size:12px"></pre>
+                </div>`;
             } catch (e) {
               nodeInfo = `<p class="hint">${esc(e.message)}</p>`;
             }
@@ -2446,6 +2817,48 @@
             }
           };
         }
+        const snmpGetBtn = document.getElementById("btn-mib-snmp-get");
+        if (snmpGetBtn && state.mibFocusOid) {
+          snmpGetBtn.onclick = async () => {
+            const host = document.getElementById("mib-snmp-host")?.value.trim() || "";
+            const port = Number(document.getElementById("mib-snmp-port")?.value || 161);
+            const community =
+              document.getElementById("mib-snmp-community")?.value.trim() || "public";
+            const out = document.getElementById("mib-snmp-out");
+            if (!host) {
+              toast("请填写目标 IP", true);
+              return;
+            }
+            localStorage.setItem("eventide_snmp_host", host);
+            localStorage.setItem("eventide_snmp_port", String(port || 161));
+            localStorage.setItem("eventide_snmp_community", community);
+            if (out) out.textContent = "查询中…";
+            snmpGetBtn.disabled = true;
+            try {
+              const r = await api("/api/snmp/get", {
+                method: "POST",
+                body: JSON.stringify({
+                  host,
+                  port: port || 161,
+                  community,
+                  oid: state.mibFocusOid,
+                  timeout_ms: 3000,
+                }),
+              });
+              if (out) {
+                out.textContent = r.ok
+                  ? `${r.type || "Value"} = ${r.value}\nOID ${r.oid || state.mibFocusOid}`
+                  : r.error || "失败";
+              }
+              toast(r.ok ? "Get 成功" : r.error || "Get 失败", !r.ok);
+            } catch (e) {
+              if (out) out.textContent = e.message || String(e);
+              toast(e.message || String(e), true);
+            } finally {
+              snmpGetBtn.disabled = false;
+            }
+          };
+        }
       };
 
       document.getElementById("btn-mib-reload").onclick = async () => {
@@ -2623,12 +3036,12 @@
                 </div>
               </div>
               <p class="field-hint">该 OID 的 varbind 值命中任一项时标记为恢复；可填 OBJECTS 名或数字 OID。</p>
-              <div class="field"><label>指纹 OID</label>
+              <div class="field"><label>告警标识 OID</label>
                 <input name="fingerprint_oids" class="mono" placeholder="逗号分隔，例：…10.3.1.1.9" value="${esc(
                   fpOids
                 )}" />
               </div>
-              <p class="field-hint">取这些 varbind 的<strong>值</strong>关联告警与恢复（如流水号）。</p>
+              <p class="field-hint">取这些 varbind 的<strong>值</strong>组成告警标识，用于关联告警与恢复（如流水号）。</p>
             </section>
 
             <section class="enrich-section">
@@ -2832,11 +3245,31 @@
         const focusPos =
           focusId === "pol-q" ? document.activeElement.selectionStart : null;
 
+        const policyHasResolve = (p) =>
+          !!(
+            (p.resolve_oid && String(p.resolve_oid).trim()) ||
+            (p.resolve_values && p.resolve_values.length) ||
+            p.status === "resolved"
+          );
+        const policyResolveTitle = (p) => {
+          if (p.resolve_oid) {
+            return `${p.resolve_oid}→${(p.resolve_values || []).join(",") || "?"}`;
+          }
+          if (p.status === "resolved") return "始终恢复（专用恢复 OID）";
+          if (p.resolve_values && p.resolve_values.length) {
+            return `任意 varbind∈${p.resolve_values.join(",")}`;
+          }
+          return "";
+        };
+
         root.innerHTML = `
           <div class="panel" style="margin-bottom:12px">
-            <p class="hint" style="margin:0 0 10px">
-              策略存储 <code>${esc(polCache.path || "")}</code> ·
-              显示 ${esc(filtered.length)} / ${esc(all.length)} 条。
+            <p class="hint" style="margin:0 0 10px" title="${esc(polCache.path || "")}">
+              策略 ${esc(all.length)} 条${
+                filtered.length !== all.length
+                  ? ` · 筛选后 ${esc(filtered.length)} 条`
+                  : ""
+              }
             </p>
             <div class="alert-filters">
               <input id="pol-q" placeholder="搜索名称、OID、模块、摘要…" value="${esc(f.q || "")}" />
@@ -2866,39 +3299,51 @@
           <div class="panel">
             ${
               filtered.length
-                ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
-                    <th>启用</th><th>名称</th><th>OID</th><th>恢复</th><th>指纹OID</th><th>级别映射</th><th>模块</th><th>摘要</th><th></th>
+                ? `<div class="alert-table-scroll"><table class="data pol-table"><thead><tr>
+                    <th class="pol-col-en">启用</th><th class="pol-col-name">名称</th><th class="pol-col-oid">OID</th><th class="pol-col-fp">告警标识OID</th><th class="pol-col-sev">级别映射</th><th>模块</th><th class="pol-col-sum">摘要</th><th></th>
                   </tr></thead><tbody>${filtered
-                    .map(
-                      (p) => `<tr>
-                      <td>${p.enabled ? "✓" : "—"}</td>
-                      <td>${esc(p.name)}</td>
-                      <td class="mono">${esc(p.trap_oid)}</td>
-                      <td class="mono"><span class="mib-objects" title="${esc(
-                        `${p.resolve_oid || ""} = ${(p.resolve_values || []).join(",")}`
-                      )}">${
-                        p.resolve_oid
-                          ? esc(`${p.resolve_oid}→${(p.resolve_values || []).join(",")}`)
-                          : p.status === "resolved"
-                            ? "(始终恢复)"
-                            : "—"
-                      }</span></td>
-                      <td class="mono"><span class="mib-objects" title="${esc(
-                        (p.fingerprint_oids || []).join(", ")
-                      )}">${esc((p.fingerprint_oids || []).join(", ") || "—")}</span></td>
-                      <td class="mono"><span class="mib-objects" title="${esc(
-                        p.severity_oid
-                          ? `${p.severity_oid}: ${Object.entries(p.severity_map || {})
-                              .map(([k, v]) => k + "=" + v)
-                              .join(";")}`
-                          : ""
+                    .map((p) => {
+                      const hasRes = policyHasResolve(p);
+                      const resTitle = policyResolveTitle(p);
+                      const fp = (p.fingerprint_oids || []).join(", ");
+                      const sevTitle = p.severity_oid
+                        ? `${p.severity_oid}: ${Object.entries(p.severity_map || {})
+                            .map(([k, v]) => k + "=" + v)
+                            .join(";")}`
+                        : p.severity || "";
+                      return `<tr>
+                      <td class="pol-col-en">${
+                        p.enabled
+                          ? `<span class="badge on">启用</span>`
+                          : `<span class="badge">禁用</span>`
+                      }</td>
+                      <td class="pol-col-name">
+                        <div class="pol-name-row">
+                          <span class="pol-name">${esc(p.name)}</span>
+                          ${
+                            hasRes
+                              ? `<span class="chip pol-resolve-chip" title="${esc(
+                                  resTitle
+                                )}">可恢复</span>`
+                              : ""
+                          }
+                        </div>
+                      </td>
+                      <td class="mono pol-col-oid"><span class="mib-objects" title="${esc(
+                        p.trap_oid || ""
+                      )}">${esc(p.trap_oid || "—")}</span></td>
+                      <td class="mono pol-col-fp"><span class="mib-objects" title="${esc(
+                        fp
+                      )}">${esc(fp || "—")}</span></td>
+                      <td class="mono pol-col-sev"><span class="mib-objects" title="${esc(
+                        sevTitle
                       )}">${
                         p.severity_oid
                           ? esc(p.severity_oid)
                           : esc(p.severity || "—")
                       }</span></td>
                       <td>${esc(p.module || "—")}</td>
-                      <td class="mono"><span class="mib-objects" title="${esc(
+                      <td class="mono pol-col-sum"><span class="mib-objects" title="${esc(
                         p.summary_template || ""
                       )}">${esc(p.summary_template || "—")}</span></td>
                       <td class="actions">
@@ -2911,8 +3356,8 @@
                             : ""
                         }
                       </td>
-                    </tr>`
-                    )
+                    </tr>`;
+                    })
                     .join("")}</tbody></table></div>`
                 : `<div class="empty">${
                     all.length
@@ -3107,13 +3552,73 @@
       try {
         storm = await api("/api/settings/storm");
       } catch (_) {}
+      let lic = {
+        kind: "trial",
+        writable: true,
+        install_id: "—",
+        customer: null,
+        edition: null,
+        expires_at: null,
+        days_left: null,
+        reason: null,
+        has_license_token: false,
+      };
+      try {
+        lic = await api("/api/license");
+        state.license = lic;
+      } catch (_) {}
       const canWriteSettings = can("settings:write");
       const dis = canWriteSettings ? "" : "disabled";
       const resolveMax =
         storm.resolve_max_per_window == null || storm.resolve_max_per_window === ""
           ? ""
           : String(storm.resolve_max_per_window);
+      const licStatus = !lic.writable
+        ? "只读宽限"
+        : lic.kind === "trial"
+        ? `试用 · 剩余约 ${lic.days_left ?? "—"} 天`
+        : `已授权 · ${esc(lic.customer || "—")}`;
       root.innerHTML = `
+        <div class="panel" style="max-width:720px;margin-bottom:16px">
+          <h3 style="margin:0 0 0.75rem;font-size:1rem">产品许可</h3>
+          <p class="hint" style="margin:0 0 12px">
+            流程：导出授权申请 → 发给厂商签发 → 导入授权文件。首次安装自动试用 30 天；到期后只读宽限。
+          </p>
+          <div class="detail-grid" style="margin-bottom:12px">
+            <div class="field"><label>状态</label>
+              <div><span class="badge ${lic.writable ? "on" : "off"}">${esc(licStatus)}</span>
+              <span class="hint" style="margin-left:8px">${esc(licenseKindLabel(lic.kind))}</span></div></div>
+            <div class="field"><label>到期时间</label>
+              <div class="mono">${esc(fmtTime(lic.expires_at) || "—")}</div></div>
+            <div class="field"><label>版本</label>
+              <div>${esc(lic.edition || "—")}</div></div>
+            <div class="field"><label>安装 ID</label>
+              <div class="mono" style="word-break:break-all">${esc(lic.install_id || "—")}</div></div>
+          </div>
+          ${lic.reason ? `<p class="hint" style="color:var(--danger);margin:0 0 12px">${esc(lic.reason)}</p>` : ""}
+          <div class="field"><label>客户 / 单位名称（写入申请文件）</label>
+            <input id="lic-customer" type="text" placeholder="如：某某科技有限公司" value="${esc(lic.customer || "")}" />
+          </div>
+          <div style="margin:10px 0 16px;display:flex;flex-wrap:wrap;gap:8px">
+            <button class="primary" type="button" id="lic-export-req">导出授权申请</button>
+          </div>
+          <div class="field"><label>导入授权文件</label>
+            <input id="lic-file" type="file" accept=".json,.eventide-lic.json,application/json,text/plain" ${dis} />
+            <textarea id="lic-token" rows="5" placeholder="或粘贴厂商返回的 .eventide-lic.json 全文" ${dis} style="margin-top:8px"></textarea>
+          </div>
+          ${
+            canWriteSettings
+              ? `<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
+                  <button class="primary" id="lic-save">导入授权</button>
+                  ${
+                    lic.has_license_token
+                      ? `<button class="danger" id="lic-clear">清除商业许可</button>`
+                      : ""
+                  }
+                </div>`
+              : `<p class="hint">需要 settings:write 才能导入授权文件。</p>`
+          }
+        </div>
         <div class="panel" style="max-width:720px;margin-bottom:16px">
           <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
           <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
@@ -3283,6 +3788,87 @@
           </p>
         </div>`;
       bindThemeHost(document.getElementById("settings-theme"), "cards");
+
+      const downloadTextFile = (filename, text, mime = "application/json") => {
+        const blob = new Blob([text], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const licExport = document.getElementById("lic-export-req");
+      if (licExport) {
+        licExport.onclick = async () => {
+          try {
+            const customer = (document.getElementById("lic-customer")?.value || "").trim();
+            const params = new URLSearchParams();
+            if (customer) params.set("customer", customer);
+            const req = await api(
+              "/api/license/request" + (params.toString() ? `?${params}` : "")
+            );
+            const name = `eventide-license-request-${(req.install_id || "install").slice(0, 8)}.json`;
+            downloadTextFile(name, JSON.stringify(req, null, 2) + "\n");
+            toast("已导出授权申请，请发给厂商签发");
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+
+      const licFile = document.getElementById("lic-file");
+      if (licFile) {
+        licFile.onchange = async () => {
+          const f = licFile.files && licFile.files[0];
+          if (!f) return;
+          try {
+            const text = await f.text();
+            const ta = document.getElementById("lic-token");
+            if (ta) ta.value = text.trim();
+          } catch (e) {
+            toast(e.message || "读取文件失败", true);
+          }
+        };
+      }
+
+      const licSave = document.getElementById("lic-save");
+      if (licSave) {
+        licSave.onclick = async () => {
+          try {
+            const content = (document.getElementById("lic-token")?.value || "").trim();
+            if (!content) {
+              toast("请选择或粘贴授权文件", true);
+              return;
+            }
+            await api("/api/license", {
+              method: "PUT",
+              body: JSON.stringify({ content }),
+            });
+            toast("授权已导入");
+            refreshLicenseBanner();
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const licClear = document.getElementById("lic-clear");
+      if (licClear) {
+        licClear.onclick = async () => {
+          if (!confirm("清除商业许可后将回到试用/过期态，确定？")) return;
+          try {
+            await api("/api/license", { method: "DELETE" });
+            toast("已清除商业许可");
+            refreshLicenseBanner();
+            renderPage();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+
       const revealTok = (tok) => {
         const el = document.getElementById("trap-tok-reveal");
         if (!el || !tok) return;
@@ -3581,6 +4167,85 @@
     localStorage.setItem(ALERT_VIEW_KEY, v === "table" ? "table" : "cards");
   }
 
+  function getAlertAutoRefresh() {
+    const v = Number(localStorage.getItem(ALERT_AUTO_KEY));
+    return [0, 15, 30, 60].includes(v) ? v : 15;
+  }
+
+  function setAlertAutoRefresh(v) {
+    const n = Number(v);
+    localStorage.setItem(ALERT_AUTO_KEY, String([0, 15, 30, 60].includes(n) ? n : 15));
+  }
+
+  function scheduleAlertsAutoRefresh(tick) {
+    stopAlertsTimer();
+    const sec = getAlertAutoRefresh();
+    if (!sec || typeof tick !== "function") return;
+    alertsTimer = setInterval(() => {
+      if (state.page !== "alerts") {
+        stopAlertsTimer();
+        return;
+      }
+      tick();
+    }, sec * 1000);
+  }
+
+  function normalizeAlertList(data) {
+    if (Array.isArray(data)) {
+      const items = data;
+      return {
+        items,
+        total: items.length,
+        page: 1,
+        limit: items.length || ALERT_PAGE_SIZE,
+        status_counts: {
+          firing: items.filter((a) => a.status === "firing").length,
+          pending: items.filter((a) => a.status === "pending").length,
+          resolved: items.filter((a) => a.status === "resolved").length,
+        },
+      };
+    }
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const sc = data?.status_counts || {};
+    return {
+      items,
+      total: Number(data?.total) || items.length,
+      page: Number(data?.page) || 1,
+      limit: Number(data?.limit) || ALERT_PAGE_SIZE,
+      status_counts: {
+        firing: Number(sc.firing) || 0,
+        pending: Number(sc.pending) || 0,
+        resolved: Number(sc.resolved) || 0,
+      },
+    };
+  }
+
+  function alertPagerHtml(page, pages, total, limit) {
+    if (total <= 0) return "";
+    const from = (page - 1) * limit + 1;
+    const to = Math.min(page * limit, total);
+    return `<div class="alert-pager">
+      <span class="alert-pager-meta">第 ${from}–${to} 条，共 ${total} 条</span>
+      <div class="alert-pager-btns">
+        <button type="button" class="ghost" data-alert-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button>
+        <span class="alert-pager-page">${page} / ${pages}</span>
+        <button type="button" class="ghost" data-alert-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>
+      </div>
+    </div>`;
+  }
+
+  function bindAlertPager(root, reload) {
+    root.querySelectorAll("[data-alert-page]").forEach((btn) => {
+      btn.onclick = () => {
+        const cur = Number(state.alertFilters?.page) || 1;
+        const next = btn.dataset.alertPage === "prev" ? cur - 1 : cur + 1;
+        if (next < 1) return;
+        state.alertFilters = { ...(state.alertFilters || {}), page: next };
+        reload();
+      };
+    });
+  }
+
   function alertTargetIp(a) {
     const l = a.labels || {};
     return l.alertIp || l.ip || l.ipaddr || l.instance || l.host || l.hostname || "";
@@ -3634,6 +4299,84 @@
       .join("")}</div>`;
   }
 
+  function silenceFromAlert(a) {
+    if (!a) return;
+    const matchers = { ...(a.labels || {}) };
+    delete matchers.source;
+    editSilence({
+      comment: `静默 ${alertDisplayName(a)}`,
+      matchers,
+      rule_id: null,
+    });
+  }
+
+  function filterAlertsByQuery(q) {
+    const query = String(q || "").trim();
+    if (!query) {
+      toast("筛选关键词为空", true);
+      return;
+    }
+    state.alertFilters = { ...(state.alertFilters || {}), q: query, page: 1 };
+    navigate("alerts");
+  }
+
+  function filterAlertsByIp(ip) {
+    const value = String(ip || "").trim();
+    if (!value) {
+      toast("IP 为空", true);
+      return;
+    }
+    state.alertFilters = { ...(state.alertFilters || {}), ip: value, page: 1 };
+    navigate("alerts");
+  }
+
+  function openAlertContextMenu(e, a, ingressMap) {
+    if (!a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const summary = alertSummary(a);
+    const ip = alertTargetIp(a);
+    const name = alertDisplayName(a);
+    const nameOk = !!name && name !== "未命名告警";
+    showCtxMenu(e.clientX, e.clientY, [
+      {
+        label: "查看详情",
+        onClick: () => showAlertDetail(a, ingressMap || {}),
+      },
+      {
+        label: "据此静默",
+        onClick: () => silenceFromAlert(a),
+      },
+      { sep: true },
+      {
+        label: "复制告警描述",
+        disabled: !summary,
+        onClick: () => copyText(summary, "告警描述"),
+      },
+      {
+        label: "复制告警 IP",
+        disabled: !ip,
+        onClick: () => copyText(ip, "告警 IP"),
+      },
+      {
+        label: "复制告警标识",
+        disabled: !a.fingerprint,
+        onClick: () => copyText(a.fingerprint, "告警标识"),
+      },
+      { sep: true },
+      {
+        label: "按此告警名称筛选",
+        disabled: !nameOk,
+        onClick: () => filterAlertsByQuery(name),
+      },
+      {
+        label: "按此 IP 筛选",
+        disabled: !ip,
+        onClick: () => filterAlertsByIp(ip),
+      },
+    ]);
+  }
+
   function bindAlertCards(container, rows, ingressMap) {
     if (!container || !rows?.length) return;
     const open = (i) => showAlertDetail(rows[i], ingressMap || {});
@@ -3647,6 +4390,10 @@
           e.preventDefault();
           open(Number(card.dataset.alertIdx));
         }
+      });
+      card.addEventListener("contextmenu", (e) => {
+        const idx = Number(card.dataset.alertIdx);
+        openAlertContextMenu(e, rows[idx], ingressMap);
       });
     });
     container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
@@ -3694,6 +4441,12 @@
 
   function bindAlertTableGrid(container, rows, ingressMap) {
     if (!container || !rows?.length) return;
+    container.querySelectorAll("table.alert-table tbody tr[data-alert-idx]").forEach((tr) => {
+      tr.addEventListener("contextmenu", (e) => {
+        const idx = Number(tr.dataset.alertIdx);
+        openAlertContextMenu(e, rows[idx], ingressMap);
+      });
+    });
     container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
       btn.onclick = () =>
         showAlertDetail(rows[Number(btn.dataset.alertDetail)], ingressMap || {});
@@ -3773,9 +4526,11 @@
 
   function alertSummary(a) {
     const an = a.annotations || {};
+    // Prefer summary: Trap 策略「摘要模板」/ 丰富「告警描述」都写 annotations.summary；
+    // description 多为策略静态说明，不应盖住真正的告警正文。
     return (
-      an.description ||
       an.summary ||
+      an.description ||
       an.message ||
       an.retMessage ||
       an.title ||
@@ -4098,13 +4853,7 @@
     });
     document.getElementById("m-silence").onclick = () => {
       closeModal();
-      const matchers = { ...(a.labels || {}) };
-      delete matchers.source;
-      editSilence({
-        comment: `静默 ${alertDisplayName(a)}`,
-        matchers,
-        rule_id: null,
-      });
+      silenceFromAlert(a);
     };
   }
 
@@ -4151,7 +4900,14 @@
         });
         closeModal();
         toast(res.hint || `已接受 ${res.accepted} 条`);
-        state.alertFilters = { source: "ingress", status: "", severity: "", q: "" };
+        state.alertFilters = {
+          source: "ingress",
+          status: "",
+          severity: "",
+          q: "",
+          ip: "",
+          page: 1,
+        };
         navigate("alerts");
       } catch (e) {
         toast(e.message || "试推送失败", true);

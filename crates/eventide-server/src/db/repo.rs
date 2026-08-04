@@ -303,7 +303,7 @@ impl Db {
                 "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                         value, starts_at, ends_at, pending_since, last_evaluated_at,
                         notified_firing, notified_resolved
-                 FROM alert_events WHERE status=? ORDER BY last_evaluated_at DESC LIMIT 500",
+                 FROM alert_events WHERE status=? ORDER BY last_evaluated_at DESC LIMIT 1000",
                 positional(vec![v(st)]),
             )?;
             rows.iter().map(map_alert).collect()
@@ -312,7 +312,7 @@ impl Db {
                 "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                         value, starts_at, ends_at, pending_since, last_evaluated_at,
                         notified_firing, notified_resolved
-                 FROM alert_events ORDER BY last_evaluated_at DESC LIMIT 500",
+                 FROM alert_events ORDER BY last_evaluated_at DESC LIMIT 1000",
             )?;
             rows.iter().map(map_alert).collect()
         }

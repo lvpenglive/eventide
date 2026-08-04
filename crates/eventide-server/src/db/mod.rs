@@ -75,10 +75,12 @@ impl Db {
     updated_at VARCHAR(64) NOT NULL,
     last_run_at VARCHAR(64) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+            // fingerprint: Ingress prefixes route UUID + Trap uses `ip|oid|varbinds`
+            // (often >128). Keep ≤768 so utf8mb4 unique index stays within InnoDB limit.
             r#"CREATE TABLE IF NOT EXISTS alert_events (
     id CHAR(36) PRIMARY KEY,
     rule_id CHAR(36) NOT NULL,
-    fingerprint VARCHAR(128) NOT NULL,
+    fingerprint VARCHAR(768) NOT NULL,
     status VARCHAR(32) NOT NULL,
     severity VARCHAR(32) NOT NULL,
     labels_json MEDIUMTEXT NOT NULL,
@@ -243,8 +245,13 @@ impl Db {
             conn.query_drop(*sql)
                 .with_context(|| format!("migrate: {sql}"))?;
         }
+        // v15: widen fingerprint — Trap/Kafka ingress fingerprints exceed VARCHAR(128).
+        conn.query_drop(
+            "ALTER TABLE alert_events MODIFY fingerprint VARCHAR(768) NOT NULL",
+        )
+        .with_context(|| "migrate: widen alert_events.fingerprint")?;
         conn.exec_drop(
-            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '14')
+            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '15')
                ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)"#,
             (),
         )?;

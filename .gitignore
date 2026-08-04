@@ -1,4 +1,5 @@
 /target/
+/keys/license_private.pem
 /data/**
 !/data/eventide.db
 *.db-wal

@@ -11,6 +11,7 @@ mod ingress_api;
 mod kafka_ingress;
 mod kafka_groups;
 mod leader;
+mod license;
 mod notify_pipeline;
 mod password;
 mod scheduler;
@@ -197,6 +198,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("trap api_token empty — /trap-api upstream auth off until set in 系统设置");
     }
 
+    let license = crate::license::LicenseGate::from_db(&db).context("evaluate product license")?;
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -214,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         policies,
         policy_redis,
         trap_api_token: Arc::new(std::sync::RwLock::new(trap_api_token_runtime)),
+        license,
     });
     // Seed Redis snapshot so Trap instances can boot without waiting for a CRUD.
     state.sync_policies_to_redis().await;

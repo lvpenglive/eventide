@@ -1,12 +1,14 @@
 //! REST API for Eventide.
 
 mod iam;
+mod license_api;
 mod mib_admin;
 mod overview;
 mod policy_admin;
 mod settings;
+mod snmp_get;
 
-use crate::auth::{self, require_auth, require_route_perm};
+use crate::auth::{self, require_auth, require_route_perm, require_writable_license};
 use crate::scheduler;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -17,7 +19,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use eventide_core::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -139,9 +141,20 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/settings/storm",
             get(settings::get_storm).put(settings::put_storm),
         )
+        .route(
+            "/api/license",
+            get(license_api::get_license)
+                .put(license_api::put_license)
+                .delete(license_api::delete_license),
+        )
+        .route(
+            "/api/license/request",
+            get(license_api::get_license_request),
+        )
         .route("/api/trap/instances", get(list_trap_instances))
         .merge(mib_admin::routes())
         .merge(policy_admin::routes())
+        .merge(snmp_get::routes())
         // Trap service BFF (runtime health / simulate only)
         .route(
             "/trap-api",
@@ -151,8 +164,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/trap-api/{*path}",
             axum::routing::any(crate::trap_proxy::forward),
         )
-        // Inner: perm check; Outer: JWT auth (last layer = outermost)
+        // Inner → outer: perm, license write-gate, JWT
         .layer(middleware::from_fn(require_route_perm))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_writable_license,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state);
 
@@ -675,16 +692,39 @@ struct AlertQuery {
     severity: Option<String>,
     /// Free-text search over alertname / summary / labels / fingerprint.
     q: Option<String>,
+    /// Substring match on alert IP-like labels (alertIp / ip / instance / …).
+    ip: Option<String>,
     /// `ingress` | `rule` — filter by source label prefix or absence.
     source: Option<String>,
     /// `mysql` | `es` — override list backend (default from settings).
     store: Option<String>,
+    /// 1-based page (default 1).
+    page: Option<u32>,
+    /// Page size (default 50, max 200).
+    limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct AlertStatusCounts {
+    firing: usize,
+    pending: usize,
+    resolved: usize,
+}
+
+#[derive(Serialize)]
+struct AlertListResponse {
+    items: Vec<AlertEvent>,
+    total: usize,
+    page: u32,
+    limit: u32,
+    /// Counts after severity / source / q / ip filters, before `status`.
+    status_counts: AlertStatusCounts,
 }
 
 async fn list_alerts(
     State(state): State<Arc<AppState>>,
     Query(q): Query<AlertQuery>,
-) -> ApiResult<Json<Vec<AlertEvent>>> {
+) -> ApiResult<Json<AlertListResponse>> {
     let prefs = state.alert_history_prefs();
     let store = q
         .store
@@ -694,25 +734,33 @@ async fn list_alerts(
         .unwrap_or(prefs.search_store.as_str())
         .to_ascii_lowercase();
 
+    let page = q.page.unwrap_or(1).max(1);
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    // Fetch a recent window, then filter / sort / paginate in memory.
+    // (MySQL list is already capped; ES search uses the same window size.)
+    const FETCH_CAP: usize = 1000;
+
     let mut alerts = if store == "es" || store == "elasticsearch" {
         let Some(es) = state.es_client() else {
             return Err(ApiError::bad(
                 "elasticsearch 未配置：请在「系统设置 → 告警历史仓库」填写地址",
             ));
         };
+        // Do not push status into ES — we need status_counts across all statuses.
         es.search_alerts(
-            q.status.as_deref(),
+            None,
             q.severity.as_deref(),
             q.source.as_deref(),
             q.q.as_deref(),
-            500,
+            q.ip.as_deref(),
+            FETCH_CAP,
         )
         .await
         .map_err(ApiError::internal)?
     } else {
         let mut alerts = state
             .db
-            .list_alerts(q.status.as_deref())
+            .list_alerts(None)
             .map_err(ApiError::internal)?;
 
         if let Some(sev) = q.severity.as_deref().filter(|s| !s.is_empty()) {
@@ -739,8 +787,31 @@ async fn list_alerts(
             let n = needle.to_ascii_lowercase();
             alerts.retain(|a| alert_matches_query(a, &n));
         }
+        if let Some(ip) = q.ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let n = ip.to_ascii_lowercase();
+            alerts.retain(|a| alert_matches_ip(a, &n));
+        }
         alerts
     };
+
+    let status_counts = AlertStatusCounts {
+        firing: alerts
+            .iter()
+            .filter(|a| a.status == AlertStatus::Firing)
+            .count(),
+        pending: alerts
+            .iter()
+            .filter(|a| a.status == AlertStatus::Pending)
+            .count(),
+        resolved: alerts
+            .iter()
+            .filter(|a| a.status == AlertStatus::Resolved)
+            .count(),
+    };
+
+    if let Some(st) = q.status.as_deref().filter(|s| !s.is_empty()) {
+        alerts.retain(|a| a.status.as_str() == st);
+    }
 
     // Firing first, then pending, then resolved; within group by last_evaluated desc.
     alerts.sort_by(|a, b| {
@@ -754,7 +825,25 @@ async fn list_alerts(
             .then_with(|| b.last_evaluated_at.cmp(&a.last_evaluated_at))
     });
 
-    Ok(Json(alerts))
+    let total = alerts.len();
+    let start = ((page - 1) as usize).saturating_mul(limit as usize);
+    let items = if start >= total {
+        Vec::new()
+    } else {
+        alerts
+            .into_iter()
+            .skip(start)
+            .take(limit as usize)
+            .collect()
+    };
+
+    Ok(Json(AlertListResponse {
+        items,
+        total,
+        page,
+        limit,
+        status_counts,
+    }))
 }
 
 fn alert_matches_query(a: &AlertEvent, needle: &str) -> bool {
@@ -780,6 +869,18 @@ fn alert_matches_query(a: &AlertEvent, needle: &str) -> bool {
         return true;
     }
     false
+}
+
+fn alert_matches_ip(a: &AlertEvent, needle: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "alertIp", "ip", "ipaddr", "instance", "host", "hostname",
+    ];
+    KEYS.iter().any(|k| {
+        a.labels
+            .get(*k)
+            .map(|v| v.to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+    })
 }
 
 async fn get_alert(

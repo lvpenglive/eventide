@@ -388,7 +388,9 @@ Header：`Authorization: Bearer <jwt>`
 | `/api/datasources` | 数据源 CRUD |
 | `/api/rules` | 规则 CRUD + `/evaluate` 试跑 |
 | `/api/channels` | 通知渠道 CRUD |
-| `/api/alerts` | 告警列表（可 `?status=`） |
+| `/api/alerts` | 告警列表（`status` / `severity` / `source` / `q` / `ip` / `store` / `page` / `limit`；返回 `{ items, total, page, limit, status_counts }`） |
+| `/api/license` | 产品许可：`GET` 状态；`PUT` 导入授权文件/JWT；`DELETE` 清除 |
+| `/api/license/request` | `GET` 导出授权申请（可 `?customer=`） |
 | `/api/silences` | 静默 CRUD |
 | `/api/ingress` | 接入路由 CRUD + 试推送 |
 | `/api/enrich` | 丰富规则 CRUD |
@@ -418,7 +420,40 @@ cargo run -p eventide-server -- eventide.toml
 控制台：浏览器打开 `http://127.0.0.1:8080`  
 默认账号：`admin` / `admin123`（见配置，**上线务必修改**）
 
-### 9.3 最小闭环（拉 Prometheus）
+### 9.3 产品许可（试用 + 离线授权）
+
+- **首次启动**无商业许可证时自动开启 **30 天试用**（可写配置）。
+- **试用/商业证过期**后进入**只读宽限**：可登录查看，写操作返回 `402` / `license_readonly`；仍可导入授权文件。
+- 推荐流程（离线文件）：
+
+```
+客户控制台「导出授权申请」.json
+        │
+        ▼  发给厂商
+厂商：eventide-license issue --request … -o xxx.eventide-lic.json
+        │
+        ▼  发回客户
+客户控制台「导入授权文件」
+```
+
+**客户侧**：系统设置 → 产品许可 → 填写单位名称 → **导出授权申请** → 把 JSON 发给厂商 → 收到授权文件后 **导入授权**。
+
+**厂商侧签发**：
+
+```bash
+# 私钥默认 keys/license_private.pem，或环境变量 EVENTIDE_LICENSE_PRIVATE_KEY
+cargo run -p eventide-license -- issue \
+  --request eventide-license-request-xxxxxxxx.json \
+  --days 365 \
+  --sub "客户名称" \
+  -o customer.eventide-lic.json
+
+cargo run -p eventide-license -- verify customer.eventide-lic.json
+```
+
+授权文件为 JSON（含 Ed25519 JWT），公钥编译进服务端；私钥勿提交仓库。
+
+### 9.4 最小闭环（拉 Prometheus）
 
 1. 登录控制台  
 2. **数据源** → 新建 `prometheus`，URL 如 `http://127.0.0.1:9090`  
@@ -427,14 +462,14 @@ cargo run -p eventide-server -- eventide.toml
 5. 点 **试跑**，或等待调度自动评估  
 6. 在 **告警事件** 查看结果  
 
-### 9.4 最小闭环（接 Alertmanager）
+### 9.5 最小闭环（接 Alertmanager）
 
 1. **通知渠道** 先建好  
 2. **告警接入** → 类型 `alertmanager`，填 token 与 channel  
 3. 复制 Webhook URL：`/api/ingress/{id}/alertmanager`  
 4. 在 Alertmanager 配置 `webhook_configs`  
 
-### 9.5 可选：台账丰富后再通知
+### 9.6 可选：台账丰富后再通知
 
 1. **告警丰富 → 台账数据**：导入主机对照表（匹配键如 `ip`）  
 2. **丰富规则**：勾选台账，描述写 `{{labels.台账名.主机名}}`  
@@ -621,7 +656,7 @@ count_over_time({app="api"} |= "ERROR" [5m])
 }
 ```
 
-也支持 Jeecg 业务拨测 `probe-alert` 单条 JSON（或整行日志，自动截取 `{...}`）：
+也支持  业务拨测 `probe-alert` 单条 JSON（或整行日志，自动截取 `{...}`）：
 
 ```json
 {
@@ -1126,10 +1161,23 @@ Trap 服务写出单条告警对象（可被 Generic / 自动识别），至少�
 4. [x] Trap 策略 CRUD、摘要 `${变量}` 生效、Excel(xlsx) 导入导出  
 5. [x] SNMPv3 USM 接收（`eventide-trap.toml` → `[[snmpv3_users]]`）  
 6. [x] 多机 Trap 同时收（UDP LB）+ VIP 主备备选；实例心跳  
-7. [ ] 与台账丰富联调  
-8. [ ] （可选）MIB 浏览器 SNMP Get；指标/积压监控   
+7. [x] 与台账丰富联调（`labels.ip` + 台账 `key_label=ip`；seed 含 `trap_hosts`）  
+8. [x] （可选）MIB 浏览器 SNMP Get；指标/积压监控（Trap 页 stats 卡片 + Kafka lag）   
 
-#### 明确不做（本阶段）
+> MIB 节点详情可对目标设备做 **SNMPv2c Get**（`POST /api/snmp/get`）。Trap 门户展示接收/解析/Kafka 计数，并查询 SNMP Trap Ingress 消费组积压。
+
+#### Trap × 台账联调（验收）
+
+1. 跑 seed（会种台账 `trap_hosts` 与规则「Trap 设备台账丰富」）：
+   ```powershell
+   powershell -File scripts/seed-demo.ps1
+   ```
+2. 控制台 **台账数据**：确认 `trap_hosts`，匹配键 `ip`，含 `10.0.0.88` / `10.0.0.99`。  
+3. **告警丰富**：规则匹配 `source=ingress:snmptrap`，引用该台账，`write_labels=true`。  
+4. Trap 试推送或真实 Trap，peer IP 用台账中的 IP。  
+5. **告警事件**：描述应含 `主机名 / 机房 / 联系人`；标签可见 `trap_hosts.*`。  
+
+要点：Trap 写的是 `labels.ip`（不是 `instance`）；台账匹配键必须是 `ip`。
 
 - Eventide 主进程内嵌监听 **162**
 - 在 Eventide 内维护完整厂商 MIB 与 OID 策略编辑

@@ -7,6 +7,7 @@ members = [
     "crates/eventide-server",
     "crates/eventide-trap",
     "crates/eventide-trap-data",
+    "crates/eventide-license",
 ]
 
 [workspace.package]
@@ -43,6 +44,7 @@ eventide-core = { path = "crates/eventide-core" }
 eventide-notify = { path = "crates/eventide-notify" }
 eventide-sources = { path = "crates/eventide-sources" }
 eventide-trap-data = { path = "crates/eventide-trap-data" }
+eventide-license = { path = "crates/eventide-license" }
 
 # samsa 0.1.8 FetchResponse: empty `records` must honor length prefix
 # (otherwise next partition bytes are mis-parsed as a record batch).

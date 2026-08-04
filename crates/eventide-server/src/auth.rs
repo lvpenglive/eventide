@@ -211,6 +211,32 @@ pub async fn require_auth(
     }
 }
 
+/// After require_auth: block configuration writes when license/trial is not writable.
+pub async fn require_writable_license(
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let method = req.method().as_str().to_uppercase();
+    let write = matches!(method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
+    if write {
+        let path = req.uri().path();
+        // Allow importing / clearing license while in read-only grace.
+        let license_mgmt = path == "/api/license";
+        if !license_mgmt && !state.license.is_writable() {
+            return (
+                StatusCode::PAYMENT_REQUIRED,
+                Json(serde_json::json!({
+                    "error": "许可证无效或已过期，当前为只读宽限",
+                    "code": "license_readonly",
+                })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// After require_auth: enforce RBAC based on method + path.
 pub async fn require_route_perm(req: Request<axum::body::Body>, next: Next) -> Response {
     let method = req.method().as_str().to_string();

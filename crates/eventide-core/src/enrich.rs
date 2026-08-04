@@ -1290,4 +1290,89 @@ mod tests {
             Some("82.12.161.32 · kylin-node")
         );
     }
+
+    #[test]
+    fn trap_source_lookup_by_ip_rewrites_summary() {
+        let mut labels = BTreeMap::new();
+        labels.insert("alertname".into(), "linkDown".into());
+        labels.insert("ip".into(), "10.0.0.88".into());
+        labels.insert("alertIp".into(), "10.0.0.88".into());
+        labels.insert("source".into(), "ingress:snmptrap".into());
+        labels.insert("trap_oid".into(), "1.3.6.1.6.3.1.1.5.3".into());
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            "summary".into(),
+            "SNMP Trap 1.3.6.1.6.3.1.1.5.3 from 10.0.0.88 (linkDown)".into(),
+        );
+        let mut ev = sample_event();
+        ev.labels = labels;
+        ev.annotations = annotations;
+
+        let table_id = Uuid::new_v4();
+        let mut rows = BTreeMap::new();
+        let mut meta = BTreeMap::new();
+        meta.insert("主机名".into(), "sw-core-88".into());
+        meta.insert("机房".into(), "DC-A".into());
+        meta.insert("联系人".into(), "netops".into());
+        rows.insert("10.0.0.88".into(), meta);
+        let mut lookups = BTreeMap::new();
+        lookups.insert(
+            table_id,
+            LookupTable {
+                id: table_id,
+                name: "trap_hosts".into(),
+                description: String::new(),
+                key_label: "ip".into(),
+                rows,
+                enabled: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        );
+
+        let mut field_templates = BTreeMap::new();
+        field_templates.insert(
+            "summary".into(),
+            "{{labels.ip}} · {{labels.trap_hosts.主机名}}（{{labels.trap_hosts.机房}} / {{labels.trap_hosts.联系人}}）· {{annotations.summary}}".into(),
+        );
+        let mut matchers = BTreeMap::new();
+        matchers.insert("source".into(), "ingress:snmptrap".into());
+        let rule = EnrichRule {
+            id: Uuid::new_v4(),
+            name: "trap enrich".into(),
+            kind: EnrichKind::Composite,
+            matchers,
+            match_key: String::new(),
+            templates: BTreeMap::new(),
+            mappings: BTreeMap::new(),
+            lookup_table_ids: vec![table_id],
+            lookup_match_keys: BTreeMap::new(),
+            field_templates,
+            label_extracts: BTreeMap::new(),
+            write_labels: true,
+            enabled: true,
+            priority: 5,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // Wrong source must not apply.
+        let mut skip = ev.clone();
+        skip.labels
+            .insert("source".into(), "ingress:kafka".into());
+        enrich_alert(&mut skip, None, &[rule.clone()], &lookups);
+        assert!(skip.labels.get("trap_hosts.主机名").is_none());
+
+        enrich_alert(&mut ev, None, &[rule], &lookups);
+        assert_eq!(
+            ev.labels.get("trap_hosts.主机名").map(String::as_str),
+            Some("sw-core-88")
+        );
+        assert_eq!(
+            ev.annotations.get("summary").map(String::as_str),
+            Some(
+                "10.0.0.88 · sw-core-88（DC-A / netops）· SNMP Trap 1.3.6.1.6.3.1.1.5.3 from 10.0.0.88 (linkDown)"
+            )
+        );
+    }
 }

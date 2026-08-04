@@ -599,6 +599,38 @@ html[data-theme="light"] .nav-item.active {
   min-width: 0;
   background: transparent;
 }
+.license-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  border: 1px solid var(--line);
+  background: var(--inset-bg);
+  color: var(--text-secondary);
+}
+.license-banner.info {
+  border-color: rgba(59, 143, 217, 0.35);
+  background: rgba(59, 143, 217, 0.1);
+  color: var(--heading);
+}
+.license-banner.warn {
+  border-color: rgba(227, 93, 106, 0.4);
+  background: rgba(227, 93, 106, 0.12);
+  color: var(--heading);
+}
+.license-banner[hidden] {
+  display: none !important;
+}
+.license-banner .ghost {
+  flex-shrink: 0;
+}
+
 .topbar {
   display: flex;
   align-items: flex-end;
@@ -978,6 +1010,47 @@ table.data.alert-table .col-act button {
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+}
+.alert-ip-input {
+  width: 140px;
+  min-width: 110px;
+}
+.alert-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.alert-auto select {
+  height: 30px;
+  min-width: 72px;
+}
+.alert-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.alert-pager-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.alert-pager-page {
+  min-width: 4.5em;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.alert-pager button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .view-switch {
   display: inline-flex;
@@ -2290,6 +2363,219 @@ button.mib-node-btn.active {
   display: block;
 }
 
+/* Trap policy list */
+table.data.pol-table {
+  width: max-content;
+  min-width: 100%;
+}
+table.data.pol-table .pol-col-en {
+  min-width: 64px;
+  width: 72px;
+}
+table.data.pol-table .pol-col-name {
+  min-width: 160px;
+  max-width: 240px;
+}
+table.data.pol-table .pol-col-oid {
+  min-width: 220px;
+  max-width: 320px;
+}
+table.data.pol-table .pol-col-fp {
+  min-width: 160px;
+  max-width: 260px;
+}
+table.data.pol-table .pol-col-sev {
+  min-width: 120px;
+  max-width: 200px;
+}
+table.data.pol-table .pol-col-sum {
+  min-width: 180px;
+  max-width: 280px;
+}
+table.data.pol-table .pol-col-oid .mib-objects,
+table.data.pol-table .pol-col-fp .mib-objects,
+table.data.pol-table .pol-col-sev .mib-objects,
+table.data.pol-table .pol-col-sum .mib-objects {
+  max-width: 100%;
+}
+.pol-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.pol-name {
+  font-weight: 600;
+  word-break: break-word;
+}
+.pol-resolve-chip {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 7px;
+}
+
+.trap-stat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 10px;
+}
+.trap-stat {
+  background: var(--inset-bg, color-mix(in srgb, var(--panel) 80%, #000));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.trap-stat .n {
+  font-size: 1.25rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.trap-stat .l {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Kafka tools page */
+.kafka-split {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.kafka-split .kafka-side {
+  flex: 0 1 320px;
+  width: 320px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-self: flex-start;
+}
+.kafka-split .kafka-side > .panel {
+  margin: 0;
+}
+.kafka-split .kafka-topics,
+.kafka-split .kafka-groups {
+  height: fit-content;
+}
+.kafka-split .kafka-detail {
+  flex: 1 1 420px;
+  min-width: min(100%, 320px);
+  margin: 0;
+  align-self: flex-start;
+}
+.kafka-groups-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.kafka-group-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kafka-group-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  gap: 2px 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--inset-bg, transparent);
+}
+.kafka-group-item .kafka-gid {
+  grid-column: 1;
+  grid-row: 1;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.kafka-group-item .hint {
+  grid-column: 1;
+  grid-row: 2;
+  margin: 0;
+  font-size: 11px;
+}
+.kafka-group-item .kafka-gid-btn {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  height: auto;
+  min-height: 0;
+  padding: 4px 10px;
+  flex-shrink: 0;
+}
+.kafka-group-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--inset-bg, transparent);
+}
+.kafka-group-meta .hint {
+  margin: 0 0 4px;
+  font-size: 11px;
+}
+.kafka-gid-full {
+  display: block;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.kafka-lag-n {
+  font-size: 1.25rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.kafka-lag-table {
+  width: max-content;
+  min-width: 100%;
+}
+.kafka-lag-table td.mono,
+.kafka-lag-table td code {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}
+.kafka-split .kafka-topics #k-topics,
+.kafka-split .kafka-groups #k-groups-panel {
+  max-height: min(36vh, 320px);
+  overflow: auto;
+}
+.kafka-split .kafka-topics .map-help-table {
+  width: 100%;
+}
+.kafka-split .kafka-topics .map-help-table td,
+.kafka-split .kafka-topics .map-help-table th {
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  .kafka-split .kafka-side {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+}
+
 /* Trap policy edit form */
 .pol-form .enrich-section {
   margin-bottom: 14px;
@@ -2350,6 +2636,56 @@ button.mib-node-btn.active {
   min-width: 100px;
   padding: 10px 18px;
   font-size: 14px;
+}
+
+/* Context menu (alert list right-click) */
+.ctx-menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 168px;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 4px;
+  margin: 0;
+  background: var(--panel, #162028);
+  border: 1px solid var(--line, #273441);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ctx-menu .ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text, #e7eef5);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  height: auto;
+  min-height: 0;
+}
+.ctx-menu .ctx-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary, #2f9e8f) 16%, transparent);
+}
+.ctx-menu .ctx-item:disabled,
+.ctx-menu .ctx-item.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ctx-menu .ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line, #273441);
+}
+table.data.alert-table tbody tr,
+.alert-card {
+  cursor: context-menu;
 }
 
 @media (max-width: 960px) {

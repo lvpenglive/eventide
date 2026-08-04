@@ -62,12 +62,14 @@ impl EsClient {
     }
 
     /// Search alerts; returns deserialized AlertEvent list (best-effort).
+    /// IP filter is applied in-process after fetch (label fields vary).
     pub async fn search_alerts(
         &self,
         status: Option<&str>,
         severity: Option<&str>,
         source: Option<&str>,
         q: Option<&str>,
+        ip: Option<&str>,
         size: usize,
     ) -> anyhow::Result<Vec<AlertEvent>> {
         let mut filter = Vec::new();
@@ -149,6 +151,20 @@ impl EsClient {
                 Ok(ev) => out.push(ev),
                 Err(e) => tracing::warn!("skip bad es alert doc: {e}"),
             }
+        }
+        if let Some(ip) = ip.map(str::trim).filter(|s| !s.is_empty()) {
+            let n = ip.to_ascii_lowercase();
+            const KEYS: &[&str] = &[
+                "alertIp", "ip", "ipaddr", "instance", "host", "hostname",
+            ];
+            out.retain(|a| {
+                KEYS.iter().any(|k| {
+                    a.labels
+                        .get(*k)
+                        .map(|v| v.to_ascii_lowercase().contains(&n))
+                        .unwrap_or(false)
+                })
+            });
         }
         Ok(out)
     }

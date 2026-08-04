@@ -224,7 +224,10 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
     if path.starts_with("/api/enrich") || path.starts_with("/api/lookups") {
         return Some(if write { "enrich:write" } else { "enrich:read" });
     }
-    if path.starts_with("/api/settings") {
+    if path.starts_with("/api/settings")
+        || path == "/api/license"
+        || path.starts_with("/api/license/")
+    {
         return Some(if write {
             "settings:write"
         } else {
@@ -234,6 +237,7 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
     if path.starts_with("/api/mibs")
         || path.starts_with("/api/policies")
         || path.starts_with("/api/trap")
+        || path.starts_with("/api/snmp")
         || path.starts_with("/trap-api")
     {
         return Some(if write { "trap:write" } else { "trap:read" });

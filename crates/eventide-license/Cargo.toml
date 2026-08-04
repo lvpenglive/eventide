@@ -1,0 +1,18 @@
+[package]
+name = "eventide-license"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Eventide offline product license (Ed25519 JWT)"
+
+[[bin]]
+name = "eventide-license"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

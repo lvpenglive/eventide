@@ -35,7 +35,7 @@ function ApiGet($path) {
 }
 
 Write-Host "Clearing existing demo-ish data..."
-foreach ($col in @('rules','ingress','enrich','silences','channels','datasources')) {
+foreach ($col in @('rules','ingress','enrich','lookups','silences','channels','datasources')) {
   $rows = ApiGet "/api/$col"
   foreach ($r in $rows) {
     ApiDelete "/api/$col/$($r.id)"
@@ -96,15 +96,64 @@ foreach ($i in $seed.ingress) {
   $ingressMap[$i.name] = @{ id = $created.id; token = $i.token }
 }
 
+Write-Host "Seeding lookups..."
+$lookupMap = @{}
+if ($seed.lookups) {
+  foreach ($t in $seed.lookups) {
+    $rows = @{}
+    if ($t.rows) {
+      $t.rows.PSObject.Properties | ForEach-Object {
+        $row = @{}
+        $_.Value.PSObject.Properties | ForEach-Object { $row[$_.Name] = [string]$_.Value }
+        $rows[$_.Name] = $row
+      }
+    }
+    $created = ApiPost '/api/lookups' @{
+      name = $t.name
+      description = $t.description
+      key_label = $t.key_label
+      rows = $rows
+      enabled = [bool]$t.enabled
+    }
+    $lookupMap[$t.name] = $created.id
+    Write-Host "  lookup $($t.name) -> $($created.id)"
+  }
+}
+
 Write-Host "Seeding enrich..."
 foreach ($e in $seed.enrich) {
-  ApiPost '/api/enrich' @{
+  $lookupIds = @()
+  if ($e._lookup) {
+    $lid = $lookupMap[[string]$e._lookup]
+    if ($lid) { $lookupIds = @($lid) }
+  }
+  if ($e.lookup_table_ids) {
+    $lookupIds = @($e.lookup_table_ids)
+  }
+  $body = @{
     name = $e.name; kind = $e.kind
     matchers = $e.matchers; match_key = $e.match_key
     templates = $e.templates; mappings = $e.mappings
+    lookup_table_ids = $lookupIds
     write_labels = [bool]$e.write_labels
     enabled = [bool]$e.enabled; priority = [int]$e.priority
-  } | Out-Null
+  }
+  if ($e.field_templates) {
+    $ft = @{}
+    $e.field_templates.PSObject.Properties | ForEach-Object { $ft[$_.Name] = [string]$_.Value }
+    $body.field_templates = $ft
+  }
+  if ($e.label_extracts) {
+    $le = @{}
+    $e.label_extracts.PSObject.Properties | ForEach-Object { $le[$_.Name] = [string]$_.Value }
+    $body.label_extracts = $le
+  }
+  if ($e.lookup_match_keys) {
+    $lmk = @{}
+    $e.lookup_match_keys.PSObject.Properties | ForEach-Object { $lmk[$_.Name] = [string]$_.Value }
+    $body.lookup_match_keys = $lmk
+  }
+  ApiPost '/api/enrich' $body | Out-Null
 }
 
 Write-Host "Seeding silence..."
@@ -163,7 +212,12 @@ if ($seed.sample_alerts) {
 
 Write-Host ""
 Write-Host "Done:"
-foreach ($col in @('datasources','channels','rules','ingress','enrich','alerts','silences')) {
+foreach ($col in @('datasources','channels','rules','ingress','lookups','enrich','alerts','silences')) {
   $n = @(ApiGet "/api/$col").Count
   Write-Host ("  {0,-12} {1}" -f $col, $n)
 }
+Write-Host ""
+Write-Host "Trap + lookup enrich:"
+Write-Host "  1. Ensure Kafka ingress SNMP Trap is enabled and consuming"
+Write-Host "  2. Console SNMP Trap simulate with peer IP 10.0.0.88 or 10.0.0.99"
+Write-Host "  3. Alert summary should include sw-core-88 / DC-A / netops"
