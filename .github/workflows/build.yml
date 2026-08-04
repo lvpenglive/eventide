@@ -1,0 +1,225 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BUILD_PACKAGES: "-p eventide-server -p eventide-trap -p eventide-license"
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Generic Linux (glibc) — Ubuntu / Debian / RHEL 8+ 等
+          - os: ubuntu-22.04
+            artifact: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            linker: default
+
+          # 麒麟等国产 Linux：musl 静态链接，避开宿主 glibc 版本限制
+          - os: ubuntu-22.04
+            artifact: kylin-x86_64
+            target: x86_64-unknown-linux-musl
+            linker: musl
+
+          - os: ubuntu-22.04
+            artifact: kylin-aarch64
+            target: aarch64-unknown-linux-musl
+            linker: zig
+
+          # Windows
+          - os: windows-latest
+            artifact: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            linker: default
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl toolchain (kylin-x86_64)
+        if: matrix.linker == 'musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install Zig (kylin-aarch64)
+        if: matrix.linker == 'zig'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.linker == 'zig'
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build (gnu / msvc)
+        if: matrix.linker == 'default'
+        shell: bash
+        run: cargo build --release --target "${{ matrix.target }}" ${{ env.BUILD_PACKAGES }}
+
+      - name: Build (musl)
+        if: matrix.linker == 'musl'
+        run: |
+          export CC_x86_64_unknown_linux_musl=musl-gcc
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          cargo build --release --target "${{ matrix.target }}" ${{ env.BUILD_PACKAGES }}
+
+      - name: Build (zig / aarch64 musl)
+        if: matrix.linker == 'zig'
+        run: cargo zigbuild --release --target "${{ matrix.target }}" ${{ env.BUILD_PACKAGES }}
+
+      - name: Stage package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+            VER="$(git rev-parse --short HEAD)"
+          fi
+          NAME="eventide-${VER}-${ARTIFACT}"
+          OUT="dist/${NAME}"
+          BIN="target/${TARGET}/release"
+          mkdir -p "${OUT}/static" "${OUT}/keys"
+
+          cp "${BIN}/eventide" "${OUT}/"
+          cp "${BIN}/eventide-trap" "${OUT}/"
+          cp "${BIN}/eventide-license" "${OUT}/"
+          chmod +x "${OUT}/eventide" "${OUT}/eventide-trap" "${OUT}/eventide-license"
+
+          cp -r static/* "${OUT}/static/"
+          cp eventide.toml.example "${OUT}/"
+          cp eventide-trap.toml.example "${OUT}/"
+          cp keys/license_public.pem "${OUT}/keys/"
+          cp keys/README.md "${OUT}/keys/"
+
+          {
+            echo "Eventide release package (${ARTIFACT})"
+            echo "Version/ref: ${VER}"
+            echo "Target: ${TARGET}"
+            echo
+            echo "Binaries:"
+            echo "  eventide           — 主服务（控制台 + API）"
+            echo "  eventide-trap     — SNMP Trap 接收服务"
+            echo "  eventide-license  — 厂商侧签发 / 校验许可证"
+            echo
+            echo "Quick start:"
+            echo "  1. cp eventide.toml.example eventide.toml"
+            echo "  2. cp eventide-trap.toml.example eventide-trap.toml"
+            echo "  3. 编辑 MySQL / Redis / Kafka 等连接信息"
+            echo "  4. ./eventide eventide.toml"
+            echo "  5. ./eventide-trap eventide-trap.toml"
+            echo
+            echo "Notes:"
+            echo "  - linux-* 为 glibc 动态链接（需较新的 glibc）"
+            echo "  - kylin-* 为 musl 静态链接，可在麒麟等国产 Linux 上直接运行"
+          } > "${OUT}/README.txt"
+
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          echo "PACKAGE=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+          ls -lh "dist/${NAME}.tar.gz"
+
+      - name: Stage package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF_NAME } else { (git rev-parse --short HEAD).Trim() }
+          $name = "eventide-$ver-$env:ARTIFACT"
+          $out = "dist\$name"
+          $bin = "target\$env:TARGET\release"
+          New-Item -ItemType Directory -Force -Path "$out\static", "$out\keys" | Out-Null
+
+          Copy-Item "$bin\eventide.exe" $out
+          Copy-Item "$bin\eventide-trap.exe" $out
+          Copy-Item "$bin\eventide-license.exe" $out
+          Copy-Item -Recurse static\* "$out\static\"
+          Copy-Item eventide.toml.example $out
+          Copy-Item eventide-trap.toml.example $out
+          Copy-Item keys\license_public.pem "$out\keys\"
+          Copy-Item keys\README.md "$out\keys\"
+
+          @(
+            "Eventide release package ($env:ARTIFACT)"
+            "Version/ref: $ver"
+            "Target: $env:TARGET"
+            ""
+            "Binaries:"
+            "  eventide.exe"
+            "  eventide-trap.exe"
+            "  eventide-license.exe"
+            ""
+            "Quick start:"
+            "  1. copy eventide.toml.example eventide.toml"
+            "  2. copy eventide-trap.toml.example eventide-trap.toml"
+            "  3. Edit MySQL / Redis / Kafka settings"
+            "  4. .\eventide.exe eventide.toml"
+            "  5. .\eventide-trap.exe eventide-trap.toml"
+          ) | Set-Content -Encoding utf8NoBOM "$out\README.txt"
+
+          Compress-Archive -Path $out -DestinationPath "dist\$name.zip" -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE=dist/$name.zip"
+          Get-Item "dist\$name.zip" | Format-List Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eventide-${{ matrix.artifact }}
+          path: ${{ env.PACKAGE }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: eventide-*
+          merge-multiple: true
+
+      - name: List assets
+        run: find release-assets -type f -ls
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,41 @@
+# Eventide Trap 服务示例配置 — 复制为 eventide-trap.toml 后修改
+listen_http = "0.0.0.0:8081"
+# 须与 eventide.toml [trap] api_token 一致；空字符串表示开放 HTTP（仅开发）
+api_token = "shared-token-change-me"
+listen_udp = "0.0.0.0:1162"
+# 多实例 + UDP LB（可选）：
+# instance_id = "trap-1"
+# ha_vip = "10.0.0.100"
+heartbeat_secs = 5
+
+kafka_brokers = "127.0.0.1:9092"
+kafka_topic = "eventide.snmptrap"
+kafka_partitions = 6
+kafka_partition = 0
+
+community = ""
+default_severity = "warning"
+recent_limit = 50
+
+# SNMPv3 USM — 需要时取消注释并填写
+# [[snmpv3_users]]
+# user = "trapuser"
+# auth_protocol = "sha256"
+# auth_password = "authpass"
+# priv_protocol = "aes128"
+# priv_password = "privpass"
+
+mysql_url = "mysql://user:password@127.0.0.1:3306/eventide"
+redis_url = "redis://127.0.0.1:6379/"
+
+s3_endpoint = "http://127.0.0.1:9000"
+s3_access_key = "minioadmin"
+s3_secret_key = "minioadmin"
+s3_bucket = "eventide-mibs"
+s3_region = "us-east-1"
+
+mib_cache_dir = "data/mib-cache"
+policy_reload_secs = 10
+
+mib_dir = "data/mibs"
+policies_path = "data/trap-policies.json"

@@ -1201,6 +1201,29 @@ cargo build -p eventide-trap --release
 ./target/release/eventide-trap eventide-trap.toml
 ```
 
+### 14.1 CI 多平台打包
+
+GitHub Actions：[`.github/workflows/build.yml`](.github/workflows/build.yml)
+
+| Artifact | 目标三元组 | 说明 |
+|----------|------------|------|
+| `linux-x86_64` | `x86_64-unknown-linux-gnu` | 通用 Linux（glibc） |
+| `kylin-x86_64` | `x86_64-unknown-linux-musl` | 麒麟等国产 Linux（musl 静态，不依赖宿主 glibc 版本） |
+| `kylin-aarch64` | `aarch64-unknown-linux-musl` | 麒麟 ARM（鲲鹏 / 飞腾等） |
+| `windows-x86_64` | `x86_64-pc-windows-msvc` | Windows |
+
+每个包含：`eventide` / `eventide-trap` / `eventide-license`、控制台 `static/`、示例配置 `*.toml.example`。
+
+- **push / PR / 手动**：上传 Actions Artifacts（保留 30 天）
+- **打 tag（`v*`）**：汇总进 GitHub Release，例如 `git tag v0.1.0 && git push origin v0.1.0`
+
+本地也可对照示例配置：
+
+```bash
+cp eventide.toml.example eventide.toml
+cp eventide-trap.toml.example eventide-trap.toml
+```
+
 日志级别：
 
 ```bash

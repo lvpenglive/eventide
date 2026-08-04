@@ -1,0 +1,46 @@
+# Eventide 主服务示例配置 — 复制为 eventide.toml 后修改
+listen = "0.0.0.0:8080"
+mysql_url = "mysql://user:password@127.0.0.1:3306/eventide"
+redis_url = "redis://127.0.0.1:6379/"
+static_dir = "static"
+scheduler_tick_seconds = 5
+
+[auth]
+username = "admin"
+password = "change-me"
+jwt_secret = "change-me-to-a-long-random-string"
+token_ttl_hours = 24
+
+[storm]
+throttle_enabled = true
+min_interval_seconds = 60
+max_per_window = 20
+window_seconds = 60
+throttle_key = "fingerprint"
+aggregate_enabled = true
+aggregate_window_seconds = 30
+group_by = "alertname"
+aggregate_mode = "head+summary"
+aggregate_sample_labels = "ip,instance,alertIp"
+aggregate_sample_limit = 10
+ingress_max_inflight = 100
+degrade_skip_notify = false
+degrade_notify_per_sec = 50
+
+[cluster]
+enabled = true
+leader_key = "eventide:cluster:leader"
+lease_seconds = 15
+ingress_partition_lease_seconds = 15
+ingress_max_claim = 0
+
+# Trap：运行态反代 + MIB/策略 CRUD（S3/RustFS）
+[trap]
+api_url = "http://127.0.0.1:8081"
+api_token = "shared-token-change-me"
+s3_endpoint = "http://127.0.0.1:9000"
+s3_access_key = "minioadmin"
+s3_secret_key = "minioadmin"
+s3_bucket = "eventide-mibs"
+s3_region = "us-east-1"
+mib_cache_dir = "data/mib-cache"
