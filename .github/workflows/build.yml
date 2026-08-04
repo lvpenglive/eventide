@@ -15,148 +15,123 @@ env:
   BUILD_PACKAGES: "-p eventide-server -p eventide-trap -p eventide-license"
 
 jobs:
-  build:
-    name: ${{ matrix.artifact }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Generic Linux (glibc) — Ubuntu / Debian / RHEL 8+ 等
-          - os: ubuntu-22.04
-            artifact: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            linker: default
-
-          # 麒麟等国产 Linux：musl 静态链接，避开宿主 glibc 版本限制
-          - os: ubuntu-22.04
-            artifact: kylin-x86_64
-            target: x86_64-unknown-linux-musl
-            linker: musl
-
-          - os: ubuntu-22.04
-            artifact: kylin-aarch64
-            target: aarch64-unknown-linux-musl
-            linker: zig
-
-          # Windows
-          - os: windows-latest
-            artifact: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            linker: default
-
+  linux-x86_64:
+    name: Linux x86_64 (Ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
-      - name: Install musl toolchain (kylin-x86_64)
-        if: matrix.linker == 'musl'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release ${{ env.BUILD_PACKAGES }}
 
-      - name: Install Zig (kylin-aarch64)
-        if: matrix.linker == 'zig'
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
-
-      - name: Install cargo-zigbuild
-        if: matrix.linker == 'zig'
-        run: cargo install cargo-zigbuild --locked
-
-      - name: Build (gnu / msvc)
-        if: matrix.linker == 'default'
-        shell: bash
-        run: cargo build --release --target "${{ matrix.target }}" ${{ env.BUILD_PACKAGES }}
-
-      - name: Build (musl)
-        if: matrix.linker == 'musl'
-        run: |
-          export CC_x86_64_unknown_linux_musl=musl-gcc
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
-          cargo build --release --target "${{ matrix.target }}" ${{ env.BUILD_PACKAGES }}
-
-      - name: Build (zig / aarch64 musl)
-        if: matrix.linker == 'zig'
-        run: cargo zigbuild --release --target "${{ matrix.target }}" ${{ env.BUILD_PACKAGES }}
-
-      - name: Stage package (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Stage package
         env:
-          ARTIFACT: ${{ matrix.artifact }}
-          TARGET: ${{ matrix.target }}
+          PACKAGE_NAME: eventide-linux-x86_64
+          PACKAGE_LABEL: Linux x86_64 (glibc / Ubuntu runner)
+          BIN_DIR: target/release
+        run: bash .github/scripts/package-linux.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eventide-linux-x86_64
+          path: dist/eventide-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # GitHub 无官方麒麟 runner：在社区 Kylin V10 SP3 容器内编译，
+  # 以贴近银河麒麟高级服务器操作系统 V10 SP3 的 glibc / 依赖环境。
+  # 参考：https://github.com/lvpenglive/axleops/blob/main/.github/workflows/build-linux.yml
+  kylin-v10-sp3-x86_64:
+    name: Kylin V10 SP3 x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build inside Kylin V10 SP3 container
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME}"
-          if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
-            VER="$(git rev-parse --short HEAD)"
-          fi
-          NAME="eventide-${VER}-${ARTIFACT}"
-          OUT="dist/${NAME}"
-          BIN="target/${TARGET}/release"
-          mkdir -p "${OUT}/static" "${OUT}/keys"
+          docker pull hxsoong/kylin:v10-sp3
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_HOME=/workspace/.cargo-kylin \
+            -e RUSTUP_HOME=/workspace/.rustup-kylin \
+            hxsoong/kylin:v10-sp3 \
+            bash -lc '
+              set -euo pipefail
+              echo "=== host productinfo ==="
+              cat /etc/.productinfo 2>/dev/null || true
+              cat /etc/os-release 2>/dev/null || true
 
-          cp "${BIN}/eventide" "${OUT}/"
-          cp "${BIN}/eventide-trap" "${OUT}/"
-          cp "${BIN}/eventide-license" "${OUT}/"
-          chmod +x "${OUT}/eventide" "${OUT}/eventide-trap" "${OUT}/eventide-license"
+              yum install -y \
+                gcc gcc-c++ make \
+                openssl-devel pkgconfig perl \
+                curl ca-certificates tar gzip git \
+                || yum install -y gcc gcc-c++ make openssl-devel pkgconfig perl curl tar gzip
 
-          cp -r static/* "${OUT}/static/"
-          cp eventide.toml.example "${OUT}/"
-          cp eventide-trap.toml.example "${OUT}/"
-          cp keys/license_public.pem "${OUT}/keys/"
-          cp keys/README.md "${OUT}/keys/"
+              export PATH="$CARGO_HOME/bin:$PATH"
+              if ! command -v rustc >/dev/null 2>&1; then
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --default-toolchain stable --profile minimal
+              fi
+              # shellcheck source=/dev/null
+              source "$CARGO_HOME/env"
+              rustc -vV
 
-          {
-            echo "Eventide release package (${ARTIFACT})"
-            echo "Version/ref: ${VER}"
-            echo "Target: ${TARGET}"
-            echo
-            echo "Binaries:"
-            echo "  eventide           — 主服务（控制台 + API）"
-            echo "  eventide-trap     — SNMP Trap 接收服务"
-            echo "  eventide-license  — 厂商侧签发 / 校验许可证"
-            echo
-            echo "Quick start:"
-            echo "  1. cp eventide.toml.example eventide.toml"
-            echo "  2. cp eventide-trap.toml.example eventide-trap.toml"
-            echo "  3. 编辑 MySQL / Redis / Kafka 等连接信息"
-            echo "  4. ./eventide eventide.toml"
-            echo "  5. ./eventide-trap eventide-trap.toml"
-            echo
-            echo "Notes:"
-            echo "  - linux-* 为 glibc 动态链接（需较新的 glibc）"
-            echo "  - kylin-* 为 musl 静态链接，可在麒麟等国产 Linux 上直接运行"
-          } > "${OUT}/README.txt"
+              cargo build --release \
+                -p eventide-server \
+                -p eventide-trap \
+                -p eventide-license
+            '
 
-          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
-          echo "PACKAGE=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
-          ls -lh "dist/${NAME}.tar.gz"
-
-      - name: Stage package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      - name: Stage package
         env:
-          ARTIFACT: ${{ matrix.artifact }}
-          TARGET: ${{ matrix.target }}
+          PACKAGE_NAME: eventide-kylin-v10-sp3-x86_64
+          PACKAGE_LABEL: Kylin V10 SP3 x86_64 (built in hxsoong/kylin:v10-sp3)
+          BIN_DIR: target/release
+        run: bash .github/scripts/package-linux.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eventide-kylin-v10-sp3-x86_64
+          path: dist/eventide-kylin-v10-sp3-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        shell: bash
+        run: cargo build --release ${{ env.BUILD_PACKAGES }}
+
+      - name: Stage package
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF_NAME } else { (git rev-parse --short HEAD).Trim() }
-          $name = "eventide-$ver-$env:ARTIFACT"
+          $name = 'eventide-windows-x86_64'
           $out = "dist\$name"
-          $bin = "target\$env:TARGET\release"
+          $bin = 'target\release'
           New-Item -ItemType Directory -Force -Path "$out\static", "$out\keys" | Out-Null
 
           Copy-Item "$bin\eventide.exe" $out
@@ -169,38 +144,35 @@ jobs:
           Copy-Item keys\README.md "$out\keys\"
 
           @(
-            "Eventide release package ($env:ARTIFACT)"
-            "Version/ref: $ver"
-            "Target: $env:TARGET"
-            ""
-            "Binaries:"
-            "  eventide.exe"
-            "  eventide-trap.exe"
-            "  eventide-license.exe"
-            ""
-            "Quick start:"
-            "  1. copy eventide.toml.example eventide.toml"
-            "  2. copy eventide-trap.toml.example eventide-trap.toml"
-            "  3. Edit MySQL / Redis / Kafka settings"
-            "  4. .\eventide.exe eventide.toml"
-            "  5. .\eventide-trap.exe eventide-trap.toml"
-          ) | Set-Content -Encoding utf8NoBOM "$out\README.txt"
+            'Eventide package: Windows x86_64 (MSVC)'
+            ''
+            'Binaries:'
+            '  eventide.exe'
+            '  eventide-trap.exe'
+            '  eventide-license.exe'
+            ''
+            'Quick start:'
+            '  1. copy eventide.toml.example eventide.toml'
+            '  2. copy eventide-trap.toml.example eventide-trap.toml'
+            '  3. Edit MySQL / Redis / Kafka settings'
+            '  4. .\eventide.exe eventide.toml'
+            '  5. .\eventide-trap.exe eventide-trap.toml'
+          ) | Set-Content -Encoding utf8 "$out\README.txt"
 
           Compress-Archive -Path $out -DestinationPath "dist\$name.zip" -Force
-          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE=dist/$name.zip"
           Get-Item "dist\$name.zip" | Format-List Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: eventide-${{ matrix.artifact }}
-          path: ${{ env.PACKAGE }}
+          name: eventide-windows-x86_64
+          path: dist/eventide-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 30
 
   release:
     name: GitHub Release
-    needs: build
+    needs: [linux-x86_64, kylin-v10-sp3-x86_64, windows-x86_64]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -214,7 +186,7 @@ jobs:
           merge-multiple: true
 
       - name: List assets
-        run: find release-assets -type f -ls
+        run: ls -lh release-assets/
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

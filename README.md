@@ -1203,14 +1203,14 @@ cargo build -p eventide-trap --release
 
 ### 14.1 CI 多平台打包
 
-GitHub Actions：[`.github/workflows/build.yml`](.github/workflows/build.yml)
+GitHub Actions：[`.github/workflows/build.yml`](.github/workflows/build.yml)  
+麒麟任务参考 [axleops `build-linux.yml`](https://github.com/lvpenglive/axleops/blob/main/.github/workflows/build-linux.yml)：在社区镜像 `hxsoong/kylin:v10-sp3` 内编译。
 
-| Artifact | 目标三元组 | 说明 |
-|----------|------------|------|
-| `linux-x86_64` | `x86_64-unknown-linux-gnu` | 通用 Linux（glibc） |
-| `kylin-x86_64` | `x86_64-unknown-linux-musl` | 麒麟等国产 Linux（musl 静态，不依赖宿主 glibc 版本） |
-| `kylin-aarch64` | `aarch64-unknown-linux-musl` | 麒麟 ARM（鲲鹏 / 飞腾等） |
-| `windows-x86_64` | `x86_64-pc-windows-msvc` | Windows |
+| Artifact | 说明 |
+|----------|------|
+| `eventide-linux-x86_64` | Ubuntu runner，glibc 动态链接 |
+| `eventide-kylin-v10-sp3-x86_64` | 银河麒麟 V10 SP3 容器内编译（贴近真机 glibc） |
+| `eventide-windows-x86_64` | Windows MSVC |
 
 每个包含：`eventide` / `eventide-trap` / `eventide-license`、控制台 `static/`、示例配置 `*.toml.example`。
 
