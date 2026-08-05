@@ -1,1677 +1,500 @@
-﻿/* Eventide console SPA */
-(() => {
-  const TOKEN_KEY = "eventide_token";
-  const USER_KEY = "eventide_user";
-  const SIDEBAR_KEY = "eventide_sidebar_collapsed";
-  const NAV_GROUPS_KEY = "eventide_nav_groups";
-  const ALERT_VIEW_KEY = "eventide_alert_view"; // cards | table
-  const ALERT_AUTO_KEY = "eventide_alert_auto"; // "0" | "15" | "30" | "60"
-  const ALERT_PAGE_SIZE = 50;
-  const THEME_KEY = "eventide_theme"; // light | dark | system
+/* Eventide console SPA (ES modules) */
+import { api, token, TOKEN_KEY, USER_KEY, setUnauthorizedHandler } from "./js/api.js";
+import {
+  severityOptions,
+  severityLabel,
+  toast,
+  hideCtxMenu,
+  showCtxMenu,
+  copyText,
+  esc,
+  cmpLabel,
+  fmtTime,
+  createModalApi,
+} from "./js/ui.js";
+import { createAlertsModule, ALERT_PAGE_SIZE } from "./js/pages/alerts.js";
 
-  // Zabbix-aligned severities (0–5)
-  const SEVERITIES = [
-    ["not_classified", "未分类"],
-    ["information", "信息"],
-    ["warning", "警告"],
-    ["average", "一般严重"],
-    ["high", "严重"],
-    ["disaster", "灾难"],
-  ];
-  function severityOptions(selected, fallback = "warning") {
-    const cur = selected || fallback;
-    return SEVERITIES.map(
-      ([v, label]) =>
-        `<option value="${v}" ${cur === v ? "selected" : ""}>${label}</option>`
-    ).join("");
+const SIDEBAR_KEY = "eventide_sidebar_collapsed";
+const NAV_GROUPS_KEY = "eventide_nav_groups";
+const THEME_KEY = "eventide_theme"; // light | dark | system
+
+const PAGE_GROUP = {
+  overview: null,
+  alerts: "ops",
+  silences: "ops",
+  datasources: "config",
+  rules: "config",
+  ingress: "config",
+  trap: "config",
+  mib: "config",
+  policies: "config",
+  channels: "notify",
+  notifies: "notify",
+  enrich: "notify",
+  users: "system",
+  roles: "system",
+  departments: "system",
+  settings: "system",
+  kafka: "tools",
+};
+
+const PAGE_PERM = {
+  overview: "overview:read",
+  alerts: "alerts:read",
+  silences: "silences:read",
+  datasources: "datasources:read",
+  rules: "rules:read",
+  ingress: "ingress:read",
+  kafka: "ingress:read",
+  trap: "trap:read",
+  mib: "trap:read",
+  policies: "trap:read",
+  channels: "channels:read",
+  notifies: "channels:read",
+  enrich: "enrich:read",
+  users: "users:read",
+  roles: "roles:read",
+  departments: "departments:read",
+  settings: "settings:read",
+};
+
+const PAGE_ORDER = [
+  "overview",
+  "alerts",
+  "silences",
+  "datasources",
+  "rules",
+  "ingress",
+  "kafka",
+  "trap",
+  "mib",
+  "policies",
+  "channels",
+  "notifies",
+  "enrich",
+  "users",
+  "roles",
+  "departments",
+  "settings",
+];
+
+const state = {
+  page: "overview",
+  cache: {},
+  me: null,
+};
+
+const titles = {
+  overview: ["总览", "系统运行状态与近期告警"],
+  datasources: ["数据源", "Prometheus / VictoriaMetrics"],
+  rules: ["告警规则", "阈值评估与通知绑定"],
+  channels: ["通知渠道", "Webhook · 自定义 HTTP · 钉钉 · 企微 · 飞书 · Slack · TG"],
+  notifies: ["通知日志", "发送记录 · 可查正文"],
+  ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
+  kafka: ["Kafka", "连接 · Topic · 消息浏览 · 试写"],
+  trap: ["SNMP Trap", "Trap 服务状态 · 试推送 · 对接 Kafka Ingress"],
+  mib: ["MIB 库", "上传 MIB · OID 树浏览 · 导出 Trap 策略"],
+  policies: ["Trap 策略", "导入 MIB 导出 · 匹配 OID · 摘要模板生效"],
+  alerts: ["告警事件", "按状态浏览 · 点开看详情"],
+  enrich: ["告警丰富", "台账补字段 · 写描述 / IP / 级别"],
+  silences: ["静默策略", "按规则或标签临时抑制通知"],
+  users: ["用户管理", "账号 · 部门 · 角色"],
+  roles: ["权限管理", "角色与权限码"],
+  departments: ["部门管理", "组织架构"],
+  settings: ["系统设置", "许可 · 外观 · 抗风暴 · 告警历史 · Trap Token · 运行信息"],
+};
+
+function can(perm) {
+  const perms = (state.me && state.me.permissions) || [];
+  return perms.includes("*") || perms.includes(perm);
+}
+
+function canPage(page) {
+  const need = PAGE_PERM[page];
+  return !need || can(need);
+}
+
+function firstAllowedPage() {
+  return PAGE_ORDER.find((p) => canPage(p)) || "settings";
+}
+
+function applyNavPermissions() {
+  document.querySelectorAll(".nav-item[data-page]").forEach((btn) => {
+    const ok = canPage(btn.dataset.page);
+    btn.hidden = !ok;
+    if (!ok) btn.classList.remove("active");
+  });
+  document.querySelectorAll(".nav-group").forEach((g) => {
+    const any = [...g.querySelectorAll(".nav-item[data-page]")].some((b) => !b.hidden);
+    g.hidden = !any;
+  });
+}
+
+// ---------- API ----------
+function showLogin() {
+  document.getElementById("view-login").style.display = "grid";
+  document.getElementById("view-app").classList.remove("active");
+}
+
+function showApp() {
+  document.getElementById("view-login").style.display = "none";
+  document.getElementById("view-app").classList.add("active");
+  const name = localStorage.getItem(USER_KEY) || "admin";
+  document.getElementById("user-name").textContent = name;
+  const av = document.getElementById("user-avatar");
+  if (av) {
+    av.textContent = (name[0] || "A").toUpperCase();
+    av.title = name;
   }
-  function severityLabel(s) {
-    const hit = SEVERITIES.find(([v]) => v === s);
-    return hit ? hit[1] : s || "—";
+  applySidebarState();
+  applyNavPermissions();
+  refreshLicenseBanner();
+}
+
+function licenseKindLabel(kind) {
+  if (kind === "trial") return "试用";
+  if (kind === "licensed") return "已授权";
+  if (kind === "expired") return "已过期";
+  return kind || "—";
+}
+
+async function refreshLicenseBanner() {
+  const el = document.getElementById("license-banner");
+  if (!el) return;
+  if (!token()) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
   }
-
-  const PAGE_GROUP = {
-    overview: null,
-    alerts: "ops",
-    silences: "ops",
-    datasources: "config",
-    rules: "config",
-    ingress: "config",
-    trap: "config",
-    mib: "config",
-    policies: "config",
-    channels: "notify",
-    notifies: "notify",
-    enrich: "notify",
-    users: "system",
-    roles: "system",
-    departments: "system",
-    settings: "system",
-    kafka: "tools",
-  };
-
-  const PAGE_PERM = {
-    overview: "overview:read",
-    alerts: "alerts:read",
-    silences: "silences:read",
-    datasources: "datasources:read",
-    rules: "rules:read",
-    ingress: "ingress:read",
-    kafka: "ingress:read",
-    trap: "trap:read",
-    mib: "trap:read",
-    policies: "trap:read",
-    channels: "channels:read",
-    notifies: "channels:read",
-    enrich: "enrich:read",
-    users: "users:read",
-    roles: "roles:read",
-    departments: "departments:read",
-    settings: "settings:read",
-  };
-
-  const PAGE_ORDER = [
-    "overview",
-    "alerts",
-    "silences",
-    "datasources",
-    "rules",
-    "ingress",
-    "kafka",
-    "trap",
-    "mib",
-    "policies",
-    "channels",
-    "notifies",
-    "enrich",
-    "users",
-    "roles",
-    "departments",
-    "settings",
-  ];
-
-  const state = {
-    page: "overview",
-    cache: {},
-    me: null,
-  };
-
-  const titles = {
-    overview: ["总览", "系统运行状态与近期告警"],
-    datasources: ["数据源", "Prometheus / VictoriaMetrics"],
-    rules: ["告警规则", "阈值评估与通知绑定"],
-    channels: ["通知渠道", "Webhook · 自定义 HTTP · 钉钉 · 企微 · 飞书 · Slack · TG"],
-    notifies: ["通知日志", "发送记录 · 可查正文"],
-    ingress: ["告警接入", "外部告警接入 · 试推送 · 通知绑定"],
-    kafka: ["Kafka", "连接 · Topic · 消息浏览 · 试写"],
-    trap: ["SNMP Trap", "Trap 服务状态 · 试推送 · 对接 Kafka Ingress"],
-    mib: ["MIB 库", "上传 MIB · OID 树浏览 · 导出 Trap 策略"],
-    policies: ["Trap 策略", "导入 MIB 导出 · 匹配 OID · 摘要模板生效"],
-    alerts: ["告警事件", "按状态浏览 · 点开看详情"],
-    enrich: ["告警丰富", "台账补字段 · 写描述 / IP / 级别"],
-    silences: ["静默策略", "按规则或标签临时抑制通知"],
-    users: ["用户管理", "账号 · 部门 · 角色"],
-    roles: ["权限管理", "角色与权限码"],
-    departments: ["部门管理", "组织架构"],
-    settings: ["系统设置", "许可 · 外观 · 抗风暴 · 告警历史 · Trap Token · 运行信息"],
-  };
-
-  function can(perm) {
-    const perms = (state.me && state.me.permissions) || [];
-    return perms.includes("*") || perms.includes(perm);
-  }
-
-  function canPage(page) {
-    const need = PAGE_PERM[page];
-    return !need || can(need);
-  }
-
-  function firstAllowedPage() {
-    return PAGE_ORDER.find((p) => canPage(p)) || "settings";
-  }
-
-  function applyNavPermissions() {
-    document.querySelectorAll(".nav-item[data-page]").forEach((btn) => {
-      const ok = canPage(btn.dataset.page);
-      btn.hidden = !ok;
-      if (!ok) btn.classList.remove("active");
-    });
-    document.querySelectorAll(".nav-group").forEach((g) => {
-      const any = [...g.querySelectorAll(".nav-item[data-page]")].some((b) => !b.hidden);
-      g.hidden = !any;
-    });
-  }
-
-  // ---------- API ----------
-  function token() {
-    return localStorage.getItem(TOKEN_KEY);
-  }
-
-  async function api(path, opts = {}) {
-    const headers = Object.assign({}, opts.headers || {});
-    if (!(opts.body instanceof FormData) && opts.body && !headers["Content-Type"]) {
-      headers["Content-Type"] = "application/json";
+  try {
+    const lic = await api("/api/license");
+    state.license = lic;
+    const days = lic.days_left;
+    let show = false;
+    let cls = "info";
+    let text = "";
+    if (lic.kind === "expired" || !lic.writable) {
+      show = true;
+      cls = "warn";
+      text =
+        lic.reason ||
+        "许可证无效或已过期，当前为只读宽限。可查看数据，配置变更已禁用。";
+    } else if (lic.kind === "trial") {
+      show = true;
+      cls = days != null && days <= 7 ? "warn" : "info";
+      text = `试用中，剩余约 ${days ?? "—"} 天（到期 ${fmtTime(lic.expires_at) || "—"}）。`;
+    } else if (lic.kind === "licensed" && days != null && days <= 7) {
+      show = true;
+      cls = "warn";
+      text = `许可证即将到期：剩余约 ${days} 天（${esc(lic.customer || "")} · ${fmtTime(lic.expires_at) || "—"}）。`;
     }
-    const t = token();
-    if (t) headers.Authorization = `Bearer ${t}`;
-    const res = await fetch(path, { ...opts, headers });
-    if (res.status === 401 && !path.includes("/api/auth/login")) {
-      logout(false);
-      throw new Error("登录已失效");
-    }
-    if (res.status === 204) return null;
-    const text = await res.text();
-    let data = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = { error: text };
-    }
-    if (!res.ok) {
-      const err = new Error((data && data.error) || text || res.statusText);
-      if (data && data.code) err.code = data.code;
-      if (res.status === 402 || data?.code === "license_readonly") {
-        err.code = "license_readonly";
-        err.message =
-          (data && data.error) || "许可证无效或已过期，当前为只读宽限。请到「系统设置」导入许可证。";
-      }
-      throw err;
-    }
-    return data;
-  }
-
-  function toast(msg, err = false) {
-    const el = document.getElementById("toast");
-    el.textContent = msg;
-    el.classList.toggle("err", !!err);
-    el.classList.add("show");
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => el.classList.remove("show"), 2800);
-  }
-
-  let ctxMenuEl = null;
-  let ctxMenuCleanups = [];
-
-  function hideCtxMenu() {
-    if (ctxMenuEl) {
-      ctxMenuEl.remove();
-      ctxMenuEl = null;
-    }
-    ctxMenuCleanups.forEach((fn) => {
-      try {
-        fn();
-      } catch (_) {}
-    });
-    ctxMenuCleanups = [];
-  }
-
-  /** Floating right-click menu. items: { label, onClick, disabled? } | { sep: true } */
-  function showCtxMenu(clientX, clientY, items) {
-    hideCtxMenu();
-    const menu = document.createElement("div");
-    menu.className = "ctx-menu";
-    menu.setAttribute("role", "menu");
-    (items || []).forEach((it) => {
-      if (it && it.sep) {
-        const hr = document.createElement("div");
-        hr.className = "ctx-sep";
-        menu.appendChild(hr);
-        return;
-      }
-      if (!it || !it.label) return;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ctx-item" + (it.disabled ? " disabled" : "");
-      btn.setAttribute("role", "menuitem");
-      btn.textContent = it.label;
-      btn.disabled = !!it.disabled;
-      btn.onclick = (ev) => {
-        ev.stopPropagation();
-        if (btn.disabled) return;
-        hideCtxMenu();
-        try {
-          it.onClick && it.onClick();
-        } catch (err) {
-          toast(err.message || String(err), true);
-        }
-      };
-      menu.appendChild(btn);
-    });
-    document.body.appendChild(menu);
-    ctxMenuEl = menu;
-
-    const rect = menu.getBoundingClientRect();
-    let left = clientX;
-    let top = clientY;
-    if (left + rect.width > window.innerWidth - 8) left = window.innerWidth - rect.width - 8;
-    if (top + rect.height > window.innerHeight - 8) top = window.innerHeight - rect.height - 8;
-    if (left < 8) left = 8;
-    if (top < 8) top = 8;
-    menu.style.left = `${left}px`;
-    menu.style.top = `${top}px`;
-
-    const onDown = (ev) => {
-      if (ctxMenuEl && !ctxMenuEl.contains(ev.target)) hideCtxMenu();
-    };
-    const onKey = (ev) => {
-      if (ev.key === "Escape") hideCtxMenu();
-    };
-    const onScroll = () => hideCtxMenu();
-    setTimeout(() => {
-      document.addEventListener("mousedown", onDown, true);
-      document.addEventListener("keydown", onKey, true);
-      window.addEventListener("scroll", onScroll, true);
-      ctxMenuCleanups.push(() => {
-        document.removeEventListener("mousedown", onDown, true);
-        document.removeEventListener("keydown", onKey, true);
-        window.removeEventListener("scroll", onScroll, true);
-      });
-    }, 0);
-  }
-
-  async function copyText(text, label) {
-    const t = String(text ?? "").trim();
-    if (!t) {
-      toast(`无可复制的${label || "内容"}`, true);
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(t);
-      toast(`已复制${label || ""}`);
-    } catch {
-      toast("复制失败（浏览器权限或非 HTTPS）", true);
-    }
-  }
-
-  function esc(s) {
-    return String(s ?? "").replace(/[&<>"']/g, (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-    );
-  }
-
-  function cmpLabel(c) {
-    return { gt: ">", gte: ">=", lt: "<", lte: "<=", eq: "==", neq: "!=" }[c] || c;
-  }
-
-  function fmtTime(s) {
-    if (!s) return "—";
-    try {
-      return new Date(s).toLocaleString();
-    } catch {
-      return s;
-    }
-  }
-
-  // ---------- Auth views ----------
-  function showLogin() {
-    document.getElementById("view-login").style.display = "grid";
-    document.getElementById("view-app").classList.remove("active");
-  }
-
-  function showApp() {
-    document.getElementById("view-login").style.display = "none";
-    document.getElementById("view-app").classList.add("active");
-    const name = localStorage.getItem(USER_KEY) || "admin";
-    document.getElementById("user-name").textContent = name;
-    const av = document.getElementById("user-avatar");
-    if (av) {
-      av.textContent = (name[0] || "A").toUpperCase();
-      av.title = name;
-    }
-    applySidebarState();
-    applyNavPermissions();
-    refreshLicenseBanner();
-  }
-
-  function licenseKindLabel(kind) {
-    if (kind === "trial") return "试用";
-    if (kind === "licensed") return "已授权";
-    if (kind === "expired") return "已过期";
-    return kind || "—";
-  }
-
-  async function refreshLicenseBanner() {
-    const el = document.getElementById("license-banner");
-    if (!el) return;
-    if (!token()) {
+    if (!show) {
       el.hidden = true;
       el.innerHTML = "";
       return;
     }
-    try {
-      const lic = await api("/api/license");
-      state.license = lic;
-      const days = lic.days_left;
-      let show = false;
-      let cls = "info";
-      let text = "";
-      if (lic.kind === "expired" || !lic.writable) {
-        show = true;
-        cls = "warn";
-        text =
-          lic.reason ||
-          "许可证无效或已过期，当前为只读宽限。可查看数据，配置变更已禁用。";
-      } else if (lic.kind === "trial") {
-        show = true;
-        cls = days != null && days <= 7 ? "warn" : "info";
-        text = `试用中，剩余约 ${days ?? "—"} 天（到期 ${fmtTime(lic.expires_at) || "—"}）。`;
-      } else if (lic.kind === "licensed" && days != null && days <= 7) {
-        show = true;
-        cls = "warn";
-        text = `许可证即将到期：剩余约 ${days} 天（${esc(lic.customer || "")} · ${fmtTime(lic.expires_at) || "—"}）。`;
-      }
-      if (!show) {
-        el.hidden = true;
-        el.innerHTML = "";
-        return;
-      }
-      el.hidden = false;
-      el.className = `license-banner ${cls}`;
-      el.innerHTML = `<span>${text}</span><button type="button" class="ghost" id="license-banner-go">去导入许可证</button>`;
-      const btn = document.getElementById("license-banner-go");
-      if (btn) btn.onclick = () => navigate("settings");
-    } catch (_) {
-      el.hidden = true;
-    }
+    el.hidden = false;
+    el.className = `license-banner ${cls}`;
+    el.innerHTML = `<span>${text}</span><button type="button" class="ghost" id="license-banner-go">去导入许可证</button>`;
+    const btn = document.getElementById("license-banner-go");
+    if (btn) btn.onclick = () => navigate("settings");
+  } catch (_) {
+    el.hidden = true;
   }
+}
 
-  function applySidebarState() {
-    const app = document.getElementById("view-app");
-    const collapsed = localStorage.getItem(SIDEBAR_KEY) === "1";
-    app.classList.toggle("sidebar-collapsed", collapsed);
-    const btn = document.getElementById("btn-sidebar");
-    if (btn) btn.title = collapsed ? "展开侧栏" : "收起侧栏";
-  }
+function applySidebarState() {
+  const app = document.getElementById("view-app");
+  const collapsed = localStorage.getItem(SIDEBAR_KEY) === "1";
+  app.classList.toggle("sidebar-collapsed", collapsed);
+  const btn = document.getElementById("btn-sidebar");
+  if (btn) btn.title = collapsed ? "展开侧栏" : "收起侧栏";
+}
 
-  function toggleSidebar() {
-    const next = localStorage.getItem(SIDEBAR_KEY) === "1" ? "0" : "1";
-    localStorage.setItem(SIDEBAR_KEY, next);
-    applySidebarState();
-  }
+function toggleSidebar() {
+  const next = localStorage.getItem(SIDEBAR_KEY) === "1" ? "0" : "1";
+  localStorage.setItem(SIDEBAR_KEY, next);
+  applySidebarState();
+}
 
-  // ---------- Theme ----------
-  function themePref() {
-    const p = localStorage.getItem(THEME_KEY);
-    return p === "light" || p === "dark" ? p : "system";
-  }
+// ---------- Theme ----------
+function themePref() {
+  const p = localStorage.getItem(THEME_KEY);
+  return p === "light" || p === "dark" ? p : "system";
+}
 
-  function resolveTheme(pref) {
-    const p = pref || themePref();
-    if (p === "light" || p === "dark") return p;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  }
+function resolveTheme(pref) {
+  const p = pref || themePref();
+  if (p === "light" || p === "dark") return p;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
 
-  function applyTheme(pref) {
-    const p = pref === "light" || pref === "dark" ? pref : "system";
-    localStorage.setItem(THEME_KEY, p);
-    const resolved = resolveTheme(p);
-    document.documentElement.setAttribute("data-theme", resolved);
-    document.documentElement.setAttribute("data-theme-pref", p);
-    syncThemeControls();
-  }
+function applyTheme(pref) {
+  const p = pref === "light" || pref === "dark" ? pref : "system";
+  localStorage.setItem(THEME_KEY, p);
+  const resolved = resolveTheme(p);
+  document.documentElement.setAttribute("data-theme", resolved);
+  document.documentElement.setAttribute("data-theme-pref", p);
+  syncThemeControls();
+}
 
-  function themeSwitchHtml(mode) {
-    const pref = themePref();
-    const items =
-      mode === "cards"
-        ? [
-            ["light", "浅色", "明亮工作台"],
-            ["dark", "深色", "夜间护眼"],
-            ["system", "跟随系统", "自动匹配 OS"],
-          ]
-        : [
-            ["light", "☀", "浅色"],
-            ["dark", "☾", "深色"],
-            ["system", "◐", "跟随系统"],
-          ];
-    if (mode === "cards") {
-      return `<div class="theme-cards">${items
-        .map(
-          ([v, title, desc]) =>
-            `<button type="button" class="theme-card${pref === v ? " on" : ""}" data-theme-set="${v}">
-              <strong>${title}</strong><span>${desc}</span>
-            </button>`
-        )
-        .join("")}</div>`;
-    }
-    return items
+function themeSwitchHtml(mode) {
+  const pref = themePref();
+  const items =
+    mode === "cards"
+      ? [
+          ["light", "浅色", "明亮工作台"],
+          ["dark", "深色", "夜间护眼"],
+          ["system", "跟随系统", "自动匹配 OS"],
+        ]
+      : [
+          ["light", "☀", "浅色"],
+          ["dark", "☾", "深色"],
+          ["system", "◐", "跟随系统"],
+        ];
+  if (mode === "cards") {
+    return `<div class="theme-cards">${items
       .map(
-        ([v, label, title]) =>
-          `<button type="button" class="${pref === v ? "on" : ""}" data-theme-set="${v}" title="${title}">${label}</button>`
+        ([v, title, desc]) =>
+          `<button type="button" class="theme-card${pref === v ? " on" : ""}" data-theme-set="${v}">
+            <strong>${title}</strong><span>${desc}</span>
+          </button>`
       )
-      .join("");
+      .join("")}</div>`;
   }
+  return items
+    .map(
+      ([v, label, title]) =>
+        `<button type="button" class="${pref === v ? "on" : ""}" data-theme-set="${v}" title="${title}">${label}</button>`
+    )
+    .join("");
+}
 
-  function bindThemeHost(el, mode) {
-    if (!el) return;
-    el.innerHTML = themeSwitchHtml(mode);
-    el.querySelectorAll("[data-theme-set]").forEach((btn) => {
-      btn.addEventListener("click", () => applyTheme(btn.dataset.themeSet));
-    });
-  }
+function bindThemeHost(el, mode) {
+  if (!el) return;
+  el.innerHTML = themeSwitchHtml(mode);
+  el.querySelectorAll("[data-theme-set]").forEach((btn) => {
+    btn.addEventListener("click", () => applyTheme(btn.dataset.themeSet));
+  });
+}
 
-  function syncThemeControls() {
-    bindThemeHost(document.getElementById("login-theme"));
-    bindThemeHost(document.getElementById("sidebar-theme"));
-    const settingsHost = document.getElementById("settings-theme");
-    if (settingsHost) bindThemeHost(settingsHost, "cards");
-  }
-
+function syncThemeControls() {
   bindThemeHost(document.getElementById("login-theme"));
   bindThemeHost(document.getElementById("sidebar-theme"));
-  if (window.matchMedia) {
-    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-      if (themePref() === "system") applyTheme("system");
-    });
-  }
+  const settingsHost = document.getElementById("settings-theme");
+  if (settingsHost) bindThemeHost(settingsHost, "cards");
+}
 
-  function logout(notify = true) {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
+bindThemeHost(document.getElementById("login-theme"));
+bindThemeHost(document.getElementById("sidebar-theme"));
+if (window.matchMedia) {
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (themePref() === "system") applyTheme("system");
+  });
+}
+
+function logout(notify = true) {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  showLogin();
+  if (notify) toast("已退出登录");
+}
+
+async function tryBoot() {
+  if (!token()) {
     showLogin();
-    if (notify) toast("已退出登录");
+    return;
   }
-
-  async function tryBoot() {
-    if (!token()) {
-      showLogin();
-      return;
-    }
-    try {
-      state.me = await api("/api/auth/me");
-      localStorage.setItem(USER_KEY, state.me.username);
-      showApp();
-      const page = canPage(state.page) ? state.page : firstAllowedPage();
-      navigate(page);
-    } catch {
-      showLogin();
-    }
+  try {
+    state.me = await api("/api/auth/me");
+    localStorage.setItem(USER_KEY, state.me.username);
+    showApp();
+    const page = canPage(state.page) ? state.page : firstAllowedPage();
+    navigate(page);
+  } catch {
+    showLogin();
   }
+}
 
-  document.getElementById("login-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const err = document.getElementById("login-error");
-    err.textContent = "";
-    const username = document.getElementById("username").value.trim();
-    const password = document.getElementById("password").value;
-    try {
-      const data = await api("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify({ username, password }),
-      });
-      localStorage.setItem(TOKEN_KEY, data.token);
-      localStorage.setItem(USER_KEY, data.username);
-      state.me = await api("/api/auth/me");
-      showApp();
-      navigate(firstAllowedPage());
-      toast("登录成功");
-    } catch (ex) {
-      err.textContent = ex.message || "登录失败";
-    }
+document.getElementById("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = document.getElementById("login-error");
+  err.textContent = "";
+  const username = document.getElementById("username").value.trim();
+  const password = document.getElementById("password").value;
+  try {
+    const data = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem(USER_KEY, data.username);
+    state.me = await api("/api/auth/me");
+    showApp();
+    navigate(firstAllowedPage());
+    toast("登录成功");
+  } catch (ex) {
+    err.textContent = ex.message || "登录失败";
+  }
+});
+
+document.getElementById("btn-logout").addEventListener("click", () => logout());
+document.getElementById("btn-sidebar").addEventListener("click", () => toggleSidebar());
+
+// ---------- Navigation ----------
+function loadNavGroups() {
+  try {
+    return JSON.parse(localStorage.getItem(NAV_GROUPS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveNavGroups(map) {
+  localStorage.setItem(NAV_GROUPS_KEY, JSON.stringify(map));
+}
+
+function applyNavGroups(forceOpenGroup) {
+  const saved = loadNavGroups();
+  document.querySelectorAll(".nav-group").forEach((g) => {
+    const id = g.dataset.group;
+    let open = saved[id];
+    if (open === undefined) open = true; // default expanded
+    if (forceOpenGroup && id === forceOpenGroup) open = true;
+    g.classList.toggle("open", !!open);
   });
+}
 
-  document.getElementById("btn-logout").addEventListener("click", () => logout());
-  document.getElementById("btn-sidebar").addEventListener("click", () => toggleSidebar());
-
-  // ---------- Navigation ----------
-  function loadNavGroups() {
-    try {
-      return JSON.parse(localStorage.getItem(NAV_GROUPS_KEY) || "{}");
-    } catch {
-      return {};
-    }
-  }
-
-  function saveNavGroups(map) {
-    localStorage.setItem(NAV_GROUPS_KEY, JSON.stringify(map));
-  }
-
-  function applyNavGroups(forceOpenGroup) {
+document.querySelectorAll(".nav-item").forEach((btn) => {
+  btn.addEventListener("click", () => navigate(btn.dataset.page));
+});
+document.querySelectorAll("[data-group-toggle]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const id = btn.dataset.groupToggle;
+    const group = document.querySelector(`.nav-group[data-group="${id}"]`);
+    if (!group) return;
+    const next = !group.classList.contains("open");
+    group.classList.toggle("open", next);
     const saved = loadNavGroups();
-    document.querySelectorAll(".nav-group").forEach((g) => {
-      const id = g.dataset.group;
-      let open = saved[id];
-      if (open === undefined) open = true; // default expanded
-      if (forceOpenGroup && id === forceOpenGroup) open = true;
-      g.classList.toggle("open", !!open);
-    });
-  }
-
-  document.querySelectorAll(".nav-item").forEach((btn) => {
-    btn.addEventListener("click", () => navigate(btn.dataset.page));
+    saved[id] = next;
+    saveNavGroups(saved);
   });
-  document.querySelectorAll("[data-group-toggle]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.groupToggle;
-      const group = document.querySelector(`.nav-group[data-group="${id}"]`);
-      if (!group) return;
-      const next = !group.classList.contains("open");
-      group.classList.toggle("open", next);
-      const saved = loadNavGroups();
-      saved[id] = next;
-      saveNavGroups(saved);
-    });
+});
+
+let overviewTimer = null;
+function stopOverviewTimer() {
+  if (overviewTimer) {
+    clearInterval(overviewTimer);
+    overviewTimer = null;
+  }
+}
+
+let alertsMod = null;
+function stopAlertsTimer() {
+  if (alertsMod) alertsMod.stopAlertsTimer();
+}
+
+function navigate(page) {
+  if (!canPage(page)) {
+    page = firstAllowedPage();
+  }
+  hideCtxMenu();
+  if (page !== "overview") stopOverviewTimer();
+  if (page !== "alerts") stopAlertsTimer();
+  state.page = page;
+  applyNavPermissions();
+  document.querySelectorAll(".nav-item").forEach((b) => {
+    b.classList.toggle("active", b.dataset.page === page);
   });
-
-  let overviewTimer = null;
-  function stopOverviewTimer() {
-    if (overviewTimer) {
-      clearInterval(overviewTimer);
-      overviewTimer = null;
-    }
-  }
-
-  let alertsTimer = null;
-  function stopAlertsTimer() {
-    if (alertsTimer) {
-      clearInterval(alertsTimer);
-      alertsTimer = null;
-    }
-  }
-
-  function navigate(page) {
-    if (!canPage(page)) {
-      page = firstAllowedPage();
-    }
-    hideCtxMenu();
-    if (page !== "overview") stopOverviewTimer();
-    if (page !== "alerts") stopAlertsTimer();
-    state.page = page;
-    applyNavPermissions();
-    document.querySelectorAll(".nav-item").forEach((b) => {
-      b.classList.toggle("active", b.dataset.page === page);
-    });
-    const gid = PAGE_GROUP[page];
-    applyNavGroups(gid || undefined);
-    // mark group containing active page
-    document.querySelectorAll(".nav-group").forEach((g) => {
-      const hasActive = !!g.querySelector(`.nav-item.active`);
-      g.classList.toggle("has-active", hasActive);
-    });
-    const [t, s] = titles[page] || [page, ""];
-    document.getElementById("page-title").textContent = t;
-    document.getElementById("page-sub").textContent = s;
-    document.getElementById("page-actions").innerHTML = "";
-    renderPage();
-    refreshLicenseBanner();
-  }
-
-  applyNavGroups();
-
-  async function renderPage() {
-    const root = document.getElementById("page-root");
-    root.innerHTML = `<div class="panel empty">加载中…</div>`;
-    try {
-      const fn = pages[state.page];
-      await fn(root);
-    } catch (e) {
-      root.innerHTML = `<div class="panel empty">加载失败：${esc(e.message)}</div>`;
-    }
-  }
-
-  function setActions(html) {
-    document.getElementById("page-actions").innerHTML = html;
-  }
-
-  // ---------- Modal ----------
-  const modal = document.getElementById("modal");
-  const modalBody = document.getElementById("modal-body");
-
-  function openModal(html, opts = {}) {
-    modalBody.classList.remove("wide", "xl");
-    // Default all modals to wide; pass { xl: true } for large forms.
-    if (opts.xl) modalBody.classList.add("xl");
-    else modalBody.classList.add("wide");
-    modalBody.innerHTML = html;
-    modal.classList.add("open");
-  }
-  function closeModal() {
-    modal.classList.remove("open");
-    modalBody.classList.remove("wide", "xl");
-    modalBody.innerHTML = "";
-  }
-  /** @returns {Promise<null|'merge'|'skip'>} */
-  function askPolicyImportMode(title = "导入策略") {
-    return new Promise((resolve) => {
-      openModal(`
-        <div class="modal-head"><h3>${esc(title)}</h3>
-          <p class="desc">「合并导入」：同 OID 更新、新 OID 追加。<br/>
-          「忽略重复」：已有同 OID 的跳过，只追加新的。</p>
-        </div>
-        <div class="modal-foot">
-          <button type="button" class="ghost" id="imp-cancel">取消</button>
-          <button type="button" class="ghost" id="imp-skip">忽略重复</button>
-          <button type="button" class="primary" id="imp-merge">合并导入</button>
-        </div>
-      `);
-      const done = (v) => {
-        closeModal();
-        resolve(v);
-      };
-      document.getElementById("imp-cancel").onclick = () => done(null);
-      document.getElementById("imp-skip").onclick = () => done("skip");
-      document.getElementById("imp-merge").onclick = () => done("merge");
-    });
-  }
-  modal.addEventListener("click", (e) => {
-    if (e.target === modal) closeModal();
+  const gid = PAGE_GROUP[page];
+  applyNavGroups(gid || undefined);
+  // mark group containing active page
+  document.querySelectorAll(".nav-group").forEach((g) => {
+    const hasActive = !!g.querySelector(`.nav-item.active`);
+    g.classList.toggle("has-active", hasActive);
   });
+  const [t, s] = titles[page] || [page, ""];
+  document.getElementById("page-title").textContent = t;
+  document.getElementById("page-sub").textContent = s;
+  document.getElementById("page-actions").innerHTML = "";
+  renderPage();
+  refreshLicenseBanner();
+}
 
-  function multiSelect(name, options, selected = []) {
-    const set = new Set(selected);
-    return `<select name="${name}" multiple size="${Math.min(6, Math.max(3, options.length || 3))}">
-      ${options
-        .map(
-          (o) =>
-            `<option value="${esc(o.value)}" ${set.has(o.value) ? "selected" : ""}>${esc(
-              o.label
-            )}</option>`
-        )
-        .join("")}
-    </select>
-    <div style="font-size:0.75rem;color:var(--muted);margin-top:0.25rem">按住 Ctrl/⌘ 多选</div>`;
+applyNavGroups();
+
+async function renderPage() {
+  const root = document.getElementById("page-root");
+  root.innerHTML = `<div class="panel empty">加载中…</div>`;
+  try {
+    const fn = pages[state.page];
+    await fn(root);
+  } catch (e) {
+    root.innerHTML = `<div class="panel empty">加载失败：${esc(e.message)}</div>`;
   }
+}
 
-  function selectedValues(form, name) {
-    const el = form.elements.namedItem(name);
-    if (!el) return [];
-    return [...el.selectedOptions].map((o) => o.value);
-  }
+function setActions(html) {
+  document.getElementById("page-actions").innerHTML = html;
+}
 
-  // ---------- Pages ----------
-  const pages = {
-    async overview(root) {
-      setActions(
-        `<span class="overview-refresh-hint" id="ov-hint"></span><button class="ghost" id="btn-refresh">刷新</button>`
-      );
-      document.getElementById("btn-refresh").onclick = () => paint();
+const { openModal, closeModal, modal, modalBody } = createModalApi();
+/** @returns {Promise<null|'merge'|'skip'>} */
+function askPolicyImportMode(title = "导入策略") {
+  return new Promise((resolve) => {
+    openModal(`
+      <div class="modal-head"><h3>${esc(title)}</h3>
+        <p class="desc">「合并导入」：同 OID 更新、新 OID 追加。<br/>
+        「忽略重复」：已有同 OID 的跳过，只追加新的。</p>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="ghost" id="imp-cancel">取消</button>
+        <button type="button" class="ghost" id="imp-skip">忽略重复</button>
+        <button type="button" class="primary" id="imp-merge">合并导入</button>
+      </div>
+    `);
+    const done = (v) => {
+      closeModal();
+      resolve(v);
+    };
+    document.getElementById("imp-cancel").onclick = () => done(null);
+    document.getElementById("imp-skip").onclick = () => done("skip");
+    document.getElementById("imp-merge").onclick = () => done("merge");
+  });
+}
 
-      const goAlerts = (status) => {
-        state.alertFilters = {
-          status: status || "",
-          severity: "",
-          source: "",
-          q: "",
-          ip: "",
-          store: "",
-          page: 1,
-        };
-        navigate("alerts");
-      };
+function multiSelect(name, options, selected = []) {
+  const set = new Set(selected);
+  return `<select name="${name}" multiple size="${Math.min(6, Math.max(3, options.length || 3))}">
+    ${options
+      .map(
+        (o) =>
+          `<option value="${esc(o.value)}" ${set.has(o.value) ? "selected" : ""}>${esc(
+            o.label
+          )}</option>`
+      )
+      .join("")}
+  </select>
+  <div style="font-size:0.75rem;color:var(--muted);margin-top:0.25rem">按住 Ctrl/⌘ 多选</div>`;
+}
 
-      const paint = async () => {
-        const d = await api("/api/overview");
-        const ingressMap = Object.fromEntries(
-          (d.ingress || []).map((r) => [r.id, r])
-        );
-        const firing = d.alerts_firing || 0;
-        const pending = d.alerts_pending || 0;
-        const resolved = d.alerts_resolved || 0;
-        const recent = d.recent_alerts || [];
-        const skips = d.notify_skips || [];
-        const needsSetup =
-          !d.datasources || !d.enabled_rules || !d.channels || !d.ingress_routes;
+function selectedValues(form, name) {
+  const el = form.elements.namedItem(name);
+  if (!el) return [];
+  return [...el.selectedOptions].map((o) => o.value);
+}
 
-        const hint = document.getElementById("ov-hint");
-        if (hint) {
-          hint.textContent = "每 30 秒自动刷新";
-        }
+// ---------- Pages ----------
+const pages = {
+  async overview(root) {
+    setActions(
+      `<span class="overview-refresh-hint" id="ov-hint"></span><button class="ghost" id="btn-refresh">刷新</button>`
+    );
+    document.getElementById("btn-refresh").onclick = () => paint();
 
-        root.innerHTML = `
-          <div class="overview-health ${firing ? "is-firing" : "is-ok"}">
-            <div class="overview-health-main">${esc(d.health || "—")}</div>
-            <div class="overview-health-actions">
-              ${
-                firing
-                  ? `<button type="button" class="primary" data-go-alerts="firing">查看正在告警</button>`
-                  : `<button type="button" class="ghost" data-go-alerts="">打开告警事件</button>`
-              }
-            </div>
-          </div>
-
-          <div class="stats overview-stats-primary">
-            <button type="button" class="stat firing clickable" data-go-alerts="firing">
-              <div class="n">${firing}</div><div class="l">正在告警</div>
-            </button>
-            <button type="button" class="stat clickable" data-go-alerts="pending">
-              <div class="n">${pending}</div><div class="l">等待中</div>
-            </button>
-            <button type="button" class="stat ok clickable" data-go-alerts="resolved">
-              <div class="n">${resolved}</div><div class="l">已恢复</div>
-            </button>
-            <button type="button" class="stat accent clickable" data-go-page="silences">
-              <div class="n">${d.active_silences || 0}</div><div class="l">生效静默</div>
-            </button>
-          </div>
-
-          <div class="stats overview-stats-meta">
-            <button type="button" class="stat clickable" data-go-page="rules">
-              <div class="n">${d.enabled_rules || 0}/${d.rules || 0}</div><div class="l">启用规则</div>
-            </button>
-            <button type="button" class="stat clickable" data-go-page="datasources">
-              <div class="n">${d.datasources || 0}</div><div class="l">数据源</div>
-            </button>
-            <button type="button" class="stat clickable" data-go-page="channels">
-              <div class="n">${d.channels || 0}</div><div class="l">通知渠道</div>
-            </button>
-            <button type="button" class="stat clickable" data-go-page="ingress">
-              <div class="n">${d.ingress_routes || 0}</div><div class="l">告警接入</div>
-            </button>
-          </div>
-
-          ${
-            needsSetup
-              ? `<div class="panel overview-setup">
-                  <strong>尚未完成最小闭环</strong>
-                  <p class="hint">建议先准备数据源或告警接入、通知渠道，再配置规则 / 丰富。</p>
-                  <div class="overview-setup-actions">
-                    ${!d.datasources ? `<button type="button" class="ghost" data-go-page="datasources">新建数据源</button>` : ""}
-                    ${!d.ingress_routes ? `<button type="button" class="ghost" data-go-page="ingress">配置告警接入</button>` : ""}
-                    ${!d.channels ? `<button type="button" class="ghost" data-go-page="channels">新建通知渠道</button>` : ""}
-                    ${!d.enabled_rules ? `<button type="button" class="ghost" data-go-page="rules">新建规则</button>` : ""}
-                  </div>
-                </div>`
-              : ""
-          }
-
-          <div class="overview-grid">
-            <div class="panel">
-              <div class="overview-panel-head">
-                <h3>关注中的告警</h3>
-                <button type="button" class="ghost" data-go-alerts="firing">全部告警中</button>
-              </div>
-              ${
-                recent.length
-                  ? alertTable(recent, { compact: true, ingressMap })
-                  : `<div class="empty">暂无告警。可去「告警接入」试推送，或等待规则触发。
-                      <div style="margin-top:12px"><button type="button" class="primary" data-go-page="ingress">去告警接入</button></div>
-                    </div>`
-              }
-            </div>
-            <div class="panel">
-              <div class="overview-panel-head">
-                <h3>最近通知跳过</h3>
-                <span class="hint">节流 / 聚合 / 降级</span>
-              </div>
-              ${
-                skips.length
-                  ? `<ul class="overview-skip-list">${skips
-                      .map(
-                        (s) =>
-                          `<li><code class="mono">${esc(s.error || "—")}</code>
-                            <span class="hint">${esc(s.transition || "")} · ${esc(
-                            (s.created_at || "").replace("T", " ").slice(0, 19)
-                          )}</span></li>`
-                      )
-                      .join("")}</ul>`
-                  : `<div class="empty hint">暂无跳过记录。风暴节流生效时会出现 throttled / aggregated / degraded。</div>`
-              }
-            </div>
-          </div>`;
-
-        root.querySelectorAll("[data-go-alerts]").forEach((el) => {
-          el.onclick = () => goAlerts(el.dataset.goAlerts || "");
-        });
-        root.querySelectorAll("[data-go-page]").forEach((el) => {
-          el.onclick = () => navigate(el.dataset.goPage);
-        });
-        if (recent.length) bindAlertTable(root, recent, ingressMap);
-      };
-
-      await paint();
-      stopOverviewTimer();
-      overviewTimer = setInterval(() => {
-        if (state.page !== "overview") {
-          stopOverviewTimer();
-          return;
-        }
-        paint().catch(() => {});
-      }, 30000);
-    },
-
-    async datasources(root) {
-      setActions(`<button class="primary" id="btn-add">新建数据源</button>`);
-      document.getElementById("btn-add").onclick = () => editDatasource();
-      const rows = await api("/api/datasources");
-      state.cache.datasources = rows;
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>名称</th><th>类型</th><th>URL</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map(
-                (d) => `<tr>
-              <td>${esc(d.name)}</td>
-              <td>${esc(d.kind)}</td>
-              <td class="mono">${esc(d.url)}</td>
-              <td><span class="badge ${d.enabled ? "on" : "off"}">${d.enabled ? "启用" : "停用"}</span></td>
-              <td class="actions">
-                <button data-edit="${d.id}">编辑</button>
-                <button class="danger" data-del="${d.id}">删除</button>
-              </td></tr>`
-              )
-              .join("")}</tbody></table>`
-          : `<div class="empty">还没有数据源。支持 prometheus / victoriametrics / kafka / log。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editDatasource(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该数据源？")) return;
-          await api(`/api/datasources/${b.dataset.del}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-    },
-
-    async rules(root) {
-      setActions(`<button class="primary" id="btn-add">新建规则</button>`);
-      document.getElementById("btn-add").onclick = () => editRule();
-      const [rows, dss, chs] = await Promise.all([
-        api("/api/rules"),
-        api("/api/datasources"),
-        api("/api/channels"),
-      ]);
-      state.cache.datasources = dss;
-      state.cache.channels = chs;
-      const dsName = Object.fromEntries(dss.map((d) => [d.id, d.name]));
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>名称</th><th>数据源</th><th>表达式</th><th>条件</th><th>间隔</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map(
-                (r) => `<tr>
-              <td>${esc(r.name)}</td>
-              <td>${esc(dsName[r.datasource_id] || r.datasource_id.slice(0, 8))}</td>
-              <td class="mono">${esc(r.expr)}</td>
-              <td class="mono">${esc(cmpLabel(r.comparator))} ${r.threshold}</td>
-              <td>${r.interval_seconds}s / for ${r.for_seconds}s</td>
-              <td><span class="badge ${r.enabled ? "on" : "off"}">${r.enabled ? "启用" : "停用"}</span></td>
-              <td class="actions">
-                <button data-run="${r.id}">试跑</button>
-                <button data-edit="${r.id}">编辑</button>
-                <button class="danger" data-del="${r.id}">删除</button>
-              </td></tr>`
-              )
-              .join("")}</tbody></table>`
-          : `<div class="empty">还没有规则。配置数据源后即可创建阈值告警。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editRule(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该规则？")) return;
-          await api(`/api/rules/${b.dataset.del}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-      root.querySelectorAll("[data-run]").forEach((b) => {
-        b.onclick = async () => {
-          try {
-            await api(`/api/rules/${b.dataset.run}/evaluate`, { method: "POST" });
-            toast("试跑完成");
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      });
-    },
-
-    async channels(root) {
-      setActions(`<button class="primary" id="btn-add">新建渠道</button>`);
-      document.getElementById("btn-add").onclick = () => editChannel();
-      const rows = await api("/api/channels");
-      state.cache.channels = rows;
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>名称</th><th>类型</th><th>URL</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map(
-                (c) => `<tr>
-              <td>${esc(c.name)}</td>
-              <td>${esc(c.kind)}</td>
-              <td class="mono">${esc(c.url)}</td>
-              <td><span class="badge ${c.enabled ? "on" : "off"}">${c.enabled ? "启用" : "停用"}</span></td>
-              <td class="actions">
-                <button data-test="${c.id}">测试</button>
-                <button data-edit="${c.id}">编辑</button>
-                <button class="danger" data-del="${c.id}">删除</button>
-              </td></tr>`
-              )
-              .join("")}</tbody></table>`
-          : `<div class="empty">还没有通知渠道。支持 webhook / http / dingtalk / wecom / feishu / slack / telegram。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-test]").forEach((b) => {
-        b.onclick = () => testChannel(b.dataset.test, b);
-      });
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editChannel(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该渠道？")) return;
-          await api(`/api/channels/${b.dataset.del}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-    },
-
-    async notifies(root) {
-      const f = state.notifyFilters || { channel_id: "", success: "", q: "" };
-      setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
-
-      const load = async () => {
-        const channel_id =
-          root.querySelector("#nf-channel")?.value ?? state.notifyFilters?.channel_id ?? "";
-        const success =
-          root.querySelector("#nf-success")?.value ?? state.notifyFilters?.success ?? "";
-        const q = (root.querySelector("#nf-q")?.value ?? state.notifyFilters?.q ?? "").trim();
-        state.notifyFilters = { channel_id, success, q };
-
-        const params = new URLSearchParams();
-        if (channel_id) params.set("channel_id", channel_id);
-        if (success) params.set("success", success);
-        if (q) params.set("q", q);
-        params.set("limit", "200");
-
-        const [rows, chs] = await Promise.all([
-          api("/api/notifies?" + params.toString()),
-          api("/api/channels").catch(() => state.cache.channels || []),
-        ]);
-        state.cache.channels = chs;
-
-        const preview = (body) => {
-          const s = String(body || "").replace(/\s+/g, " ").trim();
-          if (!s) return "—";
-          return s.length > 72 ? s.slice(0, 72) + "…" : s;
-        };
-        const edgeLabel = (t, err) => {
-          if (t === "became_firing") return "触发";
-          if (t === "became_resolved") return "恢复";
-          if (err === "test" || String(err || "").startsWith("test")) return "测试";
-          return t || "其他";
-        };
-
-        root.innerHTML = `
-          <div class="panel">
-            <div class="alert-toolbar">
-              <div class="alert-filters">
-                <select id="nf-channel">
-                  <option value="">全部渠道</option>
-                  ${(chs || [])
-                    .map(
-                      (c) =>
-                        `<option value="${esc(c.id)}" ${
-                          channel_id === c.id ? "selected" : ""
-                        }>${esc(c.name)} (${esc(c.kind)})</option>`
-                    )
-                    .join("")}
-                </select>
-                <select id="nf-success">
-                  <option value="" ${!success ? "selected" : ""}>全部结果</option>
-                  <option value="true" ${success === "true" ? "selected" : ""}>成功</option>
-                  <option value="false" ${success === "false" ? "selected" : ""}>失败</option>
-                </select>
-                <input id="nf-q" type="search" placeholder="搜索正文 / 错误 / 告警 ID" value="${esc(
-                  q
-                )}" />
-              </div>
-            </div>
-            ${
-              rows.length
-                ? `<table class="data"><thead><tr>
-                    <th>时间</th><th>渠道</th><th>边沿</th><th>结果</th><th>内容摘要</th><th>错误</th><th></th>
-                  </tr></thead><tbody>${rows
-                    .map(
-                      (n, i) => `<tr>
-                    <td>${esc(fmtTime(n.created_at))}</td>
-                    <td>${esc(n.channel_name || n.channel_id?.slice?.(0, 8) || "—")}<div class="hint" style="margin:0">${esc(
-                      n.channel_kind || ""
-                    )}</div></td>
-                    <td>${esc(edgeLabel(n.transition, n.error))}</td>
-                    <td><span class="badge ${n.success ? "on" : "firing"}">${
-                      n.success ? "成功" : "失败"
-                    }</span></td>
-                    <td class="mono" title="${esc(n.body || "")}">${esc(preview(n.body))}</td>
-                    <td class="mono">${esc(n.error || "—")}</td>
-                    <td class="actions"><button data-body-idx="${i}">查看内容</button></td>
-                  </tr>`
-                    )
-                    .join("")}</tbody></table>`
-                : `<div class="empty">暂无通知记录。告警边沿通知或渠道测试后会出现在这里。</div>`
-            }
-          </div>`;
-
-        root.querySelector("#nf-channel").onchange = () => load();
-        root.querySelector("#nf-success").onchange = () => load();
-        const qEl = root.querySelector("#nf-q");
-        let t;
-        qEl.oninput = () => {
-          clearTimeout(t);
-          t = setTimeout(() => load(), 280);
-        };
-        root.querySelectorAll("[data-body-idx]").forEach((b) => {
-          b.onclick = () => showNotifyLogDetail(rows[Number(b.dataset.bodyIdx)]);
-        });
-      };
-
-      document.getElementById("btn-refresh").onclick = () => load();
-      state.notifyFilters = { ...f };
-      await load();
-    },
-
-    async ingress(root) {
-      setActions(`
-        <button class="ghost" id="btn-snmp-sample">SNMP Trap 样例</button>
-        <button class="primary" id="btn-add">新建接入</button>
-      `);
-      document.getElementById("btn-add").onclick = () => editIngress();
-      document.getElementById("btn-snmp-sample").onclick = () => editIngressSnmpTrapSample();
-      const [rows, chs] = await Promise.all([api("/api/ingress"), api("/api/channels")]);
-      state.cache.channels = chs;
-      const chMap = Object.fromEntries(chs.map((c) => [c.id, c]));
-      const origin = location.origin;
-
-      if (!rows.length) {
-        root.innerHTML = `
-          <div class="panel guide">
-            <h3>配置告警接入</h3>
-            <ol class="steps">
-              <li>先在「通知渠道」配置至少一个机器人 / Webhook（可选，也可稍后绑定）</li>
-              <li>Kafka / SNMP Trap：可用「SNMP Trap 样例」一键生成；或先到「工具 → Kafka」确认 Topic</li>
-              <li>创建接入：选择 Alertmanager / Generic（含拨测） / Kafka</li>
-              <li>把外部平台 Webhook 指到下方生成的地址，或使用「试推送」验证</li>
-              <li>在「告警事件」查看 firing / resolved 与通知结果</li>
-            </ol>
-            <button class="primary" id="btn-guide-add">新建第一个接入</button>
-          </div>`;
-        document.getElementById("btn-guide-add").onclick = () => editIngress();
-        return;
-      }
-
-      root.innerHTML = `<div class="ingress-list">${rows
-        .map((r) => {
-          const url =
-            r.kind === "kafka"
-              ? `kafka://${r.endpoint || ""}/${(r.options && r.options.topic) || ""}`
-              : r.kind === "alertmanager"
-              ? `${origin}/api/ingress/${r.id}/alertmanager`
-              : `${origin}/api/ingress/${r.id}/generic`;
-          const pushUrl = `${origin}/api/ingress/${r.id}/push`;
-          const chNames = (r.channel_ids || [])
-            .map((id) => (chMap[id] ? chMap[id].name : id.slice(0, 8)))
-            .join("、") || "未绑定渠道";
-          const kindHint =
-            r.kind === "alertmanager"
-              ? "接收 Prometheus Alertmanager webhook"
-              : r.kind === "kafka"
-              ? "后台消费 Topic 中的告警 JSON"
-              : "通用 JSON / Jeecg 拨测 probe-alert";
-          return `<article class="ingress-card">
-            <div class="ic-head">
-              <div>
-                <div class="ic-title">${esc(r.name)}</div>
-                <div class="ic-sub"><span class="badge ${r.enabled ? "on" : "off"}">${
-                  r.enabled ? "启用" : "停用"
-                }</span> <span class="kind-tag">${esc(r.kind)}</span> · ${esc(kindHint)}</div>
-              </div>
-              <div class="actions">
-                <button data-test="${r.id}" ${r.enabled ? "" : "disabled"}>试推送</button>
-                <button data-alerts="${r.id}">查告警</button>
-                <button data-edit="${r.id}">编辑</button>
-                <button class="danger" data-del="${r.id}">删除</button>
-              </div>
-            </div>
-            <div class="ic-body">
-              <div class="field">
-                <label>接入地址</label>
-                <div class="url-row">
-                  <code class="mono url-box">${esc(url)}</code>
-                  <button data-copy="${esc(url)}">复制</button>
-                </div>
-                ${
-                  r.kind !== "kafka"
-                    ? `<div class="hint">也可用自动识别入口：<code class="mono">${esc(
-                        pushUrl
-                      )}</code>
-                    ${
-                      r.token
-                        ? `· 请求头需带 <code>Authorization: Bearer ***</code> 或 <code>X-Eventide-Token</code>`
-                        : "· 未配置 Token，任意来源可推送"
-                    }</div>`
-                    : `<div class="hint">Brokers <code class="mono">${esc(
-                        r.endpoint || "—"
-                      )}</code> · Topic <code class="mono">${esc(
-                        (r.options && r.options.topic) || "—"
-                      )}</code> · 起始 ${(r.options && r.options.start) || "latest"}</div>`
-                }
-              </div>
-              <div class="field" style="margin:0">
-                <label>通知渠道</label>
-                <div>${esc(chNames)}</div>
-              </div>
-            </div>
-          </article>`;
-        })
-        .join("")}</div>`;
-
-      root.querySelectorAll("[data-copy]").forEach((b) => {
-        b.onclick = async () => {
-          await navigator.clipboard.writeText(b.dataset.copy);
-          toast("已复制");
-        };
-      });
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editIngress(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该接入？")) return;
-          await api(`/api/ingress/${b.dataset.del}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-      root.querySelectorAll("[data-alerts]").forEach((b) => {
-        b.onclick = () => {
-          state.alertFilters = { source: "ingress", q: "", ip: "", page: 1 };
-          navigate("alerts");
-        };
-      });
-      root.querySelectorAll("[data-test]").forEach((b) => {
-        b.onclick = () => openIngressTest(rows.find((x) => x.id === b.dataset.test));
-      });
-    },
-
-    async kafka(root) {
-      setActions(`<button class="ghost" id="btn-k-refresh">刷新 Topic</button>`);
-      const canWrite = can("ingress:write");
-      let brokers =
-        localStorage.getItem("eventide_kafka_brokers") || "120.26.105.115:9092";
-      let focusTopic =
-        localStorage.getItem("eventide_kafka_topic") || "eventide.snmptrap";
-      try {
-        const routes = await api("/api/ingress");
-        const kr = (routes || []).find((r) => r.kind === "kafka");
-        if (kr?.endpoint) brokers = localStorage.getItem("eventide_kafka_brokers") || kr.endpoint;
-        if (kr?.options?.topic)
-          focusTopic = localStorage.getItem("eventide_kafka_topic") || kr.options.topic;
-      } catch (_) {}
-
-      const persist = () => {
-        const b = String(document.getElementById("k-brokers")?.value || "").trim();
-        const t = String(document.getElementById("k-topic")?.value || "").trim();
-        if (b) localStorage.setItem("eventide_kafka_brokers", b);
-        if (t) localStorage.setItem("eventide_kafka_topic", t);
-      };
-
-      const renderShell = (statusHtml, topicsHtml, detailHtml) => {
-        root.innerHTML = `
-          <div class="panel" style="margin-bottom:16px">
-            <h3 style="margin:0 0 0.5rem;font-size:1rem">集群连接</h3>
-            <p class="hint" style="margin:0 0 12px">轻量 Kafka 管理：Topic、消费组积压、浏览消息、试写、创建/删除。</p>
-            <div class="row">
-              <div class="field" style="flex:2">
-                <label>Brokers</label>
-                <input id="k-brokers" value="${esc(brokers)}" placeholder="host:9092" />
-              </div>
-              <div class="field" style="flex:1">
-                <label>默认 Topic</label>
-                <input id="k-topic" value="${esc(focusTopic)}" placeholder="eventide.snmptrap" />
-              </div>
-            </div>
-            <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
-              <button class="primary" type="button" id="k-connect">连接并列出 Topic</button>
-              <button type="button" id="k-groups">列出消费组</button>
-              ${
-                canWrite
-                  ? `<button type="button" id="k-create">创建 Topic</button>`
-                  : ""
-              }
-            </div>
-            <div id="k-status" style="margin-top:12px">${statusHtml || ""}</div>
-          </div>
-          <div class="kafka-split">
-            <div class="kafka-side">
-              <div class="panel kafka-topics">
-                <h3 style="margin:0 0 0.75rem;font-size:1rem">Topics</h3>
-                <div id="k-topics">${topicsHtml || `<p class="hint">点击「连接并列出 Topic」</p>`}</div>
-              </div>
-              <div class="panel kafka-groups">
-                <div class="kafka-groups-head">
-                  <h3 style="margin:0;font-size:1rem">Consumer Groups</h3>
-                  <button type="button" class="ghost" id="k-groups-side" style="height:auto;min-height:0;padding:4px 10px">列出</button>
-                </div>
-                <div id="k-groups-panel"><p class="hint" style="margin:8px 0 0">点击上方「列出消费组」或本栏「列出」</p></div>
-              </div>
-            </div>
-            <div class="panel kafka-detail">
-              <h3 style="margin:0 0 0.75rem;font-size:1rem">详情 / 消息</h3>
-              <div id="k-detail">${detailHtml || `<p class="hint">选择左侧 Topic，或查看消费组积压</p>`}</div>
-            </div>
-          </div>`;
-      };
-
-      const loadTopics = async (quiet = false) => {
-        persist();
-        brokers = String(document.getElementById("k-brokers").value || "").trim();
-        focusTopic = String(document.getElementById("k-topic").value || "").trim();
-        if (!brokers) {
-          toast("请填写 Brokers", true);
-          return;
-        }
-        document.getElementById("k-status").innerHTML = "连接中…";
-        try {
-          const data = await api("/api/ingress/kafka/probe", {
-            method: "POST",
-            body: JSON.stringify({ brokers, topic: focusTopic }),
-          });
-          const topics = data.topics || [];
-          document.getElementById("k-status").innerHTML = `
-            <span class="badge on">已连接</span>
-            延迟 ${esc(data.latency_ms)} ms · Topic ${esc(data.topic_count)}
-            ${
-              focusTopic
-                ? data.topic_found
-                  ? `· <code>${esc(focusTopic)}</code> ${esc(data.partitions)} 分区`
-                  : `· <span class="badge off">${esc(focusTopic)} 不存在</span>`
-                : ""
-            }`;
-          document.getElementById("k-topics").innerHTML = topics.length
-            ? `<table class="map-help-table" style="width:100%">
-                <thead><tr><th>名称</th><th>分区</th><th></th></tr></thead>
-                <tbody>
-                ${topics
-                  .map(
-                    (t) => `<tr>
-                      <td><code>${esc(t.name)}</code></td>
-                      <td>${esc(t.partitions)}</td>
-                      <td style="white-space:nowrap">
-                        <button type="button" data-open="${esc(t.name)}" data-parts="${esc(
-                      t.partitions
-                    )}">打开</button>
-                        ${
-                          canWrite
-                            ? `<button type="button" class="danger" data-del-topic="${esc(
-                                t.name
-                              )}">删除</button>`
-                            : ""
-                        }
-                      </td>
-                    </tr>`
-                  )
-                  .join("")}
-                </tbody></table>`
-            : `<p class="hint">暂无 Topic</p>`;
-          bindTopicActions();
-          if (!quiet) toast("已连接");
-          if (focusTopic && data.topic_found) {
-            openTopic(focusTopic, data.partitions || 1);
-          }
-        } catch (e) {
-          document.getElementById("k-status").innerHTML = `<span class="badge off">失败</span> ${esc(
-            e.message || e
-          )}`;
-          if (!quiet) toast(e.message || String(e), true);
-        }
-      };
-
-      const openTopic = async (name, partsHint) => {
-        persist();
-        brokers = String(document.getElementById("k-brokers").value || "").trim();
-        focusTopic = name;
-        localStorage.setItem("eventide_kafka_topic", name);
-        const topicInput = document.getElementById("k-topic");
-        if (topicInput) topicInput.value = name;
-        const detail = document.getElementById("k-detail");
-        detail.innerHTML = `<p class="hint">加载 <code>${esc(name)}</code> …</p>`;
-        try {
-          const desc = await api("/api/ingress/kafka/describe", {
-            method: "POST",
-            body: JSON.stringify({ brokers, topic: name }),
-          });
-          const parts = desc.partitions || [];
-          const partOpts = parts
-            .map((p) => `<option value="${p.partition}">p${p.partition}</option>`)
-            .join("");
-          detail.innerHTML = `
-            <div class="field"><label>Topic</label><div><code>${esc(name)}</code> · ${
-              parts.length || partsHint || "?"
-            } 分区</div></div>
-            <table class="map-help-table" style="width:100%;margin-bottom:12px">
-              <thead><tr><th>分区</th><th>earliest</th><th>latest</th><th>消息约数</th></tr></thead>
-              <tbody>
-                ${parts
-                  .map(
-                    (p) => `<tr>
-                      <td>${esc(p.partition)}</td>
-                      <td class="mono">${esc(p.earliest)}</td>
-                      <td class="mono">${esc(p.latest)}</td>
-                      <td>${esc(p.lag_approx)}</td>
-                    </tr>`
-                  )
-                  .join("")}
-              </tbody>
-            </table>
-            <div class="seg" style="margin-bottom:12px">
-              <div class="seg-title">浏览消息</div>
-              <div class="row">
-                <div class="field"><label>分区</label><select id="kb-part">${partOpts ||
-                  '<option value="0">0</option>'}</select></div>
-                <div class="field"><label>起点</label>
-                  <select id="kb-from">
-                    <option value="latest">latest 最近</option>
-                    <option value="earliest">earliest</option>
-                    <option value="offset">指定 offset</option>
-                  </select>
-                </div>
-                <div class="field"><label>条数</label><input id="kb-max" type="number" min="1" max="200" value="20" /></div>
-                <div class="field"><label>offset</label><input id="kb-offset" type="number" placeholder="从 earliest 起" /></div>
-              </div>
-              <button type="button" class="primary" id="kb-load">加载消息</button>
-              <div id="kb-msgs" style="margin-top:10px"></div>
-            </div>
-            ${
-              canWrite
-                ? `<div class="seg">
-              <div class="seg-title">试写一条消息</div>
-              <div class="row">
-                <div class="field"><label>分区</label><select id="kp-part">${partOpts ||
-                  '<option value="0">0</option>'}</select></div>
-                <div class="field" style="flex:1"><label>Key（可选）</label><input id="kp-key" placeholder="peer IP 等" /></div>
-              </div>
-              <div class="field"><label>Value（JSON 文本）</label>
-                <textarea id="kp-value" rows="5" placeholder='{"status":"firing","labels":{"alertname":"test"}}'></textarea>
-              </div>
-              <button type="button" id="kp-send">发送</button>
-            </div>`
-                : `<p class="hint">需要 <code>ingress:write</code> 才能试写 / 删 Topic。</p>`
-            }`;
-
-          document.getElementById("kb-load").onclick = async () => {
-            const partition = Number(document.getElementById("kb-part").value || 0);
-            const from = document.getElementById("kb-from").value;
-            const max = Number(document.getElementById("kb-max").value || 20);
-            const offsetRaw = document.getElementById("kb-offset").value;
-            const body = { brokers, topic: name, partition, max, from };
-            if (from === "offset" && offsetRaw !== "") body.offset = Number(offsetRaw);
-            const box = document.getElementById("kb-msgs");
-            box.innerHTML = "加载中…";
-            try {
-              const data = await api("/api/ingress/kafka/messages", {
-                method: "POST",
-                body: JSON.stringify(body),
-              });
-              const msgs = data.messages || [];
-              box.innerHTML = msgs.length
-                ? `<p class="hint">earliest=${esc(data.earliest)} latest=${esc(
-                    data.latest
-                  )} · ${msgs.length} 条</p>
-                  ${msgs
-                    .map(
-                      (m) => `<details style="margin:8px 0;border-top:1px solid var(--border, #333);padding-top:8px">
-                        <summary class="mono" style="cursor:pointer">
-                          p${esc(m.partition)} @ ${esc(m.offset)} · ${esc(m.timestamp)}
-                          · ${esc(m.value_bytes)}B
-                          ${m.key ? ` · key=${esc(m.key)}` : ""}
-                        </summary>
-                        <pre class="mono" style="white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:240px;overflow:auto">${esc(
-                          m.value
-                        )}</pre>
-                      </details>`
-                    )
-                    .join("")}`
-                : `<p class="hint">该分区暂无消息（earliest=${esc(data.earliest)} latest=${esc(
-                    data.latest
-                  )}）</p>`;
-            } catch (e) {
-              box.innerHTML = `<span class="badge off">失败</span> ${esc(e.message || e)}`;
-            }
-          };
-
-          const sendBtn = document.getElementById("kp-send");
-          if (sendBtn) {
-            sendBtn.onclick = async () => {
-              const partition = Number(document.getElementById("kp-part").value || 0);
-              const key = String(document.getElementById("kp-key").value || "").trim();
-              const value = String(document.getElementById("kp-value").value || "");
-              if (!value) {
-                toast("请填写 Value", true);
-                return;
-              }
-              try {
-                await api("/api/ingress/kafka/produce", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    brokers,
-                    topic: name,
-                    partition,
-                    key: key || null,
-                    value,
-                  }),
-                });
-                toast("已发送");
-                document.getElementById("kb-load").click();
-              } catch (e) {
-                toast(e.message || String(e), true);
-              }
-            };
-          }
-        } catch (e) {
-          detail.innerHTML = `<span class="badge off">失败</span> ${esc(e.message || e)}`;
-        }
-      };
-
-      const bindTopicActions = () => {
-        root.querySelectorAll("[data-open]").forEach((b) => {
-          b.onclick = () => openTopic(b.dataset.open, Number(b.dataset.parts || 1));
-        });
-        root.querySelectorAll("[data-del-topic]").forEach((b) => {
-          b.onclick = async () => {
-            const name = b.dataset.delTopic;
-            if (!confirm(`确认删除 Topic「${name}」？此操作不可恢复。`)) return;
-            persist();
-            brokers = String(document.getElementById("k-brokers").value || "").trim();
-            try {
-              await api("/api/ingress/kafka/topics/delete", {
-                method: "POST",
-                body: JSON.stringify({ brokers, topic: name }),
-              });
-              toast("已删除");
-              document.getElementById("k-detail").innerHTML = `<p class="hint">Topic 已删除</p>`;
-              await loadTopics(true);
-            } catch (e) {
-              toast(e.message || String(e), true);
-            }
-          };
-        });
-      };
-
-      const openGroup = async (groupId) => {
-        persist();
-        brokers = String(document.getElementById("k-brokers").value || "").trim();
-        focusTopic = String(document.getElementById("k-topic").value || "").trim();
-        const detail = document.getElementById("k-detail");
-        if (!detail) return;
-        detail.innerHTML = `<p class="hint">加载消费组 <code>${esc(groupId)}</code> …</p>`;
-        try {
-          const data = await api("/api/ingress/kafka/groups/describe", {
-            method: "POST",
-            body: JSON.stringify({
-              brokers,
-              group_id: groupId,
-              topic: focusTopic || undefined,
-            }),
-          });
-          const members = data.members || [];
-          const parts = data.partitions || [];
-          detail.innerHTML = `
-            <div class="kafka-group-detail">
-              <div class="kafka-group-meta">
-                <div>
-                  <div class="hint">消费组</div>
-                  <code class="kafka-gid-full">${esc(data.group_id)}</code>
-                </div>
-                <div>
-                  <div class="hint">状态</div>
-                  <div>${esc(data.state || "—")}</div>
-                </div>
-                <div>
-                  <div class="hint">协议</div>
-                  <div>${esc(data.protocol_type || "—")} / ${esc(data.protocol || "—")}</div>
-                </div>
-                <div>
-                  <div class="hint">总积压 lag</div>
-                  <div class="kafka-lag-n">${esc(data.total_lag ?? 0)}</div>
-                </div>
-              </div>
-              <div class="seg-title" style="margin:14px 0 6px">成员 (${members.length})</div>
-              ${
-                members.length
-                  ? `<div class="alert-table-scroll"><table class="data kafka-lag-table">
-                      <thead><tr><th>member_id</th><th>client_id</th><th>host</th></tr></thead>
-                      <tbody>${members
-                        .map(
-                          (m) => `<tr>
-                            <td class="mono" title="${esc(m.member_id)}">${esc(m.member_id)}</td>
-                            <td>${esc(m.client_id)}</td>
-                            <td>${esc(m.client_host)}</td>
-                          </tr>`
-                        )
-                        .join("")}</tbody></table></div>`
-                  : `<p class="hint">无活跃成员（Empty / Dead 或尚未加入）</p>`
-              }
-              <div class="seg-title" style="margin:14px 0 6px">分区位点 / 积压${
-                focusTopic ? ` · 过滤 <code>${esc(focusTopic)}</code>` : ""
-              }</div>
-              ${
-                parts.length
-                  ? `<div class="alert-table-scroll"><table class="data kafka-lag-table">
-                      <thead><tr><th>Topic</th><th>分区</th><th>已提交</th><th>latest</th><th>lag</th></tr></thead>
-                      <tbody>${parts
-                        .map(
-                          (p) => `<tr>
-                            <td><code title="${esc(p.topic)}">${esc(p.topic)}</code></td>
-                            <td>${esc(p.partition)}</td>
-                            <td class="mono">${esc(p.committed)}</td>
-                            <td class="mono">${esc(p.latest)}</td>
-                            <td><strong>${esc(p.lag)}</strong></td>
-                          </tr>`
-                        )
-                        .join("")}</tbody></table></div>
-                      <p class="hint" style="margin-top:8px">lag = max(0, latest − committed)；committed=-1 表示尚未提交，按 latest 计积压。</p>`
-                  : `<p class="hint">该组暂无已提交位点${
-                      focusTopic ? "（或与当前 Topic 无关）" : ""
-                    }</p>`
-              }
-              <div class="actions" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-                <button type="button" id="k-groups-refresh-one">刷新此组</button>
-              </div>
-            </div>`;
-          document.getElementById("k-groups-refresh-one").onclick = () => openGroup(groupId);
-        } catch (e) {
-          detail.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
-            e.message || e
-          )}</p>`;
-          toast(e.message || String(e), true);
-        }
-      };
-
-      const loadGroups = async (quiet = false) => {
-        persist();
-        brokers = String(document.getElementById("k-brokers").value || "").trim();
-        if (!brokers) {
-          toast("请填写 Brokers", true);
-          return;
-        }
-        const panel = document.getElementById("k-groups-panel");
-        if (!panel) return;
-        panel.innerHTML = `<p class="hint">加载消费组…</p>`;
-        try {
-          const data = await api("/api/ingress/kafka/groups", {
-            method: "POST",
-            body: JSON.stringify({ brokers }),
-          });
-          const groups = data.groups || [];
-          panel.innerHTML = groups.length
-            ? `<ul class="kafka-group-list">${groups
-                .map(
-                  (g) => `<li>
-                    <div class="kafka-group-item">
-                      <code class="kafka-gid" title="${esc(g.group_id)}">${esc(g.group_id)}</code>
-                      <span class="hint">${esc(g.protocol_type || "consumer")}</span>
-                      <button type="button" class="ghost kafka-gid-btn" data-group="${esc(
-                        g.group_id
-                      )}">积压</button>
-                    </div>
-                  </li>`
-                )
-                .join("")}</ul>
-              <p class="hint" style="margin-top:8px">积压按「默认 Topic」过滤；清空 Topic 可看全部。</p>`
-            : `<p class="hint">未发现消费组</p>`;
-          panel.querySelectorAll("[data-group]").forEach((b) => {
-            b.onclick = () => openGroup(b.dataset.group);
-          });
-          if (!quiet) toast(`消费组 ${groups.length} 个`);
-        } catch (e) {
-          panel.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
-            e.message || e
-          )}</p>`;
-          if (!quiet) toast(e.message || String(e), true);
-        }
-      };
-
-      renderShell("", "", "");
-      document.getElementById("btn-k-refresh").onclick = () => loadTopics(false);
-      document.getElementById("k-connect").onclick = () => loadTopics(false);
-      const bindGroupsBtn = (id) => {
-        const el = document.getElementById(id);
-        if (el) el.onclick = () => loadGroups(false);
-      };
-      bindGroupsBtn("k-groups");
-      bindGroupsBtn("k-groups-side");
-      const createBtn = document.getElementById("k-create");
-      if (createBtn) {
-        createBtn.onclick = async () => {
-          persist();
-          brokers = String(document.getElementById("k-brokers").value || "").trim();
-          focusTopic = String(document.getElementById("k-topic").value || "").trim();
-          const partitions = Number(
-            prompt("分区数", "6") || "0"
-          );
-          if (!brokers || !focusTopic || partitions <= 0) {
-            toast("需要 Brokers、Topic 与有效分区数", true);
-            return;
-          }
-          if (!confirm(`创建 Topic「${focusTopic}」· ${partitions} 分区 · rf=1？`)) return;
-          try {
-            const data = await api("/api/ingress/kafka/topics", {
-              method: "POST",
-              body: JSON.stringify({
-                brokers,
-                topic: focusTopic,
-                partitions,
-                replication_factor: 1,
-              }),
-            });
-            toast(data.created ? "已创建" : "已存在");
-            await loadTopics(true);
-          } catch (e) {
-            toast(e.message || String(e), true);
-          }
-        };
-      }
-      // auto connect once
-      loadTopics(true);
-    },
-
-    async alerts(root) {
-      const f = state.alertFilters || {
-        status: "",
+    const goAlerts = (status) => {
+      state.alertFilters = {
+        status: status || "",
         severity: "",
         source: "",
         q: "",
@@ -1679,538 +502,1330 @@
         store: "",
         page: 1,
       };
-      setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
+      navigate("alerts");
+    };
 
-      const load = async (opts = {}) => {
-        const soft = !!opts.soft;
-        if (soft) {
-          const ae = document.activeElement;
-          if (ae && (ae.id === "alert-q" || ae.id === "alert-ip")) return;
+    const paint = async () => {
+      const d = await api("/api/overview");
+      const ingressMap = Object.fromEntries(
+        (d.ingress || []).map((r) => [r.id, r])
+      );
+      const firing = d.alerts_firing || 0;
+      const pending = d.alerts_pending || 0;
+      const resolved = d.alerts_resolved || 0;
+      const recent = d.recent_alerts || [];
+      const skips = d.notify_skips || [];
+      const needsSetup =
+        !d.datasources || !d.enabled_rules || !d.channels || !d.ingress_routes;
+
+      const hint = document.getElementById("ov-hint");
+      if (hint) {
+        hint.textContent = "每 30 秒自动刷新";
+      }
+
+      root.innerHTML = `
+        <div class="overview-health ${firing ? "is-firing" : "is-ok"}">
+          <div class="overview-health-main">${esc(d.health || "—")}</div>
+          <div class="overview-health-actions">
+            ${
+              firing
+                ? `<button type="button" class="primary" data-go-alerts="firing">查看正在告警</button>`
+                : `<button type="button" class="ghost" data-go-alerts="">打开告警事件</button>`
+            }
+          </div>
+        </div>
+
+        <div class="stats overview-stats-primary">
+          <button type="button" class="stat firing clickable" data-go-alerts="firing">
+            <div class="n">${firing}</div><div class="l">正在告警</div>
+          </button>
+          <button type="button" class="stat clickable" data-go-alerts="pending">
+            <div class="n">${pending}</div><div class="l">等待中</div>
+          </button>
+          <button type="button" class="stat ok clickable" data-go-alerts="resolved">
+            <div class="n">${resolved}</div><div class="l">已恢复</div>
+          </button>
+          <button type="button" class="stat accent clickable" data-go-page="silences">
+            <div class="n">${d.active_silences || 0}</div><div class="l">生效静默</div>
+          </button>
+        </div>
+
+        <div class="stats overview-stats-meta">
+          <button type="button" class="stat clickable" data-go-page="rules">
+            <div class="n">${d.enabled_rules || 0}/${d.rules || 0}</div><div class="l">启用规则</div>
+          </button>
+          <button type="button" class="stat clickable" data-go-page="datasources">
+            <div class="n">${d.datasources || 0}</div><div class="l">数据源</div>
+          </button>
+          <button type="button" class="stat clickable" data-go-page="channels">
+            <div class="n">${d.channels || 0}</div><div class="l">通知渠道</div>
+          </button>
+          <button type="button" class="stat clickable" data-go-page="ingress">
+            <div class="n">${d.ingress_routes || 0}</div><div class="l">告警接入</div>
+          </button>
+        </div>
+
+        ${
+          needsSetup
+            ? `<div class="panel overview-setup">
+                <strong>尚未完成最小闭环</strong>
+                <p class="hint">建议先准备数据源或告警接入、通知渠道，再配置规则 / 丰富。</p>
+                <div class="overview-setup-actions">
+                  ${!d.datasources ? `<button type="button" class="ghost" data-go-page="datasources">新建数据源</button>` : ""}
+                  ${!d.ingress_routes ? `<button type="button" class="ghost" data-go-page="ingress">配置告警接入</button>` : ""}
+                  ${!d.channels ? `<button type="button" class="ghost" data-go-page="channels">新建通知渠道</button>` : ""}
+                  ${!d.enabled_rules ? `<button type="button" class="ghost" data-go-page="rules">新建规则</button>` : ""}
+                </div>
+              </div>`
+            : ""
         }
 
-        const status = state.alertFilters?.status || "";
-        const severity =
-          root.querySelector("#alert-sev")?.value ?? state.alertFilters?.severity ?? "";
-        const source =
-          root.querySelector("#alert-source")?.value ?? state.alertFilters?.source ?? "";
-        const q = (root.querySelector("#alert-q")?.value ?? state.alertFilters?.q ?? "").trim();
-        const ip = (root.querySelector("#alert-ip")?.value ?? state.alertFilters?.ip ?? "").trim();
-        const store =
-          root.querySelector("#alert-store")?.value ?? state.alertFilters?.store ?? "";
-        let page = Number(state.alertFilters?.page) || 1;
-        if (page < 1) page = 1;
-        const limit = ALERT_PAGE_SIZE;
-        state.alertFilters = { status, severity, source, q, ip, store, page };
-
-        const params = new URLSearchParams();
-        if (status) params.set("status", status);
-        if (severity) params.set("severity", severity);
-        if (source) params.set("source", source);
-        if (q) params.set("q", q);
-        if (ip) params.set("ip", ip);
-        if (store) params.set("store", store);
-        params.set("page", String(page));
-        params.set("limit", String(limit));
-
-        const [data, ingressRows] = await Promise.all([
-          api("/api/alerts?" + params.toString()),
-          api("/api/ingress").catch(() => []),
-        ]);
-        const list = normalizeAlertList(data);
-        const rows = list.items;
-        const total = list.total;
-        const nFire = list.status_counts.firing;
-        const nPend = list.status_counts.pending;
-        const nRes = list.status_counts.resolved;
-        const ingressMap = Object.fromEntries((ingressRows || []).map((r) => [r.id, r]));
-        const pages = Math.max(1, Math.ceil(total / limit) || 1);
-        if (page > pages) {
-          state.alertFilters = { ...(state.alertFilters || {}), page: pages };
-          return load(opts);
-        }
-
-        const view = getAlertView();
-        const auto = getAlertAutoRefresh();
-        root.innerHTML = `
-          <div class="alert-toolbar">
-            <div class="alert-tabs" role="tablist">
-              <button type="button" class="alert-tab ${!status ? "on" : ""}" data-st="">全部</button>
-              <button type="button" class="alert-tab firing ${status === "firing" ? "on" : ""}" data-st="firing">告警中 <em>${nFire}</em></button>
-              <button type="button" class="alert-tab ${status === "pending" ? "on" : ""}" data-st="pending">等待 <em>${nPend}</em></button>
-              <button type="button" class="alert-tab ok ${status === "resolved" ? "on" : ""}" data-st="resolved">已恢复 <em>${nRes}</em></button>
+        <div class="overview-grid">
+          <div class="panel">
+            <div class="overview-panel-head">
+              <h3>关注中的告警</h3>
+              <button type="button" class="ghost" data-go-alerts="firing">全部告警中</button>
             </div>
+            ${
+              recent.length
+                ? alertTable(recent, { compact: true, ingressMap })
+                : `<div class="empty">暂无告警。可去「告警接入」试推送，或等待规则触发。
+                    <div style="margin-top:12px"><button type="button" class="primary" data-go-page="ingress">去告警接入</button></div>
+                  </div>`
+            }
+          </div>
+          <div class="panel">
+            <div class="overview-panel-head">
+              <h3>最近通知跳过</h3>
+              <span class="hint">节流 / 聚合 / 降级</span>
+            </div>
+            ${
+              skips.length
+                ? `<ul class="overview-skip-list">${skips
+                    .map(
+                      (s) =>
+                        `<li><code class="mono">${esc(s.error || "—")}</code>
+                          <span class="hint">${esc(s.transition || "")} · ${esc(
+                          (s.created_at || "").replace("T", " ").slice(0, 19)
+                        )}</span></li>`
+                    )
+                    .join("")}</ul>`
+                : `<div class="empty hint">暂无跳过记录。风暴节流生效时会出现 throttled / aggregated / degraded。</div>`
+            }
+          </div>
+        </div>`;
+
+      root.querySelectorAll("[data-go-alerts]").forEach((el) => {
+        el.onclick = () => goAlerts(el.dataset.goAlerts || "");
+      });
+      root.querySelectorAll("[data-go-page]").forEach((el) => {
+        el.onclick = () => navigate(el.dataset.goPage);
+      });
+      if (recent.length) bindAlertTable(root, recent, ingressMap);
+    };
+
+    await paint();
+    stopOverviewTimer();
+    overviewTimer = setInterval(() => {
+      if (state.page !== "overview") {
+        stopOverviewTimer();
+        return;
+      }
+      paint().catch(() => {});
+    }, 30000);
+  },
+
+  async datasources(root) {
+    setActions(`<button class="primary" id="btn-add">新建数据源</button>`);
+    document.getElementById("btn-add").onclick = () => editDatasource();
+    const rows = await api("/api/datasources");
+    state.cache.datasources = rows;
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>名称</th><th>类型</th><th>URL</th><th>状态</th><th></th></tr></thead>
+          <tbody>${rows
+            .map(
+              (d) => `<tr>
+            <td>${esc(d.name)}</td>
+            <td>${esc(d.kind)}</td>
+            <td class="mono">${esc(d.url)}</td>
+            <td><span class="badge ${d.enabled ? "on" : "off"}">${d.enabled ? "启用" : "停用"}</span></td>
+            <td class="actions">
+              <button data-edit="${d.id}">编辑</button>
+              <button class="danger" data-del="${d.id}">删除</button>
+            </td></tr>`
+            )
+            .join("")}</tbody></table>`
+        : `<div class="empty">还没有数据源。支持 prometheus / victoriametrics / kafka / log。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editDatasource(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该数据源？")) return;
+        await api(`/api/datasources/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+  },
+
+  async rules(root) {
+    setActions(`<button class="primary" id="btn-add">新建规则</button>`);
+    document.getElementById("btn-add").onclick = () => editRule();
+    const [rows, dss, chs] = await Promise.all([
+      api("/api/rules"),
+      api("/api/datasources"),
+      api("/api/channels"),
+    ]);
+    state.cache.datasources = dss;
+    state.cache.channels = chs;
+    const dsName = Object.fromEntries(dss.map((d) => [d.id, d.name]));
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>名称</th><th>数据源</th><th>表达式</th><th>条件</th><th>间隔</th><th>状态</th><th></th></tr></thead>
+          <tbody>${rows
+            .map(
+              (r) => `<tr>
+            <td>${esc(r.name)}</td>
+            <td>${esc(dsName[r.datasource_id] || r.datasource_id.slice(0, 8))}</td>
+            <td class="mono">${esc(r.expr)}</td>
+            <td class="mono">${esc(cmpLabel(r.comparator))} ${r.threshold}</td>
+            <td>${r.interval_seconds}s / for ${r.for_seconds}s</td>
+            <td><span class="badge ${r.enabled ? "on" : "off"}">${r.enabled ? "启用" : "停用"}</span></td>
+            <td class="actions">
+              <button data-run="${r.id}">试跑</button>
+              <button data-edit="${r.id}">编辑</button>
+              <button class="danger" data-del="${r.id}">删除</button>
+            </td></tr>`
+            )
+            .join("")}</tbody></table>`
+        : `<div class="empty">还没有规则。配置数据源后即可创建阈值告警。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editRule(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该规则？")) return;
+        await api(`/api/rules/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+    root.querySelectorAll("[data-run]").forEach((b) => {
+      b.onclick = async () => {
+        try {
+          await api(`/api/rules/${b.dataset.run}/evaluate`, { method: "POST" });
+          toast("试跑完成");
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    });
+  },
+
+  async channels(root) {
+    setActions(`<button class="primary" id="btn-add">新建渠道</button>`);
+    document.getElementById("btn-add").onclick = () => editChannel();
+    const rows = await api("/api/channels");
+    state.cache.channels = rows;
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>名称</th><th>类型</th><th>URL</th><th>状态</th><th></th></tr></thead>
+          <tbody>${rows
+            .map(
+              (c) => `<tr>
+            <td>${esc(c.name)}</td>
+            <td>${esc(c.kind)}</td>
+            <td class="mono">${esc(c.url)}</td>
+            <td><span class="badge ${c.enabled ? "on" : "off"}">${c.enabled ? "启用" : "停用"}</span></td>
+            <td class="actions">
+              <button data-test="${c.id}">测试</button>
+              <button data-edit="${c.id}">编辑</button>
+              <button class="danger" data-del="${c.id}">删除</button>
+            </td></tr>`
+            )
+            .join("")}</tbody></table>`
+        : `<div class="empty">还没有通知渠道。支持 webhook / http / dingtalk / wecom / feishu / slack / telegram。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-test]").forEach((b) => {
+      b.onclick = () => testChannel(b.dataset.test, b);
+    });
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editChannel(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该渠道？")) return;
+        await api(`/api/channels/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+  },
+
+  async notifies(root) {
+    const f = state.notifyFilters || { channel_id: "", success: "", q: "" };
+    setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
+
+    const load = async () => {
+      const channel_id =
+        root.querySelector("#nf-channel")?.value ?? state.notifyFilters?.channel_id ?? "";
+      const success =
+        root.querySelector("#nf-success")?.value ?? state.notifyFilters?.success ?? "";
+      const q = (root.querySelector("#nf-q")?.value ?? state.notifyFilters?.q ?? "").trim();
+      state.notifyFilters = { channel_id, success, q };
+
+      const params = new URLSearchParams();
+      if (channel_id) params.set("channel_id", channel_id);
+      if (success) params.set("success", success);
+      if (q) params.set("q", q);
+      params.set("limit", "200");
+
+      const [rows, chs] = await Promise.all([
+        api("/api/notifies?" + params.toString()),
+        api("/api/channels").catch(() => state.cache.channels || []),
+      ]);
+      state.cache.channels = chs;
+
+      const preview = (body) => {
+        const s = String(body || "").replace(/\s+/g, " ").trim();
+        if (!s) return "—";
+        return s.length > 72 ? s.slice(0, 72) + "…" : s;
+      };
+      const edgeLabel = (t, err) => {
+        if (t === "became_firing") return "触发";
+        if (t === "became_resolved") return "恢复";
+        if (err === "test" || String(err || "").startsWith("test")) return "测试";
+        return t || "其他";
+      };
+
+      root.innerHTML = `
+        <div class="panel">
+          <div class="alert-toolbar">
             <div class="alert-filters">
-              <div class="view-switch" role="group" aria-label="列表样式">
-                <button type="button" class="view-btn ${view === "cards" ? "on" : ""}" data-view="cards" title="卡片列表">卡片</button>
-                <button type="button" class="view-btn ${view === "table" ? "on" : ""}" data-view="table" title="表格列表">表格</button>
-              </div>
-              <input id="alert-q" placeholder="搜索名称、描述…" value="${esc(q)}" />
-              <input id="alert-ip" class="alert-ip-input" placeholder="IP / 主机" value="${esc(ip)}" title="按告警 IP / instance / host 筛选" />
-              <select id="alert-sev">
-                <option value="" ${!severity ? "selected" : ""}>全部级别</option>
-                ${severityOptions(severity, "")}
+              <select id="nf-channel">
+                <option value="">全部渠道</option>
+                ${(chs || [])
+                  .map(
+                    (c) =>
+                      `<option value="${esc(c.id)}" ${
+                        channel_id === c.id ? "selected" : ""
+                      }>${esc(c.name)} (${esc(c.kind)})</option>`
+                  )
+                  .join("")}
               </select>
-              <select id="alert-source">
-                <option value="">来源</option>
-                <option value="ingress" ${source === "ingress" ? "selected" : ""}>告警接入</option>
-                <option value="rule" ${source === "rule" ? "selected" : ""}>规则</option>
+              <select id="nf-success">
+                <option value="" ${!success ? "selected" : ""}>全部结果</option>
+                <option value="true" ${success === "true" ? "selected" : ""}>成功</option>
+                <option value="false" ${success === "false" ? "selected" : ""}>失败</option>
               </select>
-              <select id="alert-store" title="列表范围">
-                <option value="" ${!store ? "selected" : ""}>列表·默认</option>
-                <option value="mysql" ${store === "mysql" ? "selected" : ""}>最近事件</option>
-                <option value="es" ${store === "es" ? "selected" : ""}>历史事件</option>
-              </select>
-              <label class="alert-auto" title="定时刷新列表">
-                <span>自动刷新</span>
-                <select id="alert-auto">
-                  <option value="0" ${auto === 0 ? "selected" : ""}>关</option>
-                  <option value="15" ${auto === 15 ? "selected" : ""}>15 秒</option>
-                  <option value="30" ${auto === 30 ? "selected" : ""}>30 秒</option>
-                  <option value="60" ${auto === 60 ? "selected" : ""}>60 秒</option>
-                </select>
-              </label>
+              <input id="nf-q" type="search" placeholder="搜索正文 / 错误 / 告警 ID" value="${esc(
+                q
+              )}" />
             </div>
           </div>
           ${
             rows.length
-              ? view === "table"
-                ? `<div class="panel alert-table-scroll">${alertTableGrid(rows, ingressMap)}</div>`
-                : alertCards(rows, ingressMap)
-              : `<div class="panel empty">
-                  暂无告警。去「告警接入」试推送，或等待规则触发。
-                  <div style="margin-top:12px"><button class="primary" id="go-ingress">去告警接入</button></div>
-                </div>`
+              ? `<table class="data"><thead><tr>
+                  <th>时间</th><th>渠道</th><th>边沿</th><th>结果</th><th>内容摘要</th><th>错误</th><th></th>
+                </tr></thead><tbody>${rows
+                  .map(
+                    (n, i) => `<tr>
+                  <td>${esc(fmtTime(n.created_at))}</td>
+                  <td>${esc(n.channel_name || n.channel_id?.slice?.(0, 8) || "—")}<div class="hint" style="margin:0">${esc(
+                    n.channel_kind || ""
+                  )}</div></td>
+                  <td>${esc(edgeLabel(n.transition, n.error))}</td>
+                  <td><span class="badge ${n.success ? "on" : "firing"}">${
+                    n.success ? "成功" : "失败"
+                  }</span></td>
+                  <td class="mono" title="${esc(n.body || "")}">${esc(preview(n.body))}</td>
+                  <td class="mono">${esc(n.error || "—")}</td>
+                  <td class="actions"><button data-body-idx="${i}">查看内容</button></td>
+                </tr>`
+                  )
+                  .join("")}</tbody></table>`
+              : `<div class="empty">暂无通知记录。告警边沿通知或渠道测试后会出现在这里。</div>`
           }
-          ${alertPagerHtml(page, pages, total, limit)}`;
-
-        root.querySelectorAll(".alert-tab").forEach((tab) => {
-          tab.onclick = () => {
-            state.alertFilters = {
-              ...(state.alertFilters || {}),
-              status: tab.dataset.st || "",
-              page: 1,
-            };
-            load();
-          };
-        });
-        root.querySelectorAll(".view-btn").forEach((btn) => {
-          btn.onclick = () => {
-            setAlertView(btn.dataset.view);
-            load();
-          };
-        });
-        if (view === "table") bindAlertTableGrid(root, rows, ingressMap);
-        else bindAlertCards(root, rows, ingressMap);
-        const go = document.getElementById("go-ingress");
-        if (go) go.onclick = () => navigate("ingress");
-        bindAlertPager(root, () => load());
-
-        let t;
-        const qEl = root.querySelector("#alert-q");
-        qEl.oninput = () => {
-          clearTimeout(t);
-          t = setTimeout(() => {
-            state.alertFilters = {
-              ...(state.alertFilters || {}),
-              q: qEl.value.trim(),
-              page: 1,
-            };
-            load();
-          }, 280);
-        };
-        const ipEl = root.querySelector("#alert-ip");
-        let tip;
-        ipEl.oninput = () => {
-          clearTimeout(tip);
-          tip = setTimeout(() => {
-            state.alertFilters = {
-              ...(state.alertFilters || {}),
-              ip: ipEl.value.trim(),
-              page: 1,
-            };
-            load();
-          }, 280);
-        };
-        root.querySelector("#alert-sev").onchange = (e) => {
-          state.alertFilters = {
-            ...(state.alertFilters || {}),
-            severity: e.target.value,
-            page: 1,
-          };
-          load();
-        };
-        root.querySelector("#alert-source").onchange = (e) => {
-          state.alertFilters = {
-            ...(state.alertFilters || {}),
-            source: e.target.value,
-            page: 1,
-          };
-          load();
-        };
-        root.querySelector("#alert-store").onchange = (e) => {
-          state.alertFilters = {
-            ...(state.alertFilters || {}),
-            store: e.target.value,
-            page: 1,
-          };
-          load();
-        };
-        root.querySelector("#alert-auto").onchange = (e) => {
-          setAlertAutoRefresh(e.target.value);
-          scheduleAlertsAutoRefresh(() => load({ soft: true }));
-        };
-      };
-
-      document.getElementById("btn-refresh").onclick = () => load();
-      state.alertFilters = { ...f, page: Number(f.page) || 1, ip: f.ip || "" };
-      await load();
-      scheduleAlertsAutoRefresh(() => load({ soft: true }));
-    },
-
-    async enrich(root) {
-      const ENRICH_TAB_KEY = "eventide_enrich_tab";
-      const [rows, lookups] = await Promise.all([api("/api/enrich"), api("/api/lookups")]);
-      state.cache.lookups = lookups;
-      let tab = localStorage.getItem(ENRICH_TAB_KEY) || "rules";
-      if (tab !== "rules" && tab !== "lookups") tab = "rules";
-      // first visit with no ledger: nudge to lookups
-      if (!lookups.length && !rows.length && !localStorage.getItem(ENRICH_TAB_KEY)) {
-        tab = "lookups";
-      }
-
-      const lookupName = (id) => {
-        const t = lookups.find((x) => x.id === id);
-        return t ? t.name : id ? id.slice(0, 8) + "…" : "—";
-      };
-      const enrichWhat = (r) => {
-        const parts = [];
-        const ids =
-          r.lookup_table_ids && r.lookup_table_ids.length
-            ? r.lookup_table_ids
-            : r.lookup_table_id
-            ? [r.lookup_table_id]
-            : [];
-        if (ids.length) {
-          parts.push(`查 ${ids.map(lookupName).join("、")}`);
-        }
-        if (r.mappings && Object.keys(r.mappings).length) {
-          parts.push(`内联映射 ${Object.keys(r.mappings).length} 条`);
-        }
-        const ft = r.field_templates || {};
-        const writes = [];
-        if (ft.summary || (r.templates && r.templates.summary)) writes.push("描述");
-        if (ft.ip || ft.alertIp) writes.push("IP");
-        if (ft.severity) writes.push("级别");
-        if (ft.alertname) writes.push("名称");
-        if (writes.length) parts.push(`写${writes.join("/")}`);
-        else if (r.templates && Object.keys(r.templates).length) {
-          parts.push("写注解模板");
-        }
-        return parts.length ? parts.join(" · ") : "未配置动作";
-      };
-      const enrichScope = (r) => {
-        const m = r.matchers || {};
-        const keys = Object.keys(m);
-        if (!keys.length) return "全部告警";
-        return keys.map((k) => `${k}=${m[k]}`).join("，");
-      };
-
-      const setTab = (next) => {
-        localStorage.setItem(ENRICH_TAB_KEY, next);
-        renderPage();
-      };
-
-      const syncActions = () => {
-        if (tab === "lookups") {
-          setActions(`<button class="primary" id="btn-add-lookup">新建台账</button>`);
-          document.getElementById("btn-add-lookup").onclick = () => editLookup();
-        } else {
-          setActions(`<button class="ghost" id="btn-preview">试跑预览</button><button class="primary" id="btn-add">新建丰富规则</button>`);
-          document.getElementById("btn-preview").onclick = () => openEnrichPreviewModal({});
-          document.getElementById("btn-add").onclick = () => {
-            if (!lookups.length) {
-              toast("请先在「台账数据」里准备一张表", true);
-              setTab("lookups");
-              return;
-            }
-            editEnrich();
-          };
-        }
-      };
-      syncActions();
-
-      const rulesPanel = rows.length
-        ? `<table class="data"><thead><tr>
-              <th>名称</th><th>做什么</th><th>作用范围</th><th>状态</th><th></th>
-            </tr></thead>
-            <tbody>${rows
-              .map((r) => `<tr>
-              <td>${esc(r.name)}</td>
-              <td>${esc(enrichWhat(r))}</td>
-              <td>${esc(enrichScope(r))}</td>
-              <td><span class="badge ${r.enabled ? "on" : "off"}">${
-                r.enabled ? "启用" : "停用"
-              }</span></td>
-              <td class="actions">
-                <button data-edit="${r.id}">编辑</button>
-                <button class="danger" data-del="${r.id}">删除</button>
-              </td>
-            </tr>`)
-              .join("")}</tbody></table>`
-        : `<div class="enrich-empty">
-            <p><strong>还没有丰富规则</strong></p>
-            <p class="hint">规则会把台账里的主机名、联系人等信息写到告警描述 / IP / 级别上。</p>
-            ${
-              lookups.length
-                ? `<button class="primary" id="btn-empty-rule">新建第一条规则</button>`
-                : `<button class="primary" id="btn-empty-to-lookup">先去准备台账</button>`
-            }
-          </div>`;
-
-      const lookupsPanel = lookups.length
-        ? `<table class="data"><thead><tr>
-              <th>名称</th><th>用哪个标签匹配</th><th>行数</th><th>说明</th><th>状态</th><th></th>
-            </tr></thead>
-            <tbody>${lookups
-              .map(
-                (t) => `<tr>
-              <td>${esc(t.name)}</td>
-              <td class="mono">${esc(t.key_label || "ip")}</td>
-              <td>${Object.keys(t.rows || {}).length}</td>
-              <td>${esc(t.description || "—")}</td>
-              <td><span class="badge ${t.enabled ? "on" : "off"}">${
-                t.enabled ? "启用" : "停用"
-              }</span></td>
-              <td class="actions">
-                <button data-edit-lookup="${t.id}">编辑</button>
-                <button class="danger" data-del-lookup="${t.id}">删除</button>
-              </td>
-            </tr>`
-              )
-              .join("")}</tbody></table>`
-        : `<div class="enrich-empty">
-            <p><strong>还没有台账数据</strong></p>
-            <p class="hint">台账像一张对照表：用告警里的 IP（或其它标签）查出主机名、机房、联系人等，再写回告警。</p>
-            <button class="primary" id="btn-empty-lookup">新建台账</button>
-          </div>`;
-
-      root.innerHTML = `
-        <div class="enrich-guide panel">
-          <div class="enrich-guide-steps">
-            <div class="enrich-guide-step"><span class="n">1</span><div><strong>准备台账</strong><p>导入主机 / 设备对照表</p></div></div>
-            <div class="enrich-guide-step"><span class="n">2</span><div><strong>建丰富规则</strong><p>勾选要用的台账</p></div></div>
-            <div class="enrich-guide-step"><span class="n">3</span><div><strong>写到告警上</strong><p>配置描述、IP、级别；保存前可弹窗试跑</p></div></div>
-          </div>
-          ${
-            !lookups.length
-              ? `<button class="primary" id="btn-guide-start">从台账开始</button>`
-              : `<button class="primary" id="btn-guide-rule">新建丰富规则</button>`
-          }
-        </div>
-        <div class="enrich-tabs" role="tablist">
-          <button type="button" class="enrich-tab ${
-            tab === "rules" ? "on" : ""
-          }" data-tab="rules" role="tab">丰富规则${
-            rows.length ? ` · ${rows.length}` : ""
-          }</button>
-          <button type="button" class="enrich-tab ${
-            tab === "lookups" ? "on" : ""
-          }" data-tab="lookups" role="tab">台账数据${
-            lookups.length ? ` · ${lookups.length}` : ""
-          }</button>
-        </div>
-        <div class="panel enrich-tab-panel">
-          ${tab === "rules" ? rulesPanel : lookupsPanel}
         </div>`;
 
-      root.querySelectorAll(".enrich-tab").forEach((btn) => {
-        btn.onclick = () => setTab(btn.dataset.tab);
+      root.querySelector("#nf-channel").onchange = () => load();
+      root.querySelector("#nf-success").onchange = () => load();
+      const qEl = root.querySelector("#nf-q");
+      let t;
+      qEl.oninput = () => {
+        clearTimeout(t);
+        t = setTimeout(() => load(), 280);
+      };
+      root.querySelectorAll("[data-body-idx]").forEach((b) => {
+        b.onclick = () => showNotifyLogDetail(rows[Number(b.dataset.bodyIdx)]);
       });
-      const guideStart = document.getElementById("btn-guide-start");
-      if (guideStart) guideStart.onclick = () => setTab("lookups");
-      const guideRule = document.getElementById("btn-guide-rule");
-      if (guideRule) guideRule.onclick = () => editEnrich();
-      const emptyRule = document.getElementById("btn-empty-rule");
-      if (emptyRule) emptyRule.onclick = () => editEnrich();
-      const emptyToLookup = document.getElementById("btn-empty-to-lookup");
-      if (emptyToLookup) emptyToLookup.onclick = () => setTab("lookups");
-      const emptyLookup = document.getElementById("btn-empty-lookup");
-      if (emptyLookup) emptyLookup.onclick = () => editLookup();
+    };
 
-      const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
-      const lookupById = Object.fromEntries(lookups.map((t) => [t.id, t]));
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editEnrich(byId[b.dataset.edit]);
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该丰富规则？")) return;
-          await api(`/api/enrich/${b.dataset.del}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-      root.querySelectorAll("[data-edit-lookup]").forEach((b) => {
-        b.onclick = () => editLookup(lookupById[b.dataset.editLookup]);
-      });
-      root.querySelectorAll("[data-del-lookup]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该台账？引用它的丰富规则将失效。")) return;
-          await api(`/api/lookups/${b.dataset.delLookup}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-    },
+    document.getElementById("btn-refresh").onclick = () => load();
+    state.notifyFilters = { ...f };
+    await load();
+  },
 
-    async silences(root) {
-      setActions(`<button class="primary" id="btn-add">新建静默</button>`);
-      document.getElementById("btn-add").onclick = () => editSilence();
-      const rows = await api("/api/silences");
-      const now = Date.now();
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>注释</th><th>规则</th><th>匹配标签</th><th>时间窗</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map((s) => {
-                const active = new Date(s.starts_at) <= now && now < new Date(s.ends_at);
-                return `<tr>
-              <td>${esc(s.comment || "—")}</td>
-              <td class="mono">${s.rule_id ? esc(s.rule_id.slice(0, 8)) + "…" : "全部"}</td>
-              <td class="mono">${esc(JSON.stringify(s.matchers || {}))}</td>
-              <td>${esc(fmtTime(s.starts_at))} → ${esc(fmtTime(s.ends_at))}</td>
-              <td><span class="badge ${active ? "on" : "off"}">${active ? "生效中" : "未生效"}</span></td>
-              <td class="actions"><button class="danger" data-del="${s.id}">删除</button></td>
-            </tr>`;
-              })
-              .join("")}</tbody></table>`
-          : `<div class="empty">暂无静默策略。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该静默？")) return;
-          await api(`/api/silences/${b.dataset.del}`, { method: "DELETE" });
-          toast("已删除");
-          renderPage();
-        };
-      });
-    },
+  async ingress(root) {
+    setActions(`
+      <button class="ghost" id="btn-snmp-sample">SNMP Trap 样例</button>
+      <button class="primary" id="btn-add">新建接入</button>
+    `);
+    document.getElementById("btn-add").onclick = () => editIngress();
+    document.getElementById("btn-snmp-sample").onclick = () => editIngressSnmpTrapSample();
+    const [rows, chs] = await Promise.all([api("/api/ingress"), api("/api/channels")]);
+    state.cache.channels = chs;
+    const chMap = Object.fromEntries(chs.map((c) => [c.id, c]));
+    const origin = location.origin;
 
-    async trap(root) {
-      setActions(`<button class="ghost" id="btn-trap-refresh">刷新</button>`);
-      const canWrite = can("trap:write");
-      const paint = async () => {
-        let health = null;
-        let stats = null;
-        let recent = { items: [] };
-        let cluster = { items: [], redis: false };
-        let err = null;
-        try {
-          health = await api("/trap-api/api/health");
-          stats = await api("/trap-api/api/stats");
-          recent = await api("/trap-api/api/recent");
-        } catch (e) {
-          err = e.message || String(e);
+    if (!rows.length) {
+      root.innerHTML = `
+        <div class="panel guide">
+          <h3>配置告警接入</h3>
+          <ol class="steps">
+            <li>先在「通知渠道」配置至少一个机器人 / Webhook（可选，也可稍后绑定）</li>
+            <li>Kafka / SNMP Trap：可用「SNMP Trap 样例」一键生成；或先到「工具 → Kafka」确认 Topic</li>
+            <li>创建接入：选择 Alertmanager / Generic（含拨测） / Kafka</li>
+            <li>把外部平台 Webhook 指到下方生成的地址，或使用「试推送」验证</li>
+            <li>在「告警事件」查看 firing / resolved 与通知结果</li>
+          </ol>
+          <button class="primary" id="btn-guide-add">新建第一个接入</button>
+        </div>`;
+      document.getElementById("btn-guide-add").onclick = () => editIngress();
+      return;
+    }
+
+    root.innerHTML = `<div class="ingress-list">${rows
+      .map((r) => {
+        const url =
+          r.kind === "kafka"
+            ? `kafka://${r.endpoint || ""}/${(r.options && r.options.topic) || ""}`
+            : r.kind === "alertmanager"
+            ? `${origin}/api/ingress/${r.id}/alertmanager`
+            : `${origin}/api/ingress/${r.id}/generic`;
+        const pushUrl = `${origin}/api/ingress/${r.id}/push`;
+        const chNames = (r.channel_ids || [])
+          .map((id) => (chMap[id] ? chMap[id].name : id.slice(0, 8)))
+          .join("、") || "未绑定渠道";
+        const kindHint =
+          r.kind === "alertmanager"
+            ? "接收 Prometheus Alertmanager webhook"
+            : r.kind === "kafka"
+            ? "后台消费 Topic 中的告警 JSON"
+            : "通用 JSON / Jeecg 拨测 probe-alert";
+        return `<article class="ingress-card">
+          <div class="ic-head">
+            <div>
+              <div class="ic-title">${esc(r.name)}</div>
+              <div class="ic-sub"><span class="badge ${r.enabled ? "on" : "off"}">${
+                r.enabled ? "启用" : "停用"
+              }</span> <span class="kind-tag">${esc(r.kind)}</span> · ${esc(kindHint)}</div>
+            </div>
+            <div class="actions">
+              <button data-test="${r.id}" ${r.enabled ? "" : "disabled"}>试推送</button>
+              <button data-alerts="${r.id}">查告警</button>
+              <button data-edit="${r.id}">编辑</button>
+              <button class="danger" data-del="${r.id}">删除</button>
+            </div>
+          </div>
+          <div class="ic-body">
+            <div class="field">
+              <label>接入地址</label>
+              <div class="url-row">
+                <code class="mono url-box">${esc(url)}</code>
+                <button data-copy="${esc(url)}">复制</button>
+              </div>
+              ${
+                r.kind !== "kafka"
+                  ? `<div class="hint">也可用自动识别入口：<code class="mono">${esc(
+                      pushUrl
+                    )}</code>
+                  ${
+                    r.token
+                      ? `· 请求头需带 <code>Authorization: Bearer ***</code> 或 <code>X-Eventide-Token</code>`
+                      : "· 未配置 Token，任意来源可推送"
+                  }</div>`
+                  : `<div class="hint">Brokers <code class="mono">${esc(
+                      r.endpoint || "—"
+                    )}</code> · Topic <code class="mono">${esc(
+                      (r.options && r.options.topic) || "—"
+                    )}</code> · 起始 ${(r.options && r.options.start) || "latest"}</div>`
+              }
+            </div>
+            <div class="field" style="margin:0">
+              <label>通知渠道</label>
+              <div>${esc(chNames)}</div>
+            </div>
+          </div>
+        </article>`;
+      })
+      .join("")}</div>`;
+
+    root.querySelectorAll("[data-copy]").forEach((b) => {
+      b.onclick = async () => {
+        await navigator.clipboard.writeText(b.dataset.copy);
+        toast("已复制");
+      };
+    });
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editIngress(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该接入？")) return;
+        await api(`/api/ingress/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+    root.querySelectorAll("[data-alerts]").forEach((b) => {
+      b.onclick = () => {
+        state.alertFilters = { source: "ingress", q: "", ip: "", page: 1 };
+        navigate("alerts");
+      };
+    });
+    root.querySelectorAll("[data-test]").forEach((b) => {
+      b.onclick = () => openIngressTest(rows.find((x) => x.id === b.dataset.test));
+    });
+  },
+
+  async kafka(root) {
+    setActions(`<button class="ghost" id="btn-k-refresh">刷新 Topic</button>`);
+    const canWrite = can("ingress:write");
+    let brokers =
+      localStorage.getItem("eventide_kafka_brokers") || "120.26.105.115:9092";
+    let focusTopic =
+      localStorage.getItem("eventide_kafka_topic") || "eventide.snmptrap";
+    try {
+      const routes = await api("/api/ingress");
+      const kr = (routes || []).find((r) => r.kind === "kafka");
+      if (kr?.endpoint) brokers = localStorage.getItem("eventide_kafka_brokers") || kr.endpoint;
+      if (kr?.options?.topic)
+        focusTopic = localStorage.getItem("eventide_kafka_topic") || kr.options.topic;
+    } catch (_) {}
+
+    const persist = () => {
+      const b = String(document.getElementById("k-brokers")?.value || "").trim();
+      const t = String(document.getElementById("k-topic")?.value || "").trim();
+      if (b) localStorage.setItem("eventide_kafka_brokers", b);
+      if (t) localStorage.setItem("eventide_kafka_topic", t);
+    };
+
+    const renderShell = (statusHtml, topicsHtml, detailHtml) => {
+      root.innerHTML = `
+        <div class="panel" style="margin-bottom:16px">
+          <h3 style="margin:0 0 0.5rem;font-size:1rem">集群连接</h3>
+          <p class="hint" style="margin:0 0 12px">轻量 Kafka 管理：Topic、消费组积压、浏览消息、试写、创建/删除。</p>
+          <div class="row">
+            <div class="field" style="flex:2">
+              <label>Brokers</label>
+              <input id="k-brokers" value="${esc(brokers)}" placeholder="host:9092" />
+            </div>
+            <div class="field" style="flex:1">
+              <label>默认 Topic</label>
+              <input id="k-topic" value="${esc(focusTopic)}" placeholder="eventide.snmptrap" />
+            </div>
+          </div>
+          <div class="actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <button class="primary" type="button" id="k-connect">连接并列出 Topic</button>
+            <button type="button" id="k-groups">列出消费组</button>
+            ${
+              canWrite
+                ? `<button type="button" id="k-create">创建 Topic</button>`
+                : ""
+            }
+          </div>
+          <div id="k-status" style="margin-top:12px">${statusHtml || ""}</div>
+        </div>
+        <div class="kafka-split">
+          <div class="kafka-side">
+            <div class="panel kafka-topics">
+              <h3 style="margin:0 0 0.75rem;font-size:1rem">Topics</h3>
+              <div id="k-topics">${topicsHtml || `<p class="hint">点击「连接并列出 Topic」</p>`}</div>
+            </div>
+            <div class="panel kafka-groups">
+              <div class="kafka-groups-head">
+                <h3 style="margin:0;font-size:1rem">Consumer Groups</h3>
+                <button type="button" class="ghost" id="k-groups-side" style="height:auto;min-height:0;padding:4px 10px">列出</button>
+              </div>
+              <div id="k-groups-panel"><p class="hint" style="margin:8px 0 0">点击上方「列出消费组」或本栏「列出」</p></div>
+            </div>
+          </div>
+          <div class="panel kafka-detail">
+            <h3 style="margin:0 0 0.75rem;font-size:1rem">详情 / 消息</h3>
+            <div id="k-detail">${detailHtml || `<p class="hint">选择左侧 Topic，或查看消费组积压</p>`}</div>
+          </div>
+        </div>`;
+    };
+
+    const loadTopics = async (quiet = false) => {
+      persist();
+      brokers = String(document.getElementById("k-brokers").value || "").trim();
+      focusTopic = String(document.getElementById("k-topic").value || "").trim();
+      if (!brokers) {
+        toast("请填写 Brokers", true);
+        return;
+      }
+      document.getElementById("k-status").innerHTML = "连接中…";
+      try {
+        const data = await api("/api/ingress/kafka/probe", {
+          method: "POST",
+          body: JSON.stringify({ brokers, topic: focusTopic }),
+        });
+        const topics = data.topics || [];
+        document.getElementById("k-status").innerHTML = `
+          <span class="badge on">已连接</span>
+          延迟 ${esc(data.latency_ms)} ms · Topic ${esc(data.topic_count)}
+          ${
+            focusTopic
+              ? data.topic_found
+                ? `· <code>${esc(focusTopic)}</code> ${esc(data.partitions)} 分区`
+                : `· <span class="badge off">${esc(focusTopic)} 不存在</span>`
+              : ""
+          }`;
+        document.getElementById("k-topics").innerHTML = topics.length
+          ? `<table class="map-help-table" style="width:100%">
+              <thead><tr><th>名称</th><th>分区</th><th></th></tr></thead>
+              <tbody>
+              ${topics
+                .map(
+                  (t) => `<tr>
+                    <td><code>${esc(t.name)}</code></td>
+                    <td>${esc(t.partitions)}</td>
+                    <td style="white-space:nowrap">
+                      <button type="button" data-open="${esc(t.name)}" data-parts="${esc(
+                    t.partitions
+                  )}">打开</button>
+                      ${
+                        canWrite
+                          ? `<button type="button" class="danger" data-del-topic="${esc(
+                              t.name
+                            )}">删除</button>`
+                          : ""
+                      }
+                    </td>
+                  </tr>`
+                )
+                .join("")}
+              </tbody></table>`
+          : `<p class="hint">暂无 Topic</p>`;
+        bindTopicActions();
+        if (!quiet) toast("已连接");
+        if (focusTopic && data.topic_found) {
+          openTopic(focusTopic, data.partitions || 1);
         }
-        try {
-          cluster = await api("/api/trap/instances");
-        } catch (_) {}
+      } catch (e) {
+        document.getElementById("k-status").innerHTML = `<span class="badge off">失败</span> ${esc(
+          e.message || e
+        )}`;
+        if (!quiet) toast(e.message || String(e), true);
+      }
+    };
 
-        if (err) {
-          root.innerHTML = `
-            <div class="panel" style="max-width:720px">
-              <h3 style="margin:0 0 0.75rem;font-size:1rem">Trap 服务未连通</h3>
-              <p class="hint">${esc(err)}</p>
-              <p class="hint" style="margin-top:12px">
-                1. 启动 Trap：<code>cargo run -p eventide-trap -- eventide-trap.toml</code><br/>
-                2. 在 <code>eventide.toml</code> 配置 <code>[trap] api_url = "http://127.0.0.1:8081"</code><br/>
-                3. Eventide 侧配置 Kafka Ingress，Topic 与 Trap 写出一致（默认 <code>eventide.snmptrap</code>）
-              </p>
-            </div>`;
+    const openTopic = async (name, partsHint) => {
+      persist();
+      brokers = String(document.getElementById("k-brokers").value || "").trim();
+      focusTopic = name;
+      localStorage.setItem("eventide_kafka_topic", name);
+      const topicInput = document.getElementById("k-topic");
+      if (topicInput) topicInput.value = name;
+      const detail = document.getElementById("k-detail");
+      detail.innerHTML = `<p class="hint">加载 <code>${esc(name)}</code> …</p>`;
+      try {
+        const desc = await api("/api/ingress/kafka/describe", {
+          method: "POST",
+          body: JSON.stringify({ brokers, topic: name }),
+        });
+        const parts = desc.partitions || [];
+        const partOpts = parts
+          .map((p) => `<option value="${p.partition}">p${p.partition}</option>`)
+          .join("");
+        detail.innerHTML = `
+          <div class="field"><label>Topic</label><div><code>${esc(name)}</code> · ${
+            parts.length || partsHint || "?"
+          } 分区</div></div>
+          <table class="map-help-table" style="width:100%;margin-bottom:12px">
+            <thead><tr><th>分区</th><th>earliest</th><th>latest</th><th>消息约数</th></tr></thead>
+            <tbody>
+              ${parts
+                .map(
+                  (p) => `<tr>
+                    <td>${esc(p.partition)}</td>
+                    <td class="mono">${esc(p.earliest)}</td>
+                    <td class="mono">${esc(p.latest)}</td>
+                    <td>${esc(p.lag_approx)}</td>
+                  </tr>`
+                )
+                .join("")}
+            </tbody>
+          </table>
+          <div class="seg" style="margin-bottom:12px">
+            <div class="seg-title">浏览消息</div>
+            <div class="row">
+              <div class="field"><label>分区</label><select id="kb-part">${partOpts ||
+                '<option value="0">0</option>'}</select></div>
+              <div class="field"><label>起点</label>
+                <select id="kb-from">
+                  <option value="latest">latest 最近</option>
+                  <option value="earliest">earliest</option>
+                  <option value="offset">指定 offset</option>
+                </select>
+              </div>
+              <div class="field"><label>条数</label><input id="kb-max" type="number" min="1" max="200" value="20" /></div>
+              <div class="field"><label>offset</label><input id="kb-offset" type="number" placeholder="从 earliest 起" /></div>
+            </div>
+            <button type="button" class="primary" id="kb-load">加载消息</button>
+            <div id="kb-msgs" style="margin-top:10px"></div>
+          </div>
+          ${
+            canWrite
+              ? `<div class="seg">
+            <div class="seg-title">试写一条消息</div>
+            <div class="row">
+              <div class="field"><label>分区</label><select id="kp-part">${partOpts ||
+                '<option value="0">0</option>'}</select></div>
+              <div class="field" style="flex:1"><label>Key（可选）</label><input id="kp-key" placeholder="peer IP 等" /></div>
+            </div>
+            <div class="field"><label>Value（JSON 文本）</label>
+              <textarea id="kp-value" rows="5" placeholder='{"status":"firing","labels":{"alertname":"test"}}'></textarea>
+            </div>
+            <button type="button" id="kp-send">发送</button>
+          </div>`
+              : `<p class="hint">需要 <code>ingress:write</code> 才能试写 / 删 Topic。</p>`
+          }`;
+
+        document.getElementById("kb-load").onclick = async () => {
+          const partition = Number(document.getElementById("kb-part").value || 0);
+          const from = document.getElementById("kb-from").value;
+          const max = Number(document.getElementById("kb-max").value || 20);
+          const offsetRaw = document.getElementById("kb-offset").value;
+          const body = { brokers, topic: name, partition, max, from };
+          if (from === "offset" && offsetRaw !== "") body.offset = Number(offsetRaw);
+          const box = document.getElementById("kb-msgs");
+          box.innerHTML = "加载中…";
+          try {
+            const data = await api("/api/ingress/kafka/messages", {
+              method: "POST",
+              body: JSON.stringify(body),
+            });
+            const msgs = data.messages || [];
+            box.innerHTML = msgs.length
+              ? `<p class="hint">earliest=${esc(data.earliest)} latest=${esc(
+                  data.latest
+                )} · ${msgs.length} 条</p>
+                ${msgs
+                  .map(
+                    (m) => `<details style="margin:8px 0;border-top:1px solid var(--border, #333);padding-top:8px">
+                      <summary class="mono" style="cursor:pointer">
+                        p${esc(m.partition)} @ ${esc(m.offset)} · ${esc(m.timestamp)}
+                        · ${esc(m.value_bytes)}B
+                        ${m.key ? ` · key=${esc(m.key)}` : ""}
+                      </summary>
+                      <pre class="mono" style="white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:240px;overflow:auto">${esc(
+                        m.value
+                      )}</pre>
+                    </details>`
+                  )
+                  .join("")}`
+              : `<p class="hint">该分区暂无消息（earliest=${esc(data.earliest)} latest=${esc(
+                  data.latest
+                )}）</p>`;
+          } catch (e) {
+            box.innerHTML = `<span class="badge off">失败</span> ${esc(e.message || e)}`;
+          }
+        };
+
+        const sendBtn = document.getElementById("kp-send");
+        if (sendBtn) {
+          sendBtn.onclick = async () => {
+            const partition = Number(document.getElementById("kp-part").value || 0);
+            const key = String(document.getElementById("kp-key").value || "").trim();
+            const value = String(document.getElementById("kp-value").value || "");
+            if (!value) {
+              toast("请填写 Value", true);
+              return;
+            }
+            try {
+              await api("/api/ingress/kafka/produce", {
+                method: "POST",
+                body: JSON.stringify({
+                  brokers,
+                  topic: name,
+                  partition,
+                  key: key || null,
+                  value,
+                }),
+              });
+              toast("已发送");
+              document.getElementById("kb-load").click();
+            } catch (e) {
+              toast(e.message || String(e), true);
+            }
+          };
+        }
+      } catch (e) {
+        detail.innerHTML = `<span class="badge off">失败</span> ${esc(e.message || e)}`;
+      }
+    };
+
+    const bindTopicActions = () => {
+      root.querySelectorAll("[data-open]").forEach((b) => {
+        b.onclick = () => openTopic(b.dataset.open, Number(b.dataset.parts || 1));
+      });
+      root.querySelectorAll("[data-del-topic]").forEach((b) => {
+        b.onclick = async () => {
+          const name = b.dataset.delTopic;
+          if (!confirm(`确认删除 Topic「${name}」？此操作不可恢复。`)) return;
+          persist();
+          brokers = String(document.getElementById("k-brokers").value || "").trim();
+          try {
+            await api("/api/ingress/kafka/topics/delete", {
+              method: "POST",
+              body: JSON.stringify({ brokers, topic: name }),
+            });
+            toast("已删除");
+            document.getElementById("k-detail").innerHTML = `<p class="hint">Topic 已删除</p>`;
+            await loadTopics(true);
+          } catch (e) {
+            toast(e.message || String(e), true);
+          }
+        };
+      });
+    };
+
+    const openGroup = async (groupId) => {
+      persist();
+      brokers = String(document.getElementById("k-brokers").value || "").trim();
+      focusTopic = String(document.getElementById("k-topic").value || "").trim();
+      const detail = document.getElementById("k-detail");
+      if (!detail) return;
+      detail.innerHTML = `<p class="hint">加载消费组 <code>${esc(groupId)}</code> …</p>`;
+      try {
+        const data = await api("/api/ingress/kafka/groups/describe", {
+          method: "POST",
+          body: JSON.stringify({
+            brokers,
+            group_id: groupId,
+            topic: focusTopic || undefined,
+          }),
+        });
+        const members = data.members || [];
+        const parts = data.partitions || [];
+        detail.innerHTML = `
+          <div class="kafka-group-detail">
+            <div class="kafka-group-meta">
+              <div>
+                <div class="hint">消费组</div>
+                <code class="kafka-gid-full">${esc(data.group_id)}</code>
+              </div>
+              <div>
+                <div class="hint">状态</div>
+                <div>${esc(data.state || "—")}</div>
+              </div>
+              <div>
+                <div class="hint">协议</div>
+                <div>${esc(data.protocol_type || "—")} / ${esc(data.protocol || "—")}</div>
+              </div>
+              <div>
+                <div class="hint">总积压 lag</div>
+                <div class="kafka-lag-n">${esc(data.total_lag ?? 0)}</div>
+              </div>
+            </div>
+            <div class="seg-title" style="margin:14px 0 6px">成员 (${members.length})</div>
+            ${
+              members.length
+                ? `<div class="alert-table-scroll"><table class="data kafka-lag-table">
+                    <thead><tr><th>member_id</th><th>client_id</th><th>host</th></tr></thead>
+                    <tbody>${members
+                      .map(
+                        (m) => `<tr>
+                          <td class="mono" title="${esc(m.member_id)}">${esc(m.member_id)}</td>
+                          <td>${esc(m.client_id)}</td>
+                          <td>${esc(m.client_host)}</td>
+                        </tr>`
+                      )
+                      .join("")}</tbody></table></div>`
+                : `<p class="hint">无活跃成员（Empty / Dead 或尚未加入）</p>`
+            }
+            <div class="seg-title" style="margin:14px 0 6px">分区位点 / 积压${
+              focusTopic ? ` · 过滤 <code>${esc(focusTopic)}</code>` : ""
+            }</div>
+            ${
+              parts.length
+                ? `<div class="alert-table-scroll"><table class="data kafka-lag-table">
+                    <thead><tr><th>Topic</th><th>分区</th><th>已提交</th><th>latest</th><th>lag</th></tr></thead>
+                    <tbody>${parts
+                      .map(
+                        (p) => `<tr>
+                          <td><code title="${esc(p.topic)}">${esc(p.topic)}</code></td>
+                          <td>${esc(p.partition)}</td>
+                          <td class="mono">${esc(p.committed)}</td>
+                          <td class="mono">${esc(p.latest)}</td>
+                          <td><strong>${esc(p.lag)}</strong></td>
+                        </tr>`
+                      )
+                      .join("")}</tbody></table></div>
+                    <p class="hint" style="margin-top:8px">lag = max(0, latest − committed)；committed=-1 表示尚未提交，按 latest 计积压。</p>`
+                : `<p class="hint">该组暂无已提交位点${
+                    focusTopic ? "（或与当前 Topic 无关）" : ""
+                  }</p>`
+            }
+            <div class="actions" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+              <button type="button" id="k-groups-refresh-one">刷新此组</button>
+            </div>
+          </div>`;
+        document.getElementById("k-groups-refresh-one").onclick = () => openGroup(groupId);
+      } catch (e) {
+        detail.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
+          e.message || e
+        )}</p>`;
+        toast(e.message || String(e), true);
+      }
+    };
+
+    const loadGroups = async (quiet = false) => {
+      persist();
+      brokers = String(document.getElementById("k-brokers").value || "").trim();
+      if (!brokers) {
+        toast("请填写 Brokers", true);
+        return;
+      }
+      const panel = document.getElementById("k-groups-panel");
+      if (!panel) return;
+      panel.innerHTML = `<p class="hint">加载消费组…</p>`;
+      try {
+        const data = await api("/api/ingress/kafka/groups", {
+          method: "POST",
+          body: JSON.stringify({ brokers }),
+        });
+        const groups = data.groups || [];
+        panel.innerHTML = groups.length
+          ? `<ul class="kafka-group-list">${groups
+              .map(
+                (g) => `<li>
+                  <div class="kafka-group-item">
+                    <code class="kafka-gid" title="${esc(g.group_id)}">${esc(g.group_id)}</code>
+                    <span class="hint">${esc(g.protocol_type || "consumer")}</span>
+                    <button type="button" class="ghost kafka-gid-btn" data-group="${esc(
+                      g.group_id
+                    )}">积压</button>
+                  </div>
+                </li>`
+              )
+              .join("")}</ul>
+            <p class="hint" style="margin-top:8px">积压按「默认 Topic」过滤；清空 Topic 可看全部。</p>`
+          : `<p class="hint">未发现消费组</p>`;
+        panel.querySelectorAll("[data-group]").forEach((b) => {
+          b.onclick = () => openGroup(b.dataset.group);
+        });
+        if (!quiet) toast(`消费组 ${groups.length} 个`);
+      } catch (e) {
+        panel.innerHTML = `<p class="hint"><span class="badge off">失败</span> ${esc(
+          e.message || e
+        )}</p>`;
+        if (!quiet) toast(e.message || String(e), true);
+      }
+    };
+
+    renderShell("", "", "");
+    document.getElementById("btn-k-refresh").onclick = () => loadTopics(false);
+    document.getElementById("k-connect").onclick = () => loadTopics(false);
+    const bindGroupsBtn = (id) => {
+      const el = document.getElementById(id);
+      if (el) el.onclick = () => loadGroups(false);
+    };
+    bindGroupsBtn("k-groups");
+    bindGroupsBtn("k-groups-side");
+    const createBtn = document.getElementById("k-create");
+    if (createBtn) {
+      createBtn.onclick = async () => {
+        persist();
+        brokers = String(document.getElementById("k-brokers").value || "").trim();
+        focusTopic = String(document.getElementById("k-topic").value || "").trim();
+        const partitions = Number(
+          prompt("分区数", "6") || "0"
+        );
+        if (!brokers || !focusTopic || partitions <= 0) {
+          toast("需要 Brokers、Topic 与有效分区数", true);
           return;
         }
-
-        const items = recent.items || [];
-        const peers = cluster.items || [];
-        const recv = Number(stats.received ?? 0);
-        const parseErr = Number(stats.parse_err ?? 0);
-        const errRate =
-          recv > 0 ? ((parseErr / recv) * 100).toFixed(1) : "0.0";
-
-        // Kafka lag for snmptrap ingress (best-effort)
-        let lagHtml = `<p class="hint">加载积压…</p>`;
-        let lagBlockId = "trap-lag-panel";
+        if (!confirm(`创建 Topic「${focusTopic}」· ${partitions} 分区 · rf=1？`)) return;
         try {
-          const routes = await api("/api/ingress").catch(() => []);
-          const trapRoute = (routes || []).find((r) => {
-            if (r.kind !== "kafka") return false;
-            const opt = r.options || {};
-            const topic = String(opt.topic || "");
-            const preset = String(opt._preset || "");
-            return (
-              preset === "snmptrap" ||
-              topic === "eventide.snmptrap" ||
-              topic === (health.kafka_topic || "")
-            );
+          const data = await api("/api/ingress/kafka/topics", {
+            method: "POST",
+            body: JSON.stringify({
+              brokers,
+              topic: focusTopic,
+              partitions,
+              replication_factor: 1,
+            }),
           });
-          if (!trapRoute) {
-            lagHtml = `<p class="hint">未找到 SNMP Trap 的 Kafka Ingress。请在「告警接入」配置 Topic（默认 <code>eventide.snmptrap</code>）。</p>`;
+          toast(data.created ? "已创建" : "已存在");
+          await loadTopics(true);
+        } catch (e) {
+          toast(e.message || String(e), true);
+        }
+      };
+    }
+    // auto connect once
+    loadTopics(true);
+  },
+
+  async alerts(root) {
+    return alertsMod.renderAlerts(root);
+  },
+
+  async enrich(root) {
+    const ENRICH_TAB_KEY = "eventide_enrich_tab";
+    const [rows, lookups] = await Promise.all([api("/api/enrich"), api("/api/lookups")]);
+    state.cache.lookups = lookups;
+    let tab = localStorage.getItem(ENRICH_TAB_KEY) || "rules";
+    if (tab !== "rules" && tab !== "lookups") tab = "rules";
+    // first visit with no ledger: nudge to lookups
+    if (!lookups.length && !rows.length && !localStorage.getItem(ENRICH_TAB_KEY)) {
+      tab = "lookups";
+    }
+
+    const lookupName = (id) => {
+      const t = lookups.find((x) => x.id === id);
+      return t ? t.name : id ? id.slice(0, 8) + "…" : "—";
+    };
+    const enrichWhat = (r) => {
+      const parts = [];
+      const ids =
+        r.lookup_table_ids && r.lookup_table_ids.length
+          ? r.lookup_table_ids
+          : r.lookup_table_id
+          ? [r.lookup_table_id]
+          : [];
+      if (ids.length) {
+        parts.push(`查 ${ids.map(lookupName).join("、")}`);
+      }
+      if (r.mappings && Object.keys(r.mappings).length) {
+        parts.push(`内联映射 ${Object.keys(r.mappings).length} 条`);
+      }
+      const ft = r.field_templates || {};
+      const writes = [];
+      if (ft.summary || (r.templates && r.templates.summary)) writes.push("描述");
+      if (ft.ip || ft.alertIp) writes.push("IP");
+      if (ft.severity) writes.push("级别");
+      if (ft.alertname) writes.push("名称");
+      if (writes.length) parts.push(`写${writes.join("/")}`);
+      else if (r.templates && Object.keys(r.templates).length) {
+        parts.push("写注解模板");
+      }
+      return parts.length ? parts.join(" · ") : "未配置动作";
+    };
+    const enrichScope = (r) => {
+      const m = r.matchers || {};
+      const keys = Object.keys(m);
+      if (!keys.length) return "全部告警";
+      return keys.map((k) => `${k}=${m[k]}`).join("，");
+    };
+
+    const setTab = (next) => {
+      localStorage.setItem(ENRICH_TAB_KEY, next);
+      renderPage();
+    };
+
+    const syncActions = () => {
+      if (tab === "lookups") {
+        setActions(`<button class="primary" id="btn-add-lookup">新建台账</button>`);
+        document.getElementById("btn-add-lookup").onclick = () => editLookup();
+      } else {
+        setActions(`<button class="ghost" id="btn-preview">试跑预览</button><button class="primary" id="btn-add">新建丰富规则</button>`);
+        document.getElementById("btn-preview").onclick = () => openEnrichPreviewModal({});
+        document.getElementById("btn-add").onclick = () => {
+          if (!lookups.length) {
+            toast("请先在「台账数据」里准备一张表", true);
+            setTab("lookups");
+            return;
+          }
+          editEnrich();
+        };
+      }
+    };
+    syncActions();
+
+    const rulesPanel = rows.length
+      ? `<table class="data"><thead><tr>
+            <th>名称</th><th>做什么</th><th>作用范围</th><th>状态</th><th></th>
+          </tr></thead>
+          <tbody>${rows
+            .map((r) => `<tr>
+            <td>${esc(r.name)}</td>
+            <td>${esc(enrichWhat(r))}</td>
+            <td>${esc(enrichScope(r))}</td>
+            <td><span class="badge ${r.enabled ? "on" : "off"}">${
+              r.enabled ? "启用" : "停用"
+            }</span></td>
+            <td class="actions">
+              <button data-edit="${r.id}">编辑</button>
+              <button class="danger" data-del="${r.id}">删除</button>
+            </td>
+          </tr>`)
+            .join("")}</tbody></table>`
+      : `<div class="enrich-empty">
+          <p><strong>还没有丰富规则</strong></p>
+          <p class="hint">规则会把台账里的主机名、联系人等信息写到告警描述 / IP / 级别上。</p>
+          ${
+            lookups.length
+              ? `<button class="primary" id="btn-empty-rule">新建第一条规则</button>`
+              : `<button class="primary" id="btn-empty-to-lookup">先去准备台账</button>`
+          }
+        </div>`;
+
+    const lookupsPanel = lookups.length
+      ? `<table class="data"><thead><tr>
+            <th>名称</th><th>用哪个标签匹配</th><th>行数</th><th>说明</th><th>状态</th><th></th>
+          </tr></thead>
+          <tbody>${lookups
+            .map(
+              (t) => `<tr>
+            <td>${esc(t.name)}</td>
+            <td class="mono">${esc(t.key_label || "ip")}</td>
+            <td>${Object.keys(t.rows || {}).length}</td>
+            <td>${esc(t.description || "—")}</td>
+            <td><span class="badge ${t.enabled ? "on" : "off"}">${
+              t.enabled ? "启用" : "停用"
+            }</span></td>
+            <td class="actions">
+              <button data-edit-lookup="${t.id}">编辑</button>
+              <button class="danger" data-del-lookup="${t.id}">删除</button>
+            </td>
+          </tr>`
+            )
+            .join("")}</tbody></table>`
+      : `<div class="enrich-empty">
+          <p><strong>还没有台账数据</strong></p>
+          <p class="hint">台账像一张对照表：用告警里的 IP（或其它标签）查出主机名、机房、联系人等，再写回告警。</p>
+          <button class="primary" id="btn-empty-lookup">新建台账</button>
+        </div>`;
+
+    root.innerHTML = `
+      <div class="enrich-guide panel">
+        <div class="enrich-guide-steps">
+          <div class="enrich-guide-step"><span class="n">1</span><div><strong>准备台账</strong><p>导入主机 / 设备对照表</p></div></div>
+          <div class="enrich-guide-step"><span class="n">2</span><div><strong>建丰富规则</strong><p>勾选要用的台账</p></div></div>
+          <div class="enrich-guide-step"><span class="n">3</span><div><strong>写到告警上</strong><p>配置描述、IP、级别；保存前可弹窗试跑</p></div></div>
+        </div>
+        ${
+          !lookups.length
+            ? `<button class="primary" id="btn-guide-start">从台账开始</button>`
+            : `<button class="primary" id="btn-guide-rule">新建丰富规则</button>`
+        }
+      </div>
+      <div class="enrich-tabs" role="tablist">
+        <button type="button" class="enrich-tab ${
+          tab === "rules" ? "on" : ""
+        }" data-tab="rules" role="tab">丰富规则${
+          rows.length ? ` · ${rows.length}` : ""
+        }</button>
+        <button type="button" class="enrich-tab ${
+          tab === "lookups" ? "on" : ""
+        }" data-tab="lookups" role="tab">台账数据${
+          lookups.length ? ` · ${lookups.length}` : ""
+        }</button>
+      </div>
+      <div class="panel enrich-tab-panel">
+        ${tab === "rules" ? rulesPanel : lookupsPanel}
+      </div>`;
+
+    root.querySelectorAll(".enrich-tab").forEach((btn) => {
+      btn.onclick = () => setTab(btn.dataset.tab);
+    });
+    const guideStart = document.getElementById("btn-guide-start");
+    if (guideStart) guideStart.onclick = () => setTab("lookups");
+    const guideRule = document.getElementById("btn-guide-rule");
+    if (guideRule) guideRule.onclick = () => editEnrich();
+    const emptyRule = document.getElementById("btn-empty-rule");
+    if (emptyRule) emptyRule.onclick = () => editEnrich();
+    const emptyToLookup = document.getElementById("btn-empty-to-lookup");
+    if (emptyToLookup) emptyToLookup.onclick = () => setTab("lookups");
+    const emptyLookup = document.getElementById("btn-empty-lookup");
+    if (emptyLookup) emptyLookup.onclick = () => editLookup();
+
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    const lookupById = Object.fromEntries(lookups.map((t) => [t.id, t]));
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editEnrich(byId[b.dataset.edit]);
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该丰富规则？")) return;
+        await api(`/api/enrich/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+    root.querySelectorAll("[data-edit-lookup]").forEach((b) => {
+      b.onclick = () => editLookup(lookupById[b.dataset.editLookup]);
+    });
+    root.querySelectorAll("[data-del-lookup]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该台账？引用它的丰富规则将失效。")) return;
+        await api(`/api/lookups/${b.dataset.delLookup}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+  },
+
+  async silences(root) {
+    setActions(`<button class="primary" id="btn-add">新建静默</button>`);
+    document.getElementById("btn-add").onclick = () => editSilence();
+    const rows = await api("/api/silences");
+    const now = Date.now();
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>注释</th><th>规则</th><th>匹配标签</th><th>时间窗</th><th>状态</th><th></th></tr></thead>
+          <tbody>${rows
+            .map((s) => {
+              const active = new Date(s.starts_at) <= now && now < new Date(s.ends_at);
+              return `<tr>
+            <td>${esc(s.comment || "—")}</td>
+            <td class="mono">${s.rule_id ? esc(s.rule_id.slice(0, 8)) + "…" : "全部"}</td>
+            <td class="mono">${esc(JSON.stringify(s.matchers || {}))}</td>
+            <td>${esc(fmtTime(s.starts_at))} → ${esc(fmtTime(s.ends_at))}</td>
+            <td><span class="badge ${active ? "on" : "off"}">${active ? "生效中" : "未生效"}</span></td>
+            <td class="actions"><button class="danger" data-del="${s.id}">删除</button></td>
+          </tr>`;
+            })
+            .join("")}</tbody></table>`
+        : `<div class="empty">暂无静默策略。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该静默？")) return;
+        await api(`/api/silences/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+  },
+
+  async trap(root) {
+    setActions(`<button class="ghost" id="btn-trap-refresh">刷新</button>`);
+    const canWrite = can("trap:write");
+    const paint = async () => {
+      let health = null;
+      let stats = null;
+      let recent = { items: [] };
+      let cluster = { items: [], redis: false };
+      let err = null;
+      try {
+        health = await api("/trap-api/api/health");
+        stats = await api("/trap-api/api/stats");
+        recent = await api("/trap-api/api/recent");
+      } catch (e) {
+        err = e.message || String(e);
+      }
+      try {
+        cluster = await api("/api/trap/instances");
+      } catch (_) {}
+
+      if (err) {
+        root.innerHTML = `
+          <div class="trap-page" style="width:100%;max-width:none">
+            <div class="panel trap-offline" style="width:100%;max-width:none;box-sizing:border-box">
+              <h3>Trap 服务未连通</h3>
+              <p class="hint trap-offline-err">${esc(err)}</p>
+              <ol class="trap-offline-steps">
+                <li>启动 Trap：<code>cargo run -p eventide-trap -- eventide-trap.toml</code></li>
+                <li>在 <code>eventide.toml</code> 配置 <code>[trap] api_url = "http://127.0.0.1:8081"</code></li>
+                <li>Eventide 侧配置 Kafka Ingress，Topic 与 Trap 写出一致（默认 <code>eventide.snmptrap</code>）</li>
+              </ol>
+            </div>
+          </div>`;
+        return;
+      }
+
+      const items = recent.items || [];
+      const peers = cluster.items || [];
+      const recv = Number(stats.received ?? 0);
+      const parseErr = Number(stats.parse_err ?? 0);
+      const errRate =
+        recv > 0 ? ((parseErr / recv) * 100).toFixed(1) : "0.0";
+
+      // Kafka lag for snmptrap ingress (best-effort)
+      let lagHtml = `<p class="hint">加载积压…</p>`;
+      let lagBlockId = "trap-lag-panel";
+      try {
+        const routes = await api("/api/ingress").catch(() => []);
+        const trapRoute = (routes || []).find((r) => {
+          if (r.kind !== "kafka") return false;
+          const opt = r.options || {};
+          const topic = String(opt.topic || "");
+          const preset = String(opt._preset || "");
+          return (
+            preset === "snmptrap" ||
+            topic === "eventide.snmptrap" ||
+            topic === (health.kafka_topic || "")
+          );
+        });
+        if (!trapRoute) {
+          lagHtml = `<p class="hint">未找到 SNMP Trap 的 Kafka Ingress。请在「告警接入」配置 Topic（默认 <code>eventide.snmptrap</code>）。</p>`;
+        } else {
+          const opt = trapRoute.options || {};
+          const brokers = String(trapRoute.endpoint || "").trim();
+          const topic = String(opt.topic || health.kafka_topic || "eventide.snmptrap");
+          const groupId =
+            String(opt.group_id || "").trim() || `eventide-ingress-${trapRoute.id}`;
+          if (!brokers) {
+            lagHtml = `<p class="hint">Ingress「${esc(trapRoute.name)}」未配置 brokers。</p>`;
           } else {
-            const opt = trapRoute.options || {};
-            const brokers = String(trapRoute.endpoint || "").trim();
-            const topic = String(opt.topic || health.kafka_topic || "eventide.snmptrap");
-            const groupId =
-              String(opt.group_id || "").trim() || `eventide-ingress-${trapRoute.id}`;
-            if (!brokers) {
-              lagHtml = `<p class="hint">Ingress「${esc(trapRoute.name)}」未配置 brokers。</p>`;
-            } else {
-              try {
-                const data = await api("/api/ingress/kafka/groups/describe", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    brokers,
-                    group_id: groupId,
-                    topic,
-                  }),
-                });
-                const parts = data.partitions || [];
-                lagHtml = `
-                  <p class="hint" style="margin:0 0 10px">
-                    路由 <code>${esc(trapRoute.name)}</code>
-                    · Group <code>${esc(groupId)}</code>
-                    · Topic <code>${esc(topic)}</code>
-                    · 总积压 <strong>${esc(data.total_lag ?? 0)}</strong>
-                    · 状态 ${esc(data.state || "—")}
-                  </p>
-                  ${
-                    parts.length
-                      ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
-                          <th>分区</th><th>committed</th><th>latest</th><th>lag</th>
-                        </tr></thead><tbody>${parts
-                          .map(
-                            (p) => `<tr>
-                            <td>${esc(p.partition)}</td>
-                            <td class="mono">${esc(p.committed)}</td>
-                            <td class="mono">${esc(p.latest)}</td>
-                            <td><strong>${esc(p.lag)}</strong></td>
-                          </tr>`
-                          )
-                          .join("")}</tbody></table></div>`
-                      : `<p class="hint">无分区位点（消费组可能尚未提交 offset）。</p>`
-                  }`;
-              } catch (e) {
-                lagHtml = `<p class="hint">查询积压失败：${esc(e.message || e)}</p>`;
-              }
+            try {
+              const data = await api("/api/ingress/kafka/groups/describe", {
+                method: "POST",
+                body: JSON.stringify({
+                  brokers,
+                  group_id: groupId,
+                  topic,
+                }),
+              });
+              const parts = data.partitions || [];
+              lagHtml = `
+                <p class="hint" style="margin:0 0 10px">
+                  路由 <code>${esc(trapRoute.name)}</code>
+                  · Group <code>${esc(groupId)}</code>
+                  · Topic <code>${esc(topic)}</code>
+                  · 总积压 <strong>${esc(data.total_lag ?? 0)}</strong>
+                  · 状态 ${esc(data.state || "—")}
+                </p>
+                ${
+                  parts.length
+                    ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
+                        <th>分区</th><th>committed</th><th>latest</th><th>lag</th>
+                      </tr></thead><tbody>${parts
+                        .map(
+                          (p) => `<tr>
+                          <td>${esc(p.partition)}</td>
+                          <td class="mono">${esc(p.committed)}</td>
+                          <td class="mono">${esc(p.latest)}</td>
+                          <td><strong>${esc(p.lag)}</strong></td>
+                        </tr>`
+                        )
+                        .join("")}</tbody></table></div>`
+                    : `<p class="hint">无分区位点（消费组可能尚未提交 offset）。</p>`
+                }`;
+            } catch (e) {
+              lagHtml = `<p class="hint">查询积压失败：${esc(e.message || e)}</p>`;
             }
           }
-        } catch (e) {
-          lagHtml = `<p class="hint">无法加载 Ingress：${esc(e.message || e)}</p>`;
         }
+      } catch (e) {
+        lagHtml = `<p class="hint">无法加载 Ingress：${esc(e.message || e)}</p>`;
+      }
 
-        root.innerHTML = `
-          <div class="panel" style="max-width:960px;margin-bottom:16px">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">服务状态</h3>
-            <p class="hint" style="margin:0 0 12px">
+      root.innerHTML = `
+        <div class="trap-page" style="width:100%;max-width:none">
+          <div class="panel">
+            <h3 class="trap-section-title">服务状态</h3>
+            <p class="hint trap-section-meta">
               <span class="badge on">在线</span>
               实例 <code>${esc(health.instance_id || "—")}</code>
               · UDP <code>${esc(health.listen_udp || "—")}</code>
@@ -2231,183 +1846,1255 @@
               <div class="trap-stat"><div class="n">${esc(stats.simulated ?? 0)}</div><div class="l">试推送</div></div>
             </div>
           </div>
-          <div class="panel" style="max-width:960px;margin-bottom:16px">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">Kafka 消费积压</h3>
-            <div id="${lagBlockId}">${lagHtml}</div>
+          <div class="trap-split">
+            <div class="panel">
+              <h3 class="trap-section-title">Kafka 消费积压</h3>
+              <div id="${lagBlockId}">${lagHtml}</div>
+            </div>
+            <div class="panel">
+              <h3 class="trap-section-title">集群心跳（多机同时收）</h3>
+              <p class="hint trap-section-meta">
+                多机 Trap 经 Redis 上报心跳。推荐前面挂 UDP LB 分流（三台同时收）；见仓库 <code>deploy/trap-ha/</code>。
+                Redis ${cluster.redis ? `<span class="badge on">可用</span>` : `<span class="badge off">不可用</span>`}
+              </p>
+              ${
+                peers.length
+                  ? `<div class="alert-table-scroll"><table class="data"><thead><tr><th>实例</th><th>UDP</th><th>VIP</th><th>接收</th><th>心跳</th></tr></thead>
+                    <tbody>${peers
+                      .map(
+                        (p) => `<tr>
+                      <td class="mono">${esc(p.instance_id)}</td>
+                      <td class="mono">${esc(p.listen_udp)}</td>
+                      <td class="mono">${esc(p.ha_vip || "—")}</td>
+                      <td>${esc(p.received ?? 0)}</td>
+                      <td>${esc(fmtTime(p.updated_at))}</td>
+                    </tr>`
+                      )
+                      .join("")}</tbody></table></div>`
+                  : `<p class="hint">暂无心跳（确认 Trap 配了 <code>redis_url</code> 且 <code>heartbeat_secs &gt; 0</code>）。</p>`
+              }
+            </div>
           </div>
-          <div class="panel" style="max-width:960px;margin-bottom:16px">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">集群心跳（多机同时收）</h3>
-            <p class="hint" style="margin:0 0 12px">
-              多机 Trap 经 Redis 上报心跳。推荐前面挂 UDP LB 分流（三台同时收）；见仓库 <code>deploy/trap-ha/</code>。
-              Redis ${cluster.redis ? `<span class="badge on">可用</span>` : `<span class="badge off">不可用</span>`}
-            </p>
-            ${
-              peers.length
-                ? `<table class="data"><thead><tr><th>实例</th><th>UDP</th><th>VIP</th><th>接收</th><th>心跳</th></tr></thead>
-                  <tbody>${peers
-                    .map(
-                      (p) => `<tr>
-                    <td class="mono">${esc(p.instance_id)}</td>
-                    <td class="mono">${esc(p.listen_udp)}</td>
-                    <td class="mono">${esc(p.ha_vip || "—")}</td>
-                    <td>${esc(p.received ?? 0)}</td>
-                    <td>${esc(fmtTime(p.updated_at))}</td>
-                  </tr>`
-                    )
-                    .join("")}</tbody></table>`
-                : `<p class="hint">暂无心跳（确认 Trap 配了 <code>redis_url</code> 且 <code>heartbeat_secs &gt; 0</code>）。</p>`
-            }
+          <div class="trap-split">
+            <div class="panel trap-sim">
+              <h3 class="trap-section-title">试推送（模拟 Trap）</h3>
+              <p class="hint trap-section-meta">写出与 Kafka Ingress Generic 对齐的 JSON，用于联调（不依赖真实设备）。</p>
+              <div class="trap-sim-grid">
+                <div class="field"><label>设备 IP</label>
+                  <input id="trap-sim-ip" type="text" value="10.0.0.1" ${canWrite ? "" : "disabled"} />
+                </div>
+                <div class="field"><label>Trap OID</label>
+                  <input id="trap-sim-oid" type="text" value="1.3.6.1.6.3.1.1.5.3" ${canWrite ? "" : "disabled"} />
+                </div>
+                <div class="field"><label>告警名（可选）</label>
+                  <input id="trap-sim-name" type="text" placeholder="linkDown" ${canWrite ? "" : "disabled"} />
+                </div>
+                <div class="field"><label>级别</label>
+                  <select id="trap-sim-sev" ${canWrite ? "" : "disabled"}>
+                    ${severityOptions("warning")}
+                  </select>
+                </div>
+              </div>
+              <label class="check-row" style="margin:8px 0 14px">
+                <input type="checkbox" id="trap-sim-dry" ${canWrite ? "" : "disabled"} />
+                <span>仅预览 JSON（不写 Kafka）</span>
+              </label>
+              ${
+                canWrite
+                  ? `<button class="primary" id="btn-trap-sim">试推送</button>`
+                  : `<p class="hint">需要 <code>trap:write</code> 才能试推送。</p>`
+              }
+              <pre id="trap-sim-out" class="mono trap-sim-out"></pre>
+            </div>
+            <div class="panel">
+              <h3 class="trap-section-title">最近事件</h3>
+              <p class="hint trap-section-meta">点击「详情」查看完整 OID / 变量名 / Varbind。</p>
+              ${
+                items.length
+                  ? `<div class="alert-table-scroll"><table class="data"><thead><tr><th>时间</th><th>IP</th><th>OID</th><th>名称</th><th>Kafka</th><th></th></tr></thead>
+                    <tbody>${items
+                      .map(
+                        (it, i) => `<tr>
+                      <td>${esc(fmtTime(it.at))}</td>
+                      <td class="mono">${esc(it.peer)}</td>
+                      <td class="mono" title="${esc(it.trap_oid)}">${esc(
+                          it.trap_oid && it.trap_oid.length > 36
+                            ? it.trap_oid.slice(0, 36) + "…"
+                            : it.trap_oid
+                        )}</td>
+                      <td>${esc(it.alertname)}</td>
+                      <td>${it.kafka ? "✓" : "—"}</td>
+                      <td class="actions"><button type="button" data-trap-detail="${i}">详情</button></td>
+                    </tr>`
+                      )
+                      .join("")}</tbody></table></div>`
+                  : `<div class="empty">尚无 Trap / 试推送记录。</div>`
+              }
+            </div>
           </div>
-          <div class="panel" style="max-width:960px;margin-bottom:16px">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">试推送（模拟 Trap）</h3>
-            <p class="hint" style="margin:0 0 12px">写出与 Kafka Ingress Generic 对齐的 JSON，用于联调（不依赖真实设备）。</p>
-            <div class="field"><label>设备 IP</label>
-              <input id="trap-sim-ip" type="text" value="10.0.0.1" ${canWrite ? "" : "disabled"} />
-            </div>
-            <div class="field"><label>Trap OID</label>
-              <input id="trap-sim-oid" type="text" value="1.3.6.1.6.3.1.1.5.3" ${canWrite ? "" : "disabled"} />
-            </div>
-            <div class="field"><label>告警名（可选）</label>
-              <input id="trap-sim-name" type="text" placeholder="linkDown" ${canWrite ? "" : "disabled"} />
-            </div>
-            <div class="field"><label>级别</label>
-              <select id="trap-sim-sev" ${canWrite ? "" : "disabled"}>
-                ${severityOptions("warning")}
-              </select>
-            </div>
-            <label class="check-row" style="margin:8px 0 14px">
-              <input type="checkbox" id="trap-sim-dry" ${canWrite ? "" : "disabled"} />
-              <span>仅预览 JSON（不写 Kafka）</span>
-            </label>
-            ${
-              canWrite
-                ? `<button class="primary" id="btn-trap-sim">试推送</button>`
-                : `<p class="hint">需要 <code>trap:write</code> 才能试推送。</p>`
-            }
-            <pre id="trap-sim-out" class="mono" style="margin-top:12px;white-space:pre-wrap;font-size:0.8rem;max-height:240px;overflow:auto"></pre>
-          </div>
-          <div class="panel" style="max-width:960px">
-            <h3 style="margin:0 0 0.75rem;font-size:1rem">最近事件</h3>
-            <p class="hint" style="margin:0 0 12px">点击「详情」查看完整 OID / 变量名 / Varbind。</p>
-            ${
-              items.length
-                ? `<table class="data"><thead><tr><th>时间</th><th>IP</th><th>OID</th><th>名称</th><th>Kafka</th><th></th></tr></thead>
-                  <tbody>${items
-                    .map(
-                      (it, i) => `<tr>
-                    <td>${esc(fmtTime(it.at))}</td>
-                    <td class="mono">${esc(it.peer)}</td>
-                    <td class="mono" title="${esc(it.trap_oid)}">${esc(
-                        it.trap_oid && it.trap_oid.length > 36
-                          ? it.trap_oid.slice(0, 36) + "…"
-                          : it.trap_oid
-                      )}</td>
-                    <td>${esc(it.alertname)}</td>
-                    <td>${it.kafka ? "✓" : "—"}</td>
-                    <td class="actions"><button type="button" data-trap-detail="${i}">详情</button></td>
-                  </tr>`
-                    )
-                    .join("")}</tbody></table>`
-                : `<div class="empty">尚无 Trap / 试推送记录。</div>`
-            }
+        </div>`;
+
+      root.querySelectorAll("[data-trap-detail]").forEach((b) => {
+        b.onclick = () => showTrapRecentDetail(items[Number(b.dataset.trapDetail)]);
+      });
+
+      const btn = document.getElementById("btn-trap-sim");
+      if (btn) {
+        btn.onclick = async () => {
+          try {
+            const body = {
+              ip: document.getElementById("trap-sim-ip").value.trim(),
+              trap_oid: document.getElementById("trap-sim-oid").value.trim(),
+              alertname: document.getElementById("trap-sim-name").value.trim() || null,
+              severity: document.getElementById("trap-sim-sev").value,
+              dry_run: document.getElementById("trap-sim-dry").checked,
+            };
+            const r = await api("/trap-api/api/simulate", {
+              method: "POST",
+              body: JSON.stringify(body),
+            });
+            document.getElementById("trap-sim-out").textContent = JSON.stringify(
+              r.alert || r,
+              null,
+              2
+            );
+            toast(r.kafka ? "已写入 Kafka" : "已生成预览");
+            await paint();
+          } catch (e) {
+            toast(e.message || String(e), true);
+          }
+        };
+      }
+    };
+    document.getElementById("btn-trap-refresh").onclick = () => paint();
+    await paint();
+  },
+
+  async mib(root) {
+    const canWrite = can("trap:write");
+    setActions(`
+      <button class="ghost" id="btn-mib-reload">重新加载</button>
+      <button class="ghost" id="btn-mib-export-all">导出全部策略</button>
+      ${
+        canWrite
+          ? `<button class="primary" id="btn-mib-upload">上传 MIB</button>
+             <input type="file" id="mib-file" accept=".mib,.txt,.my,.smi" hidden multiple />`
+          : ""
+      }
+    `);
+
+    state.mibSel = state.mibSel || null;
+    state.mibTree = state.mibTree || {};
+    state.mibExpanded = state.mibExpanded || {};
+    state.mibQ = state.mibQ || "";
+    state.mibTrapQ = state.mibTrapQ || "";
+    let mibListCache = null;
+    let mibNotifCache = {};
+
+    const invalidateMibCache = () => {
+      mibListCache = null;
+      mibNotifCache = {};
+    };
+
+    const downloadPolicies = async (path) => {
+      const t = token();
+      const res = await fetch(path, {
+        headers: t ? { Authorization: `Bearer ${t}` } : {},
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text;
+        try {
+          msg = JSON.parse(text).error || text;
+        } catch (_) {}
+        throw new Error(msg || res.statusText);
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const m = /filename="?([^"]+)"?/.exec(cd);
+      const name = (m && m[1]) || "trap-policies.json";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+
+    const uploadFiles = async (files) => {
+      for (const file of files) {
+        const buf = await file.arrayBuffer();
+        const t = token();
+        const res = await fetch(
+          `/api/mibs?filename=${encodeURIComponent(file.name)}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/octet-stream",
+              ...(t ? { Authorization: `Bearer ${t}` } : {}),
+            },
+            body: buf,
+          }
+        );
+        const text = await res.text();
+        let data = null;
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {
+          data = { error: text };
+        }
+        if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
+        toast(`已上传 ${data.item?.module_name || file.name}`);
+      }
+    };
+
+    const loadChildren = async (moduleId, oid) => {
+      const key = `${moduleId}|${oid || ""}`;
+      const q = oid ? `?oid=${encodeURIComponent(oid)}` : "";
+      const data = await api(`/api/mibs/${encodeURIComponent(moduleId)}/children${q}`);
+      state.mibTree[key] = data.children || [];
+      return state.mibTree[key];
+    };
+
+    const renderTreeNodes = (moduleId, parentOid, depth) => {
+      const key = `${moduleId}|${parentOid || ""}`;
+      const nodes = state.mibTree[key] || [];
+      return nodes
+        .map((n) => {
+          const expKey = `${moduleId}|${n.oid}`;
+          const expanded = !!state.mibExpanded[expKey];
+          const kids = expanded ? renderTreeNodes(moduleId, n.oid, depth + 1) : "";
+          const caret = n.has_children ? (expanded ? "▾" : "▸") : "·";
+          return `<div class="mib-node" style="padding-left:${depth * 14}px">
+            <button type="button" class="mib-node-btn ${
+              state.mibFocusOid === n.oid ? "active" : ""
+            }" data-mib-oid="${esc(n.oid)}" data-mib-expand="${n.has_children ? "1" : "0"}">
+              <span class="mib-caret">${caret}</span>
+              <span class="mib-name">${esc(n.name)}${
+                n.is_notification ? ' <span class="badge on">Trap</span>' : ""
+              }</span>
+              <span class="mib-oid mono">${esc(n.oid)}</span>
+            </button>
+            ${kids}
+          </div>`;
+        })
+        .join("");
+    };
+
+    const filterMibModules = (items, qRaw) => {
+      const q = String(qRaw || "")
+        .trim()
+        .toLowerCase();
+      if (!q) return items;
+      return items.filter((it) => {
+        const blob = [it.module_name, it.id, it.filename, it.module_oid, it.error]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return blob.includes(q);
+      });
+    };
+
+    const filterTrapRows = (rows, qRaw) => {
+      const q = String(qRaw || "")
+        .trim()
+        .toLowerCase();
+      if (!q) return rows;
+      return rows.filter((r) => {
+        const blob = [r.name, r.trap_oid, r.severity, (r.objects || []).join(" "), r.module]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return blob.includes(q);
+      });
+    };
+
+    const paint = async (opts = {}) => {
+      const reuse = !!opts.reuse;
+      let list = mibListCache;
+      if (!reuse || !list) {
+        try {
+          list = await api("/api/mibs");
+          mibListCache = list;
+        } catch (e) {
+          root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
+            e.message
+          )}</p></div>`;
+          return;
+        }
+      }
+      const items = list.items || [];
+      const filteredMods = filterMibModules(items, state.mibQ);
+      if (!state.mibSel && items.length) state.mibSel = items[0].id;
+      if (state.mibSel && !items.find((x) => x.id === state.mibSel)) {
+        state.mibSel = items[0]?.id || null;
+        state.mibTree = {};
+        state.mibExpanded = {};
+      }
+
+      const focusId = document.activeElement?.id;
+      const focusPos =
+        focusId === "mib-q" || focusId === "mib-trap-q"
+          ? document.activeElement.selectionStart
+          : null;
+
+      let detailHtml = `<div class="empty">选择左侧模块后浏览 OID 树</div>`;
+      let notifHtml = "";
+      if (state.mibSel) {
+        const rootKey = `${state.mibSel}|`;
+        if (!state.mibTree[rootKey]) {
+          try {
+            await loadChildren(state.mibSel, "");
+          } catch (e) {
+            detailHtml = `<div class="empty">${esc(e.message)}</div>`;
+          }
+        }
+        const treeHtml = renderTreeNodes(state.mibSel, "", 0);
+        let nodeInfo = `<p class="hint">点击节点查看详情；标有 Trap 的为 NOTIFICATION / TRAP-TYPE。</p>`;
+        if (state.mibFocusOid) {
+          try {
+            const nd = await api(
+              `/api/mibs/${encodeURIComponent(state.mibSel)}/node?oid=${encodeURIComponent(
+                state.mibFocusOid
+              )}`
+            );
+            nodeInfo = `
+              <div class="field"><label>名称</label><div><strong>${esc(nd.name)}</strong>
+                ${nd.is_notification ? '<span class="badge on">Trap</span>' : ""}</div></div>
+              <div class="field"><label>OID</label><div class="mono">${esc(nd.oid)}</div></div>
+              <div class="field"><label>类型</label><div>${esc(nd.kind)} · ${esc(nd.status)}</div></div>
+              <div class="field"><label>描述</label><div class="summary-box">${esc(
+                nd.description || "—"
+              )}</div></div>
+              ${
+                nd.objects && nd.objects.length
+                  ? `<div class="field"><label>OBJECTS</label><div class="mono">${esc(
+                      nd.objects.join(", ")
+                    )}</div></div>`
+                  : ""
+              }
+              <div class="field mib-snmp-get">
+                <label>SNMP Get（v2c）</label>
+                <p class="hint" style="margin:0 0 8px">向设备主动查询当前 OID，用于核对；非 Trap 接收。</p>
+                <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
+                  <div class="field" style="margin:0;flex:1.2;min-width:120px">
+                    <label>目标 IP</label>
+                    <input id="mib-snmp-host" type="text" placeholder="10.0.0.1" value="${esc(
+                      localStorage.getItem("eventide_snmp_host") || ""
+                    )}" />
+                  </div>
+                  <div class="field" style="margin:0;width:88px">
+                    <label>端口</label>
+                    <input id="mib-snmp-port" type="number" min="1" max="65535" value="${esc(
+                      localStorage.getItem("eventide_snmp_port") || "161"
+                    )}" />
+                  </div>
+                  <div class="field" style="margin:0;flex:1;min-width:100px">
+                    <label>Community</label>
+                    <input id="mib-snmp-community" type="text" value="${esc(
+                      localStorage.getItem("eventide_snmp_community") || "public"
+                    )}" />
+                  </div>
+                  <button type="button" class="primary" id="btn-mib-snmp-get">Get</button>
+                </div>
+                <pre id="mib-snmp-out" class="mono summary-box" style="margin-top:10px;min-height:2.5em;white-space:pre-wrap;font-size:12px"></pre>
+              </div>`;
+          } catch (e) {
+            nodeInfo = `<p class="hint">${esc(e.message)}</p>`;
+          }
+        }
+        detailHtml = `
+          <div class="mib-browser">
+            <div class="mib-tree">${treeHtml || `<div class="empty">无 OID 节点</div>`}</div>
+            <div class="mib-detail">${nodeInfo}</div>
           </div>`;
 
-        root.querySelectorAll("[data-trap-detail]").forEach((b) => {
-          b.onclick = () => showTrapRecentDetail(items[Number(b.dataset.trapDetail)]);
-        });
-
-        const btn = document.getElementById("btn-trap-sim");
-        if (btn) {
-          btn.onclick = async () => {
-            try {
-              const body = {
-                ip: document.getElementById("trap-sim-ip").value.trim(),
-                trap_oid: document.getElementById("trap-sim-oid").value.trim(),
-                alertname: document.getElementById("trap-sim-name").value.trim() || null,
-                severity: document.getElementById("trap-sim-sev").value,
-                dry_run: document.getElementById("trap-sim-dry").checked,
-              };
-              const r = await api("/trap-api/api/simulate", {
-                method: "POST",
-                body: JSON.stringify(body),
-              });
-              document.getElementById("trap-sim-out").textContent = JSON.stringify(
-                r.alert || r,
-                null,
-                2
-              );
-              toast(r.kafka ? "已写入 Kafka" : "已生成预览");
-              await paint();
-            } catch (e) {
-              toast(e.message || String(e), true);
-            }
-          };
+        try {
+          const cached = mibNotifCache[state.mibSel];
+          let rows = cached;
+          if (!rows) {
+            const n = await api(
+              `/api/mibs/${encodeURIComponent(state.mibSel)}/notifications`
+            );
+            rows = n.items || [];
+            mibNotifCache[state.mibSel] = rows;
+          }
+          const shown = filterTrapRows(rows, state.mibTrapQ);
+          notifHtml = `
+            <div class="panel" style="margin-top:16px">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
+                <h3 style="margin:0;font-size:1rem">可导出的 Trap（${
+                  state.mibTrapQ.trim()
+                    ? `${shown.length} / ${rows.length}`
+                    : rows.length
+                }）</h3>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button type="button" class="ghost" id="btn-mib-export-one">下载 Excel</button>
+                  ${
+                    canWrite && rows.length
+                      ? `<button type="button" class="primary" id="btn-mib-import-pol">导入到策略</button>`
+                      : ""
+                  }
+                </div>
+              </div>
+              ${
+                rows.length
+                  ? `<div class="alert-filters" style="margin-bottom:10px">
+                      <input id="mib-trap-q" placeholder="搜索 Trap 名称、OID、OBJECTS…" value="${esc(
+                        state.mibTrapQ || ""
+                      )}" />
+                    </div>
+                    ${
+                      shown.length
+                        ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
+                      <th>名称</th><th>OID</th><th>级别</th><th>OBJECTS</th></tr></thead>
+                    <tbody>${shown
+                      .map((r) => {
+                        const objs = (r.objects || []).join(", ");
+                        return `<tr>
+                        <td>${esc(r.name)}</td>
+                        <td class="mono">${esc(r.trap_oid)}</td>
+                        <td>${esc(r.severity)}</td>
+                        <td class="mono"><span class="mib-objects" title="${esc(
+                          objs
+                        )}">${esc(objs || "—")}</span></td>
+                      </tr>`;
+                      })
+                      .join("")}</tbody></table></div>`
+                        : `<div class="empty">没有符合筛选条件的 Trap。</div>`
+                    }`
+                  : `<div class="empty">该 MIB 未定义 NOTIFICATION-TYPE / TRAP-TYPE。</div>`
+              }
+            </div>`;
+        } catch (e) {
+          notifHtml = `<div class="panel" style="margin-top:16px"><p class="hint">${esc(
+            e.message
+          )}</p></div>`;
         }
-      };
-      document.getElementById("btn-trap-refresh").onclick = () => paint();
-      await paint();
-    },
+      }
 
-    async mib(root) {
-      const canWrite = can("trap:write");
-      setActions(`
-        <button class="ghost" id="btn-mib-reload">重新加载</button>
-        <button class="ghost" id="btn-mib-export-all">导出全部策略</button>
+      root.innerHTML = `
         ${
-          canWrite
-            ? `<button class="primary" id="btn-mib-upload">上传 MIB</button>
-               <input type="file" id="mib-file" accept=".mib,.txt,.my,.smi" hidden multiple />`
+          list.load_error
+            ? `<div class="panel" style="margin-bottom:12px"><p class="hint">解析警告：${esc(
+                list.load_error
+              )}</p></div>`
             : ""
         }
-      `);
+        <div class="mib-layout">
+          <div class="panel mib-side">
+            <h3 style="margin:0 0 8px;font-size:1rem">已上传模块</h3>
+            <p class="hint" style="margin:0 0 10px">目录 <code>${esc(list.mib_dir || "")}</code>${
+              list.backend ? ` · <code>${esc(list.backend)}</code>` : ""
+            }
+              · 显示 ${esc(filteredMods.length)} / ${esc(items.length)}</p>
+            ${
+              items.length
+                ? `<div class="alert-filters" style="margin-bottom:10px">
+                    <input id="mib-q" placeholder="搜索模块名、文件名、OID…" value="${esc(
+                      state.mibQ || ""
+                    )}" />
+                  </div>
+                  ${
+                    filteredMods.length
+                      ? `<ul class="mib-mod-list">${filteredMods
+                          .map(
+                            (it) => `<li>
+                    <div class="mib-mod ${
+                      state.mibSel === it.id ? "active" : ""
+                    }" role="button" tabindex="0" data-mib-mod="${esc(it.id)}">
+                      <span class="mib-mod-title">${esc(it.module_name)}</span>
+                      <span class="mib-mod-meta">${it.parse_ok ? "已解析" : "解析失败"} · Trap ${esc(
+                        it.notification_count
+                      )} · 节点 ${esc(it.node_count)}</span>
+                    </div>
+                    ${
+                      canWrite
+                        ? `<button type="button" class="danger ghost mib-del" data-mib-del="${esc(
+                            it.id
+                          )}" title="删除">×</button>`
+                        : ""
+                    }
+                  </li>`
+                          )
+                          .join("")}</ul>`
+                      : `<div class="empty">没有符合筛选条件的模块。</div>`
+                  }`
+                : `<div class="empty">尚未上传 MIB。可先用仓库 <code>crates/eventide-trap/fixtures/EXAMPLE-FULL-MIB.txt</code> 试传。</div>`
+            }
+          </div>
+          <div class="mib-main">
+            <div class="panel">${detailHtml}</div>
+            ${notifHtml}
+          </div>
+        </div>`;
 
-      state.mibSel = state.mibSel || null;
-      state.mibTree = state.mibTree || {};
-      state.mibExpanded = state.mibExpanded || {};
-      state.mibQ = state.mibQ || "";
-      state.mibTrapQ = state.mibTrapQ || "";
-      let mibListCache = null;
-      let mibNotifCache = {};
-
-      const invalidateMibCache = () => {
-        mibListCache = null;
-        mibNotifCache = {};
-      };
-
-      const downloadPolicies = async (path) => {
-        const t = token();
-        const res = await fetch(path, {
-          headers: t ? { Authorization: `Bearer ${t}` } : {},
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          let msg = text;
-          try {
-            msg = JSON.parse(text).error || text;
-          } catch (_) {}
-          throw new Error(msg || res.statusText);
+      const bindSearch = (id, key) => {
+        const el = root.querySelector(`#${id}`);
+        if (!el) return;
+        let t = null;
+        el.oninput = () => {
+          clearTimeout(t);
+          t = setTimeout(() => {
+            state[key] = el.value || "";
+            paint({ reuse: true });
+          }, 200);
+        };
+        if (focusId === id) {
+          el.focus();
+          if (focusPos != null) {
+            try {
+              el.setSelectionRange(focusPos, focusPos);
+            } catch (_) {}
+          }
         }
-        const blob = await res.blob();
-        const cd = res.headers.get("Content-Disposition") || "";
-        const m = /filename="?([^"]+)"?/.exec(cd);
-        const name = (m && m[1]) || "trap-policies.json";
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = name;
-        a.click();
-        URL.revokeObjectURL(a.href);
+      };
+      bindSearch("mib-q", "mibQ");
+      bindSearch("mib-trap-q", "mibTrapQ");
+
+      root.querySelectorAll("[data-mib-mod]").forEach((b) => {
+        const select = async () => {
+          state.mibSel = b.dataset.mibMod;
+          state.mibFocusOid = null;
+          state.mibTree = {};
+          state.mibExpanded = {};
+          state.mibTrapQ = "";
+          await paint({ reuse: true });
+        };
+        b.onclick = select;
+        b.onkeydown = (ev) => {
+          if (ev.key === "Enter" || ev.key === " ") {
+            ev.preventDefault();
+            select();
+          }
+        };
+      });
+      root.querySelectorAll("[data-mib-del]").forEach((b) => {
+        b.onclick = async (ev) => {
+          ev.stopPropagation();
+          if (!confirm(`删除模块 ${b.dataset.mibDel}？`)) return;
+          try {
+            await api(`/api/mibs/${encodeURIComponent(b.dataset.mibDel)}`, {
+              method: "DELETE",
+            });
+            toast("已删除");
+            state.mibSel = null;
+            invalidateMibCache();
+            await paint();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      });
+      root.querySelectorAll("[data-mib-oid]").forEach((b) => {
+        b.onclick = async () => {
+          const oid = b.dataset.mibOid;
+          const canExp = b.dataset.mibExpand === "1";
+          state.mibFocusOid = oid;
+          if (canExp && state.mibSel) {
+            const expKey = `${state.mibSel}|${oid}`;
+            if (!state.mibExpanded[expKey]) {
+              state.mibExpanded[expKey] = true;
+              try {
+                await loadChildren(state.mibSel, oid);
+              } catch (e) {
+                toast(e.message, true);
+              }
+            } else {
+              state.mibExpanded[expKey] = false;
+            }
+          }
+          await paint({ reuse: true });
+        };
+      });
+      const expOne = document.getElementById("btn-mib-export-one");
+      if (expOne && state.mibSel) {
+        expOne.onclick = async () => {
+          try {
+            await downloadPolicies(
+              `/api/mibs/${encodeURIComponent(state.mibSel)}/export-policies`
+            );
+            toast("已导出");
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const impPol = document.getElementById("btn-mib-import-pol");
+      if (impPol && state.mibSel) {
+        impPol.onclick = async () => {
+          try {
+            const mode = await askPolicyImportMode("从 MIB 导入到策略");
+            if (mode === null) return;
+            const r = await api(
+              `/api/mibs/${encodeURIComponent(state.mibSel)}/apply-policies?mode=${mode}`,
+              { method: "POST" }
+            );
+            toast(
+              `${mode === "skip" ? "已忽略重复" : "已合并"}：新增 ${
+                r.result?.created ?? 0
+              }，更新 ${r.result?.updated ?? 0}，跳过 ${r.result?.skipped ?? 0}`
+            );
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      }
+      const snmpGetBtn = document.getElementById("btn-mib-snmp-get");
+      if (snmpGetBtn && state.mibFocusOid) {
+        snmpGetBtn.onclick = async () => {
+          const host = document.getElementById("mib-snmp-host")?.value.trim() || "";
+          const port = Number(document.getElementById("mib-snmp-port")?.value || 161);
+          const community =
+            document.getElementById("mib-snmp-community")?.value.trim() || "public";
+          const out = document.getElementById("mib-snmp-out");
+          if (!host) {
+            toast("请填写目标 IP", true);
+            return;
+          }
+          localStorage.setItem("eventide_snmp_host", host);
+          localStorage.setItem("eventide_snmp_port", String(port || 161));
+          localStorage.setItem("eventide_snmp_community", community);
+          if (out) out.textContent = "查询中…";
+          snmpGetBtn.disabled = true;
+          try {
+            const r = await api("/api/snmp/get", {
+              method: "POST",
+              body: JSON.stringify({
+                host,
+                port: port || 161,
+                community,
+                oid: state.mibFocusOid,
+                timeout_ms: 3000,
+              }),
+            });
+            if (out) {
+              out.textContent = r.ok
+                ? `${r.type || "Value"} = ${r.value}\nOID ${r.oid || state.mibFocusOid}`
+                : r.error || "失败";
+            }
+            toast(r.ok ? "Get 成功" : r.error || "Get 失败", !r.ok);
+          } catch (e) {
+            if (out) out.textContent = e.message || String(e);
+            toast(e.message || String(e), true);
+          } finally {
+            snmpGetBtn.disabled = false;
+          }
+        };
+      }
+    };
+
+    document.getElementById("btn-mib-reload").onclick = async () => {
+      try {
+        await api("/api/mibs/reload", { method: "POST" });
+        state.mibTree = {};
+        invalidateMibCache();
+        toast("已重新加载");
+        await paint();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+    document.getElementById("btn-mib-export-all").onclick = async () => {
+      try {
+        await downloadPolicies("/api/mibs/export-policies");
+        toast("已导出全部策略");
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+    const fileInput = document.getElementById("mib-file");
+    const uploadBtn = document.getElementById("btn-mib-upload");
+    if (uploadBtn && fileInput) {
+      uploadBtn.onclick = () => fileInput.click();
+      fileInput.onchange = async () => {
+        try {
+          await uploadFiles([...fileInput.files]);
+          fileInput.value = "";
+          state.mibTree = {};
+          invalidateMibCache();
+          await paint();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    }
+    await paint();
+  },
+
+  async policies(root) {
+    const canWrite = can("trap:write");
+    setActions(`
+      <button class="ghost" id="btn-pol-refresh">刷新</button>
+      <button class="ghost" id="btn-pol-export">导出</button>
+      ${
+        canWrite
+          ? `<button class="ghost" id="btn-pol-import">导入 Excel</button>
+             <input type="file" id="pol-file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+             <button class="primary" id="btn-pol-add">新建策略</button>`
+          : ""
+      }
+    `);
+
+    const downloadPolicies = async (path) => {
+      const t = token();
+      const res = await fetch(path, {
+        headers: t ? { Authorization: `Bearer ${t}` } : {},
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text;
+        try {
+          msg = JSON.parse(text).error || text;
+        } catch (_) {}
+        throw new Error(msg || res.statusText);
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const m = /filename="?([^"]+)"?/.exec(cd);
+      const name = (m && m[1]) || "trap-policies.json";
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
+
+    const editPolicy = (row) => {
+      const p = row || {
+        id: "",
+        name: "",
+        trap_oid: "",
+        match_mode: "exact",
+        severity: "warning",
+        enabled: true,
+        summary_template: "${alertname}: ${ip}",
+        description: "",
+        objects: [],
+        object_oids: {},
+        keywords: [],
+        module: "",
+        status: "",
+        resolve_oid: "",
+        resolve_values: [],
+        fingerprint_oids: [],
+        severity_oid: "",
+        severity_map: {},
+      };
+      const resolveVals = Array.isArray(p.resolve_values)
+        ? p.resolve_values.join(", ")
+        : "";
+      const fpOids = Array.isArray(p.fingerprint_oids)
+        ? p.fingerprint_oids.join(", ")
+        : "";
+      const sevMapText = Object.entries(p.severity_map || {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join(";");
+      const objNames = [
+        ...new Set([
+          ...Object.keys(p.object_oids || {}),
+          ...(Array.isArray(p.objects) ? p.objects : []),
+        ]),
+      ].filter(Boolean);
+      const varsHtml = [
+        "alertname",
+        "ip",
+        "trap_oid",
+        ...objNames,
+      ]
+        .map((n) => `<code class="pol-var" title="\${${esc(n)}}">\${${esc(n)}}</code>`)
+        .join("");
+      openModal(
+        `
+        <div class="modal-head">
+          <h3>${p.id ? "编辑策略" : "新建策略"}</h3>
+          <p class="desc">同一 Trap OID 一条策略；默认告警，恢复条件命中则为恢复。</p>
+        </div>
+        <form id="pol-form" class="modal-body pol-form">
+          <section class="enrich-section">
+            <h4>基本信息</h4>
+            <div class="row">
+              <div class="field" style="flex:1.4"><label>名称</label>
+                <input name="name" required value="${esc(p.name)}" />
+              </div>
+              <div class="field" style="flex:1"><label>模块</label>
+                <input name="module" placeholder="可选" value="${esc(p.module || "")}" />
+              </div>
+            </div>
+            <div class="field"><label>Trap OID</label>
+              <input name="trap_oid" required class="mono" value="${esc(p.trap_oid)}" />
+            </div>
+            <div class="row">
+              <div class="field"><label>匹配方式</label>
+                <select name="match_mode">
+                  <option value="exact" ${p.match_mode === "exact" ? "selected" : ""}>精确</option>
+                  <option value="prefix" ${p.match_mode === "prefix" ? "selected" : ""}>前缀</option>
+                </select>
+              </div>
+              <div class="field"><label>默认级别</label>
+                <select name="severity">
+                  ${severityOptions(p.severity || "warning")}
+                </select>
+              </div>
+            </div>
+            <label class="check-row" style="margin-bottom:12px">
+              <input type="checkbox" name="enabled" ${
+                p.enabled !== false ? "checked" : ""
+              } /><span>启用此策略</span>
+            </label>
+          </section>
+
+          <section class="enrich-section">
+            <h4>告警与恢复</h4>
+            <div class="row">
+              <div class="field" style="flex:1.5"><label>恢复 OID</label>
+                <input name="resolve_oid" class="mono" placeholder="例：…10.3.1.1.11" value="${esc(
+                  p.resolve_oid || ""
+                )}" />
+              </div>
+              <div class="field"><label>恢复值</label>
+                <input name="resolve_values" placeholder="逗号分隔，如 2" value="${esc(
+                  resolveVals
+                )}" />
+              </div>
+            </div>
+            <p class="field-hint">该 OID 的 varbind 值命中任一项时标记为恢复；可填 OBJECTS 名或数字 OID。</p>
+            <div class="field"><label>告警标识 OID</label>
+              <input name="fingerprint_oids" class="mono" placeholder="逗号分隔，例：…10.3.1.1.9" value="${esc(
+                fpOids
+              )}" />
+            </div>
+            <p class="field-hint">取这些 varbind 的<strong>值</strong>组成告警标识，用于关联告警与恢复（如流水号）。</p>
+          </section>
+
+          <section class="enrich-section">
+            <h4>动态级别</h4>
+            <div class="row">
+              <div class="field"><label>级别 OID</label>
+                <input name="severity_oid" class="mono" placeholder="例：…10.3.1.1.6" value="${esc(
+                  p.severity_oid || ""
+                )}" />
+              </div>
+              <div class="field" style="flex:1.4"><label>级别映射</label>
+                <input name="severity_map" class="mono" placeholder="1=disaster;2=high;3=average;4=warning" value="${esc(
+                  sevMapText
+                )}" />
+              </div>
+            </div>
+            <p class="field-hint">原值=平台级别，分号分隔；未命中映射时用上方默认级别。</p>
+          </section>
+
+          <section class="enrich-section">
+            <h4>告警内容</h4>
+            <div class="field"><label>摘要模板</label>
+              <textarea name="summary_template" class="mono pol-summary" rows="4">${esc(
+                p.summary_template || ""
+              )}</textarea>
+            </div>
+            <p class="field-hint" style="margin-top:-8px">点击下方变量可插入到光标处</p>
+            <div class="pol-vars">${varsHtml}</div>
+            <div class="field"><label>描述</label>
+              <textarea name="description" rows="2" placeholder="可选">${esc(
+                p.description || ""
+              )}</textarea>
+            </div>
+          </section>
+
+          <input type="hidden" name="id" value="${esc(p.id || "")}" />
+          <input type="hidden" name="objects_json" value="${esc(
+            JSON.stringify(p.objects || [])
+          )}" />
+          <input type="hidden" name="object_oids_json" value="${esc(
+            JSON.stringify(p.object_oids || {})
+          )}" />
+          <input type="hidden" name="keywords_json" value="${esc(
+            JSON.stringify(p.keywords || [])
+          )}" />
+          <input type="hidden" name="status" value="${esc(p.status || "")}" />
+        </form>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="pol-cancel">取消</button>
+          <button type="button" class="primary" id="pol-save">保存</button>
+        </div>
+      `,
+        { xl: true }
+      );
+      document.getElementById("pol-cancel").onclick = () => closeModal();
+      document.querySelectorAll("#pol-form .pol-var").forEach((el) => {
+        el.onclick = () => {
+          const ta = document.querySelector(
+            '#pol-form textarea[name="summary_template"]'
+          );
+          if (!ta) return;
+          const token = el.textContent || "";
+          const start = ta.selectionStart ?? ta.value.length;
+          const end = ta.selectionEnd ?? start;
+          ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
+          ta.focus();
+          const pos = start + token.length;
+          try {
+            ta.setSelectionRange(pos, pos);
+          } catch (_) {}
+        };
+      });
+      document.getElementById("pol-save").onclick = async () => {
+        const form = document.getElementById("pol-form");
+        const fd = new FormData(form);
+        let objects = [],
+          object_oids = {},
+          keywords = [];
+        try {
+          objects = JSON.parse(String(fd.get("objects_json") || "[]"));
+          object_oids = JSON.parse(String(fd.get("object_oids_json") || "{}"));
+          keywords = JSON.parse(String(fd.get("keywords_json") || "[]"));
+        } catch (_) {}
+        const resolve_values = String(fd.get("resolve_values") || "")
+          .split(/[,，;；]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const fingerprint_oids = String(fd.get("fingerprint_oids") || "")
+          .split(/[,，;；]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const severity_map = {};
+        String(fd.get("severity_map") || "")
+          .split(/[;；]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .forEach((pair) => {
+            const i = pair.indexOf("=");
+            if (i > 0) {
+              const k = pair.slice(0, i).trim();
+              const v = pair.slice(i + 1).trim();
+              if (k && v) severity_map[k] = v;
+            }
+          });
+        const body = {
+          id: String(fd.get("id") || ""),
+          name: String(fd.get("name") || "").trim(),
+          trap_oid: String(fd.get("trap_oid") || "").trim(),
+          match_mode: String(fd.get("match_mode") || "exact"),
+          severity: String(fd.get("severity") || "warning"),
+          enabled: !!form.querySelector('[name="enabled"]')?.checked,
+          summary_template: String(fd.get("summary_template") || ""),
+          description: String(fd.get("description") || ""),
+          module: String(fd.get("module") || ""),
+          status: String(fd.get("status") || ""),
+          resolve_oid: String(fd.get("resolve_oid") || "").trim(),
+          resolve_values,
+          fingerprint_oids,
+          severity_oid: String(fd.get("severity_oid") || "").trim(),
+          severity_map,
+          objects,
+          object_oids,
+          keywords,
+          updated_at: "",
+        };
+        try {
+          if (body.id) {
+            await api(`/api/policies/${encodeURIComponent(body.id)}`, {
+              method: "PUT",
+              body: JSON.stringify(body),
+            });
+          } else {
+            await api("/api/policies", {
+              method: "POST",
+              body: JSON.stringify(body),
+            });
+          }
+          toast("已保存");
+          closeModal();
+          await paint();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    };
+
+    let polCache = { items: [], path: "" };
+
+    const renderPolicies = () => {
+      const all = polCache.items || [];
+      const f = state.policyFilters || {
+        q: "",
+        enabled: "",
+        module: "",
+        resolve: "",
+      };
+      const q = (f.q || "").trim().toLowerCase();
+      const modules = [
+        ...new Set(all.map((p) => p.module).filter((m) => m && String(m).trim())),
+      ].sort();
+
+      const filtered = all.filter((p) => {
+        if (f.enabled === "1" && !p.enabled) return false;
+        if (f.enabled === "0" && p.enabled) return false;
+        if (f.module && (p.module || "") !== f.module) return false;
+        if (f.resolve === "1") {
+          const has =
+            (p.resolve_oid && String(p.resolve_oid).trim()) ||
+            (p.resolve_values && p.resolve_values.length) ||
+            p.status === "resolved";
+          if (!has) return false;
+        }
+        if (f.resolve === "0") {
+          const has =
+            (p.resolve_oid && String(p.resolve_oid).trim()) ||
+            (p.resolve_values && p.resolve_values.length) ||
+            p.status === "resolved";
+          if (has) return false;
+        }
+        if (q) {
+          const blob = [
+            p.name,
+            p.trap_oid,
+            p.module,
+            p.summary_template,
+            p.description,
+            p.resolve_oid,
+            (p.resolve_values || []).join(" "),
+            (p.fingerprint_oids || []).join(" "),
+            p.severity_oid,
+            p.severity,
+          ]
+            .join(" ")
+            .toLowerCase();
+          if (!blob.includes(q)) return false;
+        }
+        return true;
+      });
+
+      const focusId = document.activeElement?.id;
+      const focusPos =
+        focusId === "pol-q" ? document.activeElement.selectionStart : null;
+
+      const policyHasResolve = (p) =>
+        !!(
+          (p.resolve_oid && String(p.resolve_oid).trim()) ||
+          (p.resolve_values && p.resolve_values.length) ||
+          p.status === "resolved"
+        );
+      const policyResolveTitle = (p) => {
+        if (p.resolve_oid) {
+          return `${p.resolve_oid}→${(p.resolve_values || []).join(",") || "?"}`;
+        }
+        if (p.status === "resolved") return "始终恢复（专用恢复 OID）";
+        if (p.resolve_values && p.resolve_values.length) {
+          return `任意 varbind∈${p.resolve_values.join(",")}`;
+        }
+        return "";
       };
 
-      const uploadFiles = async (files) => {
-        for (const file of files) {
+      root.innerHTML = `
+        <div class="panel" style="margin-bottom:12px">
+          <p class="hint" style="margin:0 0 10px" title="${esc(polCache.path || "")}">
+            策略 ${esc(all.length)} 条${
+              filtered.length !== all.length
+                ? ` · 筛选后 ${esc(filtered.length)} 条`
+                : ""
+            }
+          </p>
+          <div class="alert-filters">
+            <input id="pol-q" placeholder="搜索名称、OID、模块、摘要…" value="${esc(f.q || "")}" />
+            <select id="pol-enabled">
+              <option value="" ${!f.enabled ? "selected" : ""}>启用·全部</option>
+              <option value="1" ${f.enabled === "1" ? "selected" : ""}>已启用</option>
+              <option value="0" ${f.enabled === "0" ? "selected" : ""}>已禁用</option>
+            </select>
+            <select id="pol-module">
+              <option value="" ${!f.module ? "selected" : ""}>模块·全部</option>
+              ${modules
+                .map(
+                  (m) =>
+                    `<option value="${esc(m)}" ${f.module === m ? "selected" : ""}>${esc(
+                      m
+                    )}</option>`
+                )
+                .join("")}
+            </select>
+            <select id="pol-resolve">
+              <option value="" ${!f.resolve ? "selected" : ""}>恢复条件·全部</option>
+              <option value="1" ${f.resolve === "1" ? "selected" : ""}>已配置恢复</option>
+              <option value="0" ${f.resolve === "0" ? "selected" : ""}>未配置恢复</option>
+            </select>
+          </div>
+        </div>
+        <div class="panel">
+          ${
+            filtered.length
+              ? `<div class="alert-table-scroll"><table class="data pol-table"><thead><tr>
+                  <th class="pol-col-en">启用</th><th class="pol-col-name">名称</th><th class="pol-col-oid">OID</th><th class="pol-col-fp">告警标识OID</th><th class="pol-col-sev">级别映射</th><th>模块</th><th class="pol-col-sum">摘要</th><th></th>
+                </tr></thead><tbody>${filtered
+                  .map((p) => {
+                    const hasRes = policyHasResolve(p);
+                    const resTitle = policyResolveTitle(p);
+                    const fp = (p.fingerprint_oids || []).join(", ");
+                    const sevTitle = p.severity_oid
+                      ? `${p.severity_oid}: ${Object.entries(p.severity_map || {})
+                          .map(([k, v]) => k + "=" + v)
+                          .join(";")}`
+                      : p.severity || "";
+                    return `<tr>
+                    <td class="pol-col-en">${
+                      p.enabled
+                        ? `<span class="badge on">启用</span>`
+                        : `<span class="badge">禁用</span>`
+                    }</td>
+                    <td class="pol-col-name">
+                      <div class="pol-name-row">
+                        <span class="pol-name">${esc(p.name)}</span>
+                        ${
+                          hasRes
+                            ? `<span class="chip pol-resolve-chip" title="${esc(
+                                resTitle
+                              )}">可恢复</span>`
+                            : ""
+                        }
+                      </div>
+                    </td>
+                    <td class="mono pol-col-oid"><span class="mib-objects" title="${esc(
+                      p.trap_oid || ""
+                    )}">${esc(p.trap_oid || "—")}</span></td>
+                    <td class="mono pol-col-fp"><span class="mib-objects" title="${esc(
+                      fp
+                    )}">${esc(fp || "—")}</span></td>
+                    <td class="mono pol-col-sev"><span class="mib-objects" title="${esc(
+                      sevTitle
+                    )}">${
+                      p.severity_oid
+                        ? esc(p.severity_oid)
+                        : esc(p.severity || "—")
+                    }</span></td>
+                    <td>${esc(p.module || "—")}</td>
+                    <td class="mono pol-col-sum"><span class="mib-objects" title="${esc(
+                      p.summary_template || ""
+                    )}">${esc(p.summary_template || "—")}</span></td>
+                    <td class="actions">
+                      ${
+                        canWrite
+                          ? `<button type="button" data-pol-edit="${esc(p.id)}">编辑</button>
+                             <button type="button" class="danger" data-pol-del="${esc(
+                               p.id
+                             )}">删除</button>`
+                          : ""
+                      }
+                    </td>
+                  </tr>`;
+                  })
+                  .join("")}</tbody></table></div>`
+              : `<div class="empty">${
+                  all.length
+                    ? "没有符合筛选条件的策略。"
+                    : "暂无策略。请到「MIB 库」点「导入到策略」，或在此「导入 Excel」 /「新建策略」。"
+                }</div>`
+          }
+        </div>`;
+
+      const readFilters = () => {
+        state.policyFilters = {
+          q: root.querySelector("#pol-q")?.value || "",
+          enabled: root.querySelector("#pol-enabled")?.value || "",
+          module: root.querySelector("#pol-module")?.value || "",
+          resolve: root.querySelector("#pol-resolve")?.value || "",
+        };
+      };
+      const qEl = root.querySelector("#pol-q");
+      if (qEl) {
+        let t = null;
+        qEl.oninput = () => {
+          clearTimeout(t);
+          t = setTimeout(() => {
+            readFilters();
+            renderPolicies();
+          }, 200);
+        };
+        if (focusId === "pol-q") {
+          qEl.focus();
+          if (focusPos != null) {
+            try {
+              qEl.setSelectionRange(focusPos, focusPos);
+            } catch (_) {}
+          }
+        }
+      }
+      root.querySelector("#pol-enabled")?.addEventListener("change", () => {
+        readFilters();
+        renderPolicies();
+      });
+      root.querySelector("#pol-module")?.addEventListener("change", () => {
+        readFilters();
+        renderPolicies();
+      });
+      root.querySelector("#pol-resolve")?.addEventListener("change", () => {
+        readFilters();
+        renderPolicies();
+      });
+
+      const byId = Object.fromEntries(all.map((p) => [p.id, p]));
+      root.querySelectorAll("[data-pol-edit]").forEach((b) => {
+        b.onclick = () => {
+          const row = byId[b.dataset.polEdit];
+          if (row) editPolicy(row);
+        };
+      });
+      root.querySelectorAll("[data-pol-del]").forEach((b) => {
+        b.onclick = async () => {
+          if (!confirm("删除该策略？")) return;
+          try {
+            await api(`/api/policies/${encodeURIComponent(b.dataset.polDel)}`, {
+              method: "DELETE",
+            });
+            toast("已删除");
+            await paint();
+          } catch (e) {
+            toast(e.message, true);
+          }
+        };
+      });
+    };
+
+    const paint = async () => {
+      try {
+        const data = await api("/api/policies");
+        polCache = { items: data.items || [], path: data.path || "" };
+        renderPolicies();
+      } catch (e) {
+        root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
+          e.message
+        )}</p></div>`;
+      }
+    };
+
+    document.getElementById("btn-pol-refresh").onclick = () => paint();
+    document.getElementById("btn-pol-export").onclick = async () => {
+      try {
+        await downloadPolicies("/api/policies/export");
+        toast("已导出");
+      } catch (e) {
+        toast(e.message, true);
+      }
+    };
+    const importBtn = document.getElementById("btn-pol-import");
+    const fileInput = document.getElementById("pol-file");
+    if (importBtn && fileInput) {
+      importBtn.onclick = () => fileInput.click();
+      fileInput.onchange = async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        try {
+          const mode = await askPolicyImportMode("导入 Excel 策略");
+          if (mode === null) {
+            fileInput.value = "";
+            return;
+          }
           const buf = await file.arrayBuffer();
           const t = token();
           const res = await fetch(
-            `/api/mibs?filename=${encodeURIComponent(file.name)}`,
+            `/api/policies/import?mode=${mode}`,
             {
               method: "POST",
               headers: {
-                "Content-Type": "application/octet-stream",
+                "Content-Type":
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 ...(t ? { Authorization: `Bearer ${t}` } : {}),
               },
               body: buf,
@@ -2421,5475 +3108,3744 @@
             data = { error: text };
           }
           if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
-          toast(`已上传 ${data.item?.module_name || file.name}`);
-        }
-      };
-
-      const loadChildren = async (moduleId, oid) => {
-        const key = `${moduleId}|${oid || ""}`;
-        const q = oid ? `?oid=${encodeURIComponent(oid)}` : "";
-        const data = await api(`/api/mibs/${encodeURIComponent(moduleId)}/children${q}`);
-        state.mibTree[key] = data.children || [];
-        return state.mibTree[key];
-      };
-
-      const renderTreeNodes = (moduleId, parentOid, depth) => {
-        const key = `${moduleId}|${parentOid || ""}`;
-        const nodes = state.mibTree[key] || [];
-        return nodes
-          .map((n) => {
-            const expKey = `${moduleId}|${n.oid}`;
-            const expanded = !!state.mibExpanded[expKey];
-            const kids = expanded ? renderTreeNodes(moduleId, n.oid, depth + 1) : "";
-            const caret = n.has_children ? (expanded ? "▾" : "▸") : "·";
-            return `<div class="mib-node" style="padding-left:${depth * 14}px">
-              <button type="button" class="mib-node-btn ${
-                state.mibFocusOid === n.oid ? "active" : ""
-              }" data-mib-oid="${esc(n.oid)}" data-mib-expand="${n.has_children ? "1" : "0"}">
-                <span class="mib-caret">${caret}</span>
-                <span class="mib-name">${esc(n.name)}${
-                  n.is_notification ? ' <span class="badge on">Trap</span>' : ""
-                }</span>
-                <span class="mib-oid mono">${esc(n.oid)}</span>
-              </button>
-              ${kids}
-            </div>`;
-          })
-          .join("");
-      };
-
-      const filterMibModules = (items, qRaw) => {
-        const q = String(qRaw || "")
-          .trim()
-          .toLowerCase();
-        if (!q) return items;
-        return items.filter((it) => {
-          const blob = [it.module_name, it.id, it.filename, it.module_oid, it.error]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-          return blob.includes(q);
-        });
-      };
-
-      const filterTrapRows = (rows, qRaw) => {
-        const q = String(qRaw || "")
-          .trim()
-          .toLowerCase();
-        if (!q) return rows;
-        return rows.filter((r) => {
-          const blob = [r.name, r.trap_oid, r.severity, (r.objects || []).join(" "), r.module]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-          return blob.includes(q);
-        });
-      };
-
-      const paint = async (opts = {}) => {
-        const reuse = !!opts.reuse;
-        let list = mibListCache;
-        if (!reuse || !list) {
-          try {
-            list = await api("/api/mibs");
-            mibListCache = list;
-          } catch (e) {
-            root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
-              e.message
-            )}</p></div>`;
-            return;
-          }
-        }
-        const items = list.items || [];
-        const filteredMods = filterMibModules(items, state.mibQ);
-        if (!state.mibSel && items.length) state.mibSel = items[0].id;
-        if (state.mibSel && !items.find((x) => x.id === state.mibSel)) {
-          state.mibSel = items[0]?.id || null;
-          state.mibTree = {};
-          state.mibExpanded = {};
-        }
-
-        const focusId = document.activeElement?.id;
-        const focusPos =
-          focusId === "mib-q" || focusId === "mib-trap-q"
-            ? document.activeElement.selectionStart
-            : null;
-
-        let detailHtml = `<div class="empty">选择左侧模块后浏览 OID 树</div>`;
-        let notifHtml = "";
-        if (state.mibSel) {
-          const rootKey = `${state.mibSel}|`;
-          if (!state.mibTree[rootKey]) {
-            try {
-              await loadChildren(state.mibSel, "");
-            } catch (e) {
-              detailHtml = `<div class="empty">${esc(e.message)}</div>`;
-            }
-          }
-          const treeHtml = renderTreeNodes(state.mibSel, "", 0);
-          let nodeInfo = `<p class="hint">点击节点查看详情；标有 Trap 的为 NOTIFICATION / TRAP-TYPE。</p>`;
-          if (state.mibFocusOid) {
-            try {
-              const nd = await api(
-                `/api/mibs/${encodeURIComponent(state.mibSel)}/node?oid=${encodeURIComponent(
-                  state.mibFocusOid
-                )}`
-              );
-              nodeInfo = `
-                <div class="field"><label>名称</label><div><strong>${esc(nd.name)}</strong>
-                  ${nd.is_notification ? '<span class="badge on">Trap</span>' : ""}</div></div>
-                <div class="field"><label>OID</label><div class="mono">${esc(nd.oid)}</div></div>
-                <div class="field"><label>类型</label><div>${esc(nd.kind)} · ${esc(nd.status)}</div></div>
-                <div class="field"><label>描述</label><div class="summary-box">${esc(
-                  nd.description || "—"
-                )}</div></div>
-                ${
-                  nd.objects && nd.objects.length
-                    ? `<div class="field"><label>OBJECTS</label><div class="mono">${esc(
-                        nd.objects.join(", ")
-                      )}</div></div>`
-                    : ""
-                }
-                <div class="field mib-snmp-get">
-                  <label>SNMP Get（v2c）</label>
-                  <p class="hint" style="margin:0 0 8px">向设备主动查询当前 OID，用于核对；非 Trap 接收。</p>
-                  <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
-                    <div class="field" style="margin:0;flex:1.2;min-width:120px">
-                      <label>目标 IP</label>
-                      <input id="mib-snmp-host" type="text" placeholder="10.0.0.1" value="${esc(
-                        localStorage.getItem("eventide_snmp_host") || ""
-                      )}" />
-                    </div>
-                    <div class="field" style="margin:0;width:88px">
-                      <label>端口</label>
-                      <input id="mib-snmp-port" type="number" min="1" max="65535" value="${esc(
-                        localStorage.getItem("eventide_snmp_port") || "161"
-                      )}" />
-                    </div>
-                    <div class="field" style="margin:0;flex:1;min-width:100px">
-                      <label>Community</label>
-                      <input id="mib-snmp-community" type="text" value="${esc(
-                        localStorage.getItem("eventide_snmp_community") || "public"
-                      )}" />
-                    </div>
-                    <button type="button" class="primary" id="btn-mib-snmp-get">Get</button>
-                  </div>
-                  <pre id="mib-snmp-out" class="mono summary-box" style="margin-top:10px;min-height:2.5em;white-space:pre-wrap;font-size:12px"></pre>
-                </div>`;
-            } catch (e) {
-              nodeInfo = `<p class="hint">${esc(e.message)}</p>`;
-            }
-          }
-          detailHtml = `
-            <div class="mib-browser">
-              <div class="mib-tree">${treeHtml || `<div class="empty">无 OID 节点</div>`}</div>
-              <div class="mib-detail">${nodeInfo}</div>
-            </div>`;
-
-          try {
-            const cached = mibNotifCache[state.mibSel];
-            let rows = cached;
-            if (!rows) {
-              const n = await api(
-                `/api/mibs/${encodeURIComponent(state.mibSel)}/notifications`
-              );
-              rows = n.items || [];
-              mibNotifCache[state.mibSel] = rows;
-            }
-            const shown = filterTrapRows(rows, state.mibTrapQ);
-            notifHtml = `
-              <div class="panel" style="margin-top:16px">
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
-                  <h3 style="margin:0;font-size:1rem">可导出的 Trap（${
-                    state.mibTrapQ.trim()
-                      ? `${shown.length} / ${rows.length}`
-                      : rows.length
-                  }）</h3>
-                  <div style="display:flex;gap:8px;flex-wrap:wrap">
-                    <button type="button" class="ghost" id="btn-mib-export-one">下载 Excel</button>
-                    ${
-                      canWrite && rows.length
-                        ? `<button type="button" class="primary" id="btn-mib-import-pol">导入到策略</button>`
-                        : ""
-                    }
-                  </div>
-                </div>
-                ${
-                  rows.length
-                    ? `<div class="alert-filters" style="margin-bottom:10px">
-                        <input id="mib-trap-q" placeholder="搜索 Trap 名称、OID、OBJECTS…" value="${esc(
-                          state.mibTrapQ || ""
-                        )}" />
-                      </div>
-                      ${
-                        shown.length
-                          ? `<div class="alert-table-scroll"><table class="data"><thead><tr>
-                        <th>名称</th><th>OID</th><th>级别</th><th>OBJECTS</th></tr></thead>
-                      <tbody>${shown
-                        .map((r) => {
-                          const objs = (r.objects || []).join(", ");
-                          return `<tr>
-                          <td>${esc(r.name)}</td>
-                          <td class="mono">${esc(r.trap_oid)}</td>
-                          <td>${esc(r.severity)}</td>
-                          <td class="mono"><span class="mib-objects" title="${esc(
-                            objs
-                          )}">${esc(objs || "—")}</span></td>
-                        </tr>`;
-                        })
-                        .join("")}</tbody></table></div>`
-                          : `<div class="empty">没有符合筛选条件的 Trap。</div>`
-                      }`
-                    : `<div class="empty">该 MIB 未定义 NOTIFICATION-TYPE / TRAP-TYPE。</div>`
-                }
-              </div>`;
-          } catch (e) {
-            notifHtml = `<div class="panel" style="margin-top:16px"><p class="hint">${esc(
-              e.message
-            )}</p></div>`;
-          }
-        }
-
-        root.innerHTML = `
-          ${
-            list.load_error
-              ? `<div class="panel" style="margin-bottom:12px"><p class="hint">解析警告：${esc(
-                  list.load_error
-                )}</p></div>`
-              : ""
-          }
-          <div class="mib-layout">
-            <div class="panel mib-side">
-              <h3 style="margin:0 0 8px;font-size:1rem">已上传模块</h3>
-              <p class="hint" style="margin:0 0 10px">目录 <code>${esc(list.mib_dir || "")}</code>${
-                list.backend ? ` · <code>${esc(list.backend)}</code>` : ""
-              }
-                · 显示 ${esc(filteredMods.length)} / ${esc(items.length)}</p>
-              ${
-                items.length
-                  ? `<div class="alert-filters" style="margin-bottom:10px">
-                      <input id="mib-q" placeholder="搜索模块名、文件名、OID…" value="${esc(
-                        state.mibQ || ""
-                      )}" />
-                    </div>
-                    ${
-                      filteredMods.length
-                        ? `<ul class="mib-mod-list">${filteredMods
-                            .map(
-                              (it) => `<li>
-                      <div class="mib-mod ${
-                        state.mibSel === it.id ? "active" : ""
-                      }" role="button" tabindex="0" data-mib-mod="${esc(it.id)}">
-                        <span class="mib-mod-title">${esc(it.module_name)}</span>
-                        <span class="mib-mod-meta">${it.parse_ok ? "已解析" : "解析失败"} · Trap ${esc(
-                          it.notification_count
-                        )} · 节点 ${esc(it.node_count)}</span>
-                      </div>
-                      ${
-                        canWrite
-                          ? `<button type="button" class="danger ghost mib-del" data-mib-del="${esc(
-                              it.id
-                            )}" title="删除">×</button>`
-                          : ""
-                      }
-                    </li>`
-                            )
-                            .join("")}</ul>`
-                        : `<div class="empty">没有符合筛选条件的模块。</div>`
-                    }`
-                  : `<div class="empty">尚未上传 MIB。可先用仓库 <code>crates/eventide-trap/fixtures/EXAMPLE-FULL-MIB.txt</code> 试传。</div>`
-              }
-            </div>
-            <div class="mib-main">
-              <div class="panel">${detailHtml}</div>
-              ${notifHtml}
-            </div>
-          </div>`;
-
-        const bindSearch = (id, key) => {
-          const el = root.querySelector(`#${id}`);
-          if (!el) return;
-          let t = null;
-          el.oninput = () => {
-            clearTimeout(t);
-            t = setTimeout(() => {
-              state[key] = el.value || "";
-              paint({ reuse: true });
-            }, 200);
-          };
-          if (focusId === id) {
-            el.focus();
-            if (focusPos != null) {
-              try {
-                el.setSelectionRange(focusPos, focusPos);
-              } catch (_) {}
-            }
-          }
-        };
-        bindSearch("mib-q", "mibQ");
-        bindSearch("mib-trap-q", "mibTrapQ");
-
-        root.querySelectorAll("[data-mib-mod]").forEach((b) => {
-          const select = async () => {
-            state.mibSel = b.dataset.mibMod;
-            state.mibFocusOid = null;
-            state.mibTree = {};
-            state.mibExpanded = {};
-            state.mibTrapQ = "";
-            await paint({ reuse: true });
-          };
-          b.onclick = select;
-          b.onkeydown = (ev) => {
-            if (ev.key === "Enter" || ev.key === " ") {
-              ev.preventDefault();
-              select();
-            }
-          };
-        });
-        root.querySelectorAll("[data-mib-del]").forEach((b) => {
-          b.onclick = async (ev) => {
-            ev.stopPropagation();
-            if (!confirm(`删除模块 ${b.dataset.mibDel}？`)) return;
-            try {
-              await api(`/api/mibs/${encodeURIComponent(b.dataset.mibDel)}`, {
-                method: "DELETE",
-              });
-              toast("已删除");
-              state.mibSel = null;
-              invalidateMibCache();
-              await paint();
-            } catch (e) {
-              toast(e.message, true);
-            }
-          };
-        });
-        root.querySelectorAll("[data-mib-oid]").forEach((b) => {
-          b.onclick = async () => {
-            const oid = b.dataset.mibOid;
-            const canExp = b.dataset.mibExpand === "1";
-            state.mibFocusOid = oid;
-            if (canExp && state.mibSel) {
-              const expKey = `${state.mibSel}|${oid}`;
-              if (!state.mibExpanded[expKey]) {
-                state.mibExpanded[expKey] = true;
-                try {
-                  await loadChildren(state.mibSel, oid);
-                } catch (e) {
-                  toast(e.message, true);
-                }
-              } else {
-                state.mibExpanded[expKey] = false;
-              }
-            }
-            await paint({ reuse: true });
-          };
-        });
-        const expOne = document.getElementById("btn-mib-export-one");
-        if (expOne && state.mibSel) {
-          expOne.onclick = async () => {
-            try {
-              await downloadPolicies(
-                `/api/mibs/${encodeURIComponent(state.mibSel)}/export-policies`
-              );
-              toast("已导出");
-            } catch (e) {
-              toast(e.message, true);
-            }
-          };
-        }
-        const impPol = document.getElementById("btn-mib-import-pol");
-        if (impPol && state.mibSel) {
-          impPol.onclick = async () => {
-            try {
-              const mode = await askPolicyImportMode("从 MIB 导入到策略");
-              if (mode === null) return;
-              const r = await api(
-                `/api/mibs/${encodeURIComponent(state.mibSel)}/apply-policies?mode=${mode}`,
-                { method: "POST" }
-              );
-              toast(
-                `${mode === "skip" ? "已忽略重复" : "已合并"}：新增 ${
-                  r.result?.created ?? 0
-                }，更新 ${r.result?.updated ?? 0}，跳过 ${r.result?.skipped ?? 0}`
-              );
-            } catch (e) {
-              toast(e.message, true);
-            }
-          };
-        }
-        const snmpGetBtn = document.getElementById("btn-mib-snmp-get");
-        if (snmpGetBtn && state.mibFocusOid) {
-          snmpGetBtn.onclick = async () => {
-            const host = document.getElementById("mib-snmp-host")?.value.trim() || "";
-            const port = Number(document.getElementById("mib-snmp-port")?.value || 161);
-            const community =
-              document.getElementById("mib-snmp-community")?.value.trim() || "public";
-            const out = document.getElementById("mib-snmp-out");
-            if (!host) {
-              toast("请填写目标 IP", true);
-              return;
-            }
-            localStorage.setItem("eventide_snmp_host", host);
-            localStorage.setItem("eventide_snmp_port", String(port || 161));
-            localStorage.setItem("eventide_snmp_community", community);
-            if (out) out.textContent = "查询中…";
-            snmpGetBtn.disabled = true;
-            try {
-              const r = await api("/api/snmp/get", {
-                method: "POST",
-                body: JSON.stringify({
-                  host,
-                  port: port || 161,
-                  community,
-                  oid: state.mibFocusOid,
-                  timeout_ms: 3000,
-                }),
-              });
-              if (out) {
-                out.textContent = r.ok
-                  ? `${r.type || "Value"} = ${r.value}\nOID ${r.oid || state.mibFocusOid}`
-                  : r.error || "失败";
-              }
-              toast(r.ok ? "Get 成功" : r.error || "Get 失败", !r.ok);
-            } catch (e) {
-              if (out) out.textContent = e.message || String(e);
-              toast(e.message || String(e), true);
-            } finally {
-              snmpGetBtn.disabled = false;
-            }
-          };
-        }
-      };
-
-      document.getElementById("btn-mib-reload").onclick = async () => {
-        try {
-          await api("/api/mibs/reload", { method: "POST" });
-          state.mibTree = {};
-          invalidateMibCache();
-          toast("已重新加载");
+          toast(
+            `${mode === "skip" ? "已忽略重复" : "已合并"}：新增 ${
+              data.result?.created ?? 0
+            }，更新 ${data.result?.updated ?? 0}，跳过 ${data.result?.skipped ?? 0}`
+          );
+          fileInput.value = "";
           await paint();
         } catch (e) {
           toast(e.message, true);
+          fileInput.value = "";
         }
-      };
-      document.getElementById("btn-mib-export-all").onclick = async () => {
-        try {
-          await downloadPolicies("/api/mibs/export-policies");
-          toast("已导出全部策略");
-        } catch (e) {
-          toast(e.message, true);
-        }
-      };
-      const fileInput = document.getElementById("mib-file");
-      const uploadBtn = document.getElementById("btn-mib-upload");
-      if (uploadBtn && fileInput) {
-        uploadBtn.onclick = () => fileInput.click();
-        fileInput.onchange = async () => {
-          try {
-            await uploadFiles([...fileInput.files]);
-            fileInput.value = "";
-            state.mibTree = {};
-            invalidateMibCache();
-            await paint();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      await paint();
-    },
-
-    async policies(root) {
-      const canWrite = can("trap:write");
-      setActions(`
-        <button class="ghost" id="btn-pol-refresh">刷新</button>
-        <button class="ghost" id="btn-pol-export">导出</button>
-        ${
-          canWrite
-            ? `<button class="ghost" id="btn-pol-import">导入 Excel</button>
-               <input type="file" id="pol-file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
-               <button class="primary" id="btn-pol-add">新建策略</button>`
-            : ""
-        }
-      `);
-
-      const downloadPolicies = async (path) => {
-        const t = token();
-        const res = await fetch(path, {
-          headers: t ? { Authorization: `Bearer ${t}` } : {},
-        });
-        if (!res.ok) {
-          const text = await res.text();
-          let msg = text;
-          try {
-            msg = JSON.parse(text).error || text;
-          } catch (_) {}
-          throw new Error(msg || res.statusText);
-        }
-        const blob = await res.blob();
-        const cd = res.headers.get("Content-Disposition") || "";
-        const m = /filename="?([^"]+)"?/.exec(cd);
-        const name = (m && m[1]) || "trap-policies.json";
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = name;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      };
-
-      const editPolicy = (row) => {
-        const p = row || {
-          id: "",
-          name: "",
-          trap_oid: "",
-          match_mode: "exact",
-          severity: "warning",
-          enabled: true,
-          summary_template: "${alertname}: ${ip}",
-          description: "",
-          objects: [],
-          object_oids: {},
-          keywords: [],
-          module: "",
-          status: "",
-          resolve_oid: "",
-          resolve_values: [],
-          fingerprint_oids: [],
-          severity_oid: "",
-          severity_map: {},
-        };
-        const resolveVals = Array.isArray(p.resolve_values)
-          ? p.resolve_values.join(", ")
-          : "";
-        const fpOids = Array.isArray(p.fingerprint_oids)
-          ? p.fingerprint_oids.join(", ")
-          : "";
-        const sevMapText = Object.entries(p.severity_map || {})
-          .map(([k, v]) => `${k}=${v}`)
-          .join(";");
-        const objNames = [
-          ...new Set([
-            ...Object.keys(p.object_oids || {}),
-            ...(Array.isArray(p.objects) ? p.objects : []),
-          ]),
-        ].filter(Boolean);
-        const varsHtml = [
-          "alertname",
-          "ip",
-          "trap_oid",
-          ...objNames,
-        ]
-          .map((n) => `<code class="pol-var" title="\${${esc(n)}}">\${${esc(n)}}</code>`)
-          .join("");
-        openModal(
-          `
-          <div class="modal-head">
-            <h3>${p.id ? "编辑策略" : "新建策略"}</h3>
-            <p class="desc">同一 Trap OID 一条策略；默认告警，恢复条件命中则为恢复。</p>
-          </div>
-          <form id="pol-form" class="modal-body pol-form">
-            <section class="enrich-section">
-              <h4>基本信息</h4>
-              <div class="row">
-                <div class="field" style="flex:1.4"><label>名称</label>
-                  <input name="name" required value="${esc(p.name)}" />
-                </div>
-                <div class="field" style="flex:1"><label>模块</label>
-                  <input name="module" placeholder="可选" value="${esc(p.module || "")}" />
-                </div>
-              </div>
-              <div class="field"><label>Trap OID</label>
-                <input name="trap_oid" required class="mono" value="${esc(p.trap_oid)}" />
-              </div>
-              <div class="row">
-                <div class="field"><label>匹配方式</label>
-                  <select name="match_mode">
-                    <option value="exact" ${p.match_mode === "exact" ? "selected" : ""}>精确</option>
-                    <option value="prefix" ${p.match_mode === "prefix" ? "selected" : ""}>前缀</option>
-                  </select>
-                </div>
-                <div class="field"><label>默认级别</label>
-                  <select name="severity">
-                    ${severityOptions(p.severity || "warning")}
-                  </select>
-                </div>
-              </div>
-              <label class="check-row" style="margin-bottom:12px">
-                <input type="checkbox" name="enabled" ${
-                  p.enabled !== false ? "checked" : ""
-                } /><span>启用此策略</span>
-              </label>
-            </section>
-
-            <section class="enrich-section">
-              <h4>告警与恢复</h4>
-              <div class="row">
-                <div class="field" style="flex:1.5"><label>恢复 OID</label>
-                  <input name="resolve_oid" class="mono" placeholder="例：…10.3.1.1.11" value="${esc(
-                    p.resolve_oid || ""
-                  )}" />
-                </div>
-                <div class="field"><label>恢复值</label>
-                  <input name="resolve_values" placeholder="逗号分隔，如 2" value="${esc(
-                    resolveVals
-                  )}" />
-                </div>
-              </div>
-              <p class="field-hint">该 OID 的 varbind 值命中任一项时标记为恢复；可填 OBJECTS 名或数字 OID。</p>
-              <div class="field"><label>告警标识 OID</label>
-                <input name="fingerprint_oids" class="mono" placeholder="逗号分隔，例：…10.3.1.1.9" value="${esc(
-                  fpOids
-                )}" />
-              </div>
-              <p class="field-hint">取这些 varbind 的<strong>值</strong>组成告警标识，用于关联告警与恢复（如流水号）。</p>
-            </section>
-
-            <section class="enrich-section">
-              <h4>动态级别</h4>
-              <div class="row">
-                <div class="field"><label>级别 OID</label>
-                  <input name="severity_oid" class="mono" placeholder="例：…10.3.1.1.6" value="${esc(
-                    p.severity_oid || ""
-                  )}" />
-                </div>
-                <div class="field" style="flex:1.4"><label>级别映射</label>
-                  <input name="severity_map" class="mono" placeholder="1=disaster;2=high;3=average;4=warning" value="${esc(
-                    sevMapText
-                  )}" />
-                </div>
-              </div>
-              <p class="field-hint">原值=平台级别，分号分隔；未命中映射时用上方默认级别。</p>
-            </section>
-
-            <section class="enrich-section">
-              <h4>告警内容</h4>
-              <div class="field"><label>摘要模板</label>
-                <textarea name="summary_template" class="mono pol-summary" rows="4">${esc(
-                  p.summary_template || ""
-                )}</textarea>
-              </div>
-              <p class="field-hint" style="margin-top:-8px">点击下方变量可插入到光标处</p>
-              <div class="pol-vars">${varsHtml}</div>
-              <div class="field"><label>描述</label>
-                <textarea name="description" rows="2" placeholder="可选">${esc(
-                  p.description || ""
-                )}</textarea>
-              </div>
-            </section>
-
-            <input type="hidden" name="id" value="${esc(p.id || "")}" />
-            <input type="hidden" name="objects_json" value="${esc(
-              JSON.stringify(p.objects || [])
-            )}" />
-            <input type="hidden" name="object_oids_json" value="${esc(
-              JSON.stringify(p.object_oids || {})
-            )}" />
-            <input type="hidden" name="keywords_json" value="${esc(
-              JSON.stringify(p.keywords || [])
-            )}" />
-            <input type="hidden" name="status" value="${esc(p.status || "")}" />
-          </form>
-          <div class="modal-actions">
-            <button type="button" class="ghost" id="pol-cancel">取消</button>
-            <button type="button" class="primary" id="pol-save">保存</button>
-          </div>
-        `,
-          { xl: true }
-        );
-        document.getElementById("pol-cancel").onclick = () => closeModal();
-        document.querySelectorAll("#pol-form .pol-var").forEach((el) => {
-          el.onclick = () => {
-            const ta = document.querySelector(
-              '#pol-form textarea[name="summary_template"]'
-            );
-            if (!ta) return;
-            const token = el.textContent || "";
-            const start = ta.selectionStart ?? ta.value.length;
-            const end = ta.selectionEnd ?? start;
-            ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
-            ta.focus();
-            const pos = start + token.length;
-            try {
-              ta.setSelectionRange(pos, pos);
-            } catch (_) {}
-          };
-        });
-        document.getElementById("pol-save").onclick = async () => {
-          const form = document.getElementById("pol-form");
-          const fd = new FormData(form);
-          let objects = [],
-            object_oids = {},
-            keywords = [];
-          try {
-            objects = JSON.parse(String(fd.get("objects_json") || "[]"));
-            object_oids = JSON.parse(String(fd.get("object_oids_json") || "{}"));
-            keywords = JSON.parse(String(fd.get("keywords_json") || "[]"));
-          } catch (_) {}
-          const resolve_values = String(fd.get("resolve_values") || "")
-            .split(/[,，;；]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const fingerprint_oids = String(fd.get("fingerprint_oids") || "")
-            .split(/[,，;；]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-          const severity_map = {};
-          String(fd.get("severity_map") || "")
-            .split(/[;；]+/)
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .forEach((pair) => {
-              const i = pair.indexOf("=");
-              if (i > 0) {
-                const k = pair.slice(0, i).trim();
-                const v = pair.slice(i + 1).trim();
-                if (k && v) severity_map[k] = v;
-              }
-            });
-          const body = {
-            id: String(fd.get("id") || ""),
-            name: String(fd.get("name") || "").trim(),
-            trap_oid: String(fd.get("trap_oid") || "").trim(),
-            match_mode: String(fd.get("match_mode") || "exact"),
-            severity: String(fd.get("severity") || "warning"),
-            enabled: !!form.querySelector('[name="enabled"]')?.checked,
-            summary_template: String(fd.get("summary_template") || ""),
-            description: String(fd.get("description") || ""),
-            module: String(fd.get("module") || ""),
-            status: String(fd.get("status") || ""),
-            resolve_oid: String(fd.get("resolve_oid") || "").trim(),
-            resolve_values,
-            fingerprint_oids,
-            severity_oid: String(fd.get("severity_oid") || "").trim(),
-            severity_map,
-            objects,
-            object_oids,
-            keywords,
-            updated_at: "",
-          };
-          try {
-            if (body.id) {
-              await api(`/api/policies/${encodeURIComponent(body.id)}`, {
-                method: "PUT",
-                body: JSON.stringify(body),
-              });
-            } else {
-              await api("/api/policies", {
-                method: "POST",
-                body: JSON.stringify(body),
-              });
-            }
-            toast("已保存");
-            closeModal();
-            await paint();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      };
-
-      let polCache = { items: [], path: "" };
-
-      const renderPolicies = () => {
-        const all = polCache.items || [];
-        const f = state.policyFilters || {
-          q: "",
-          enabled: "",
-          module: "",
-          resolve: "",
-        };
-        const q = (f.q || "").trim().toLowerCase();
-        const modules = [
-          ...new Set(all.map((p) => p.module).filter((m) => m && String(m).trim())),
-        ].sort();
-
-        const filtered = all.filter((p) => {
-          if (f.enabled === "1" && !p.enabled) return false;
-          if (f.enabled === "0" && p.enabled) return false;
-          if (f.module && (p.module || "") !== f.module) return false;
-          if (f.resolve === "1") {
-            const has =
-              (p.resolve_oid && String(p.resolve_oid).trim()) ||
-              (p.resolve_values && p.resolve_values.length) ||
-              p.status === "resolved";
-            if (!has) return false;
-          }
-          if (f.resolve === "0") {
-            const has =
-              (p.resolve_oid && String(p.resolve_oid).trim()) ||
-              (p.resolve_values && p.resolve_values.length) ||
-              p.status === "resolved";
-            if (has) return false;
-          }
-          if (q) {
-            const blob = [
-              p.name,
-              p.trap_oid,
-              p.module,
-              p.summary_template,
-              p.description,
-              p.resolve_oid,
-              (p.resolve_values || []).join(" "),
-              (p.fingerprint_oids || []).join(" "),
-              p.severity_oid,
-              p.severity,
-            ]
-              .join(" ")
-              .toLowerCase();
-            if (!blob.includes(q)) return false;
-          }
-          return true;
-        });
-
-        const focusId = document.activeElement?.id;
-        const focusPos =
-          focusId === "pol-q" ? document.activeElement.selectionStart : null;
-
-        const policyHasResolve = (p) =>
-          !!(
-            (p.resolve_oid && String(p.resolve_oid).trim()) ||
-            (p.resolve_values && p.resolve_values.length) ||
-            p.status === "resolved"
-          );
-        const policyResolveTitle = (p) => {
-          if (p.resolve_oid) {
-            return `${p.resolve_oid}→${(p.resolve_values || []).join(",") || "?"}`;
-          }
-          if (p.status === "resolved") return "始终恢复（专用恢复 OID）";
-          if (p.resolve_values && p.resolve_values.length) {
-            return `任意 varbind∈${p.resolve_values.join(",")}`;
-          }
-          return "";
-        };
-
-        root.innerHTML = `
-          <div class="panel" style="margin-bottom:12px">
-            <p class="hint" style="margin:0 0 10px" title="${esc(polCache.path || "")}">
-              策略 ${esc(all.length)} 条${
-                filtered.length !== all.length
-                  ? ` · 筛选后 ${esc(filtered.length)} 条`
-                  : ""
-              }
-            </p>
-            <div class="alert-filters">
-              <input id="pol-q" placeholder="搜索名称、OID、模块、摘要…" value="${esc(f.q || "")}" />
-              <select id="pol-enabled">
-                <option value="" ${!f.enabled ? "selected" : ""}>启用·全部</option>
-                <option value="1" ${f.enabled === "1" ? "selected" : ""}>已启用</option>
-                <option value="0" ${f.enabled === "0" ? "selected" : ""}>已禁用</option>
-              </select>
-              <select id="pol-module">
-                <option value="" ${!f.module ? "selected" : ""}>模块·全部</option>
-                ${modules
-                  .map(
-                    (m) =>
-                      `<option value="${esc(m)}" ${f.module === m ? "selected" : ""}>${esc(
-                        m
-                      )}</option>`
-                  )
-                  .join("")}
-              </select>
-              <select id="pol-resolve">
-                <option value="" ${!f.resolve ? "selected" : ""}>恢复条件·全部</option>
-                <option value="1" ${f.resolve === "1" ? "selected" : ""}>已配置恢复</option>
-                <option value="0" ${f.resolve === "0" ? "selected" : ""}>未配置恢复</option>
-              </select>
-            </div>
-          </div>
-          <div class="panel">
-            ${
-              filtered.length
-                ? `<div class="alert-table-scroll"><table class="data pol-table"><thead><tr>
-                    <th class="pol-col-en">启用</th><th class="pol-col-name">名称</th><th class="pol-col-oid">OID</th><th class="pol-col-fp">告警标识OID</th><th class="pol-col-sev">级别映射</th><th>模块</th><th class="pol-col-sum">摘要</th><th></th>
-                  </tr></thead><tbody>${filtered
-                    .map((p) => {
-                      const hasRes = policyHasResolve(p);
-                      const resTitle = policyResolveTitle(p);
-                      const fp = (p.fingerprint_oids || []).join(", ");
-                      const sevTitle = p.severity_oid
-                        ? `${p.severity_oid}: ${Object.entries(p.severity_map || {})
-                            .map(([k, v]) => k + "=" + v)
-                            .join(";")}`
-                        : p.severity || "";
-                      return `<tr>
-                      <td class="pol-col-en">${
-                        p.enabled
-                          ? `<span class="badge on">启用</span>`
-                          : `<span class="badge">禁用</span>`
-                      }</td>
-                      <td class="pol-col-name">
-                        <div class="pol-name-row">
-                          <span class="pol-name">${esc(p.name)}</span>
-                          ${
-                            hasRes
-                              ? `<span class="chip pol-resolve-chip" title="${esc(
-                                  resTitle
-                                )}">可恢复</span>`
-                              : ""
-                          }
-                        </div>
-                      </td>
-                      <td class="mono pol-col-oid"><span class="mib-objects" title="${esc(
-                        p.trap_oid || ""
-                      )}">${esc(p.trap_oid || "—")}</span></td>
-                      <td class="mono pol-col-fp"><span class="mib-objects" title="${esc(
-                        fp
-                      )}">${esc(fp || "—")}</span></td>
-                      <td class="mono pol-col-sev"><span class="mib-objects" title="${esc(
-                        sevTitle
-                      )}">${
-                        p.severity_oid
-                          ? esc(p.severity_oid)
-                          : esc(p.severity || "—")
-                      }</span></td>
-                      <td>${esc(p.module || "—")}</td>
-                      <td class="mono pol-col-sum"><span class="mib-objects" title="${esc(
-                        p.summary_template || ""
-                      )}">${esc(p.summary_template || "—")}</span></td>
-                      <td class="actions">
-                        ${
-                          canWrite
-                            ? `<button type="button" data-pol-edit="${esc(p.id)}">编辑</button>
-                               <button type="button" class="danger" data-pol-del="${esc(
-                                 p.id
-                               )}">删除</button>`
-                            : ""
-                        }
-                      </td>
-                    </tr>`;
-                    })
-                    .join("")}</tbody></table></div>`
-                : `<div class="empty">${
-                    all.length
-                      ? "没有符合筛选条件的策略。"
-                      : "暂无策略。请到「MIB 库」点「导入到策略」，或在此「导入 Excel」 /「新建策略」。"
-                  }</div>`
-            }
-          </div>`;
-
-        const readFilters = () => {
-          state.policyFilters = {
-            q: root.querySelector("#pol-q")?.value || "",
-            enabled: root.querySelector("#pol-enabled")?.value || "",
-            module: root.querySelector("#pol-module")?.value || "",
-            resolve: root.querySelector("#pol-resolve")?.value || "",
-          };
-        };
-        const qEl = root.querySelector("#pol-q");
-        if (qEl) {
-          let t = null;
-          qEl.oninput = () => {
-            clearTimeout(t);
-            t = setTimeout(() => {
-              readFilters();
-              renderPolicies();
-            }, 200);
-          };
-          if (focusId === "pol-q") {
-            qEl.focus();
-            if (focusPos != null) {
-              try {
-                qEl.setSelectionRange(focusPos, focusPos);
-              } catch (_) {}
-            }
-          }
-        }
-        root.querySelector("#pol-enabled")?.addEventListener("change", () => {
-          readFilters();
-          renderPolicies();
-        });
-        root.querySelector("#pol-module")?.addEventListener("change", () => {
-          readFilters();
-          renderPolicies();
-        });
-        root.querySelector("#pol-resolve")?.addEventListener("change", () => {
-          readFilters();
-          renderPolicies();
-        });
-
-        const byId = Object.fromEntries(all.map((p) => [p.id, p]));
-        root.querySelectorAll("[data-pol-edit]").forEach((b) => {
-          b.onclick = () => {
-            const row = byId[b.dataset.polEdit];
-            if (row) editPolicy(row);
-          };
-        });
-        root.querySelectorAll("[data-pol-del]").forEach((b) => {
-          b.onclick = async () => {
-            if (!confirm("删除该策略？")) return;
-            try {
-              await api(`/api/policies/${encodeURIComponent(b.dataset.polDel)}`, {
-                method: "DELETE",
-              });
-              toast("已删除");
-              await paint();
-            } catch (e) {
-              toast(e.message, true);
-            }
-          };
-        });
-      };
-
-      const paint = async () => {
-        try {
-          const data = await api("/api/policies");
-          polCache = { items: data.items || [], path: data.path || "" };
-          renderPolicies();
-        } catch (e) {
-          root.innerHTML = `<div class="panel"><p class="hint">Trap 服务未连通：${esc(
-            e.message
-          )}</p></div>`;
-        }
-      };
-
-      document.getElementById("btn-pol-refresh").onclick = () => paint();
-      document.getElementById("btn-pol-export").onclick = async () => {
-        try {
-          await downloadPolicies("/api/policies/export");
-          toast("已导出");
-        } catch (e) {
-          toast(e.message, true);
-        }
-      };
-      const importBtn = document.getElementById("btn-pol-import");
-      const fileInput = document.getElementById("pol-file");
-      if (importBtn && fileInput) {
-        importBtn.onclick = () => fileInput.click();
-        fileInput.onchange = async () => {
-          const file = fileInput.files?.[0];
-          if (!file) return;
-          try {
-            const mode = await askPolicyImportMode("导入 Excel 策略");
-            if (mode === null) {
-              fileInput.value = "";
-              return;
-            }
-            const buf = await file.arrayBuffer();
-            const t = token();
-            const res = await fetch(
-              `/api/policies/import?mode=${mode}`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type":
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                  ...(t ? { Authorization: `Bearer ${t}` } : {}),
-                },
-                body: buf,
-              }
-            );
-            const text = await res.text();
-            let data = null;
-            try {
-              data = text ? JSON.parse(text) : null;
-            } catch {
-              data = { error: text };
-            }
-            if (!res.ok) throw new Error((data && data.error) || text || res.statusText);
-            toast(
-              `${mode === "skip" ? "已忽略重复" : "已合并"}：新增 ${
-                data.result?.created ?? 0
-              }，更新 ${data.result?.updated ?? 0}，跳过 ${data.result?.skipped ?? 0}`
-            );
-            fileInput.value = "";
-            await paint();
-          } catch (e) {
-            toast(e.message, true);
-            fileInput.value = "";
-          }
-        };
-      }
-      const addBtn = document.getElementById("btn-pol-add");
-      if (addBtn) addBtn.onclick = () => editPolicy(null);
-      await paint();
-    },
-
-    async settings(root) {
-      const me = await api("/api/auth/me");
-      state.me = me;
-      applyNavPermissions();
-      const perms = (me.permissions || []).join(", ") || "—";
-      let hist = {
-        write_to_es: false,
-        search_store: "mysql",
-        es_configured: false,
-        es_url: "",
-        es_index: "eventide-alerts",
-        es_username: "",
-        es_password_set: false,
-      };
-      let trapTok = {
-        configured: false,
-        token_preview: "",
-        token_length: 0,
-        source: "empty",
-        redis_synced: false,
-      };
-      let storm = {
-        throttle_enabled: true,
-        min_interval_seconds: 60,
-        max_per_window: 20,
-        window_seconds: 60,
-        throttle_key: "fingerprint",
-        resolve_max_per_window: null,
-        aggregate_enabled: false,
-        aggregate_window_seconds: 30,
-        group_by: "alertname",
-        aggregate_mode: "head+summary",
-        aggregate_sample_labels: "ip,instance,alertIp",
-        aggregate_sample_limit: 10,
-        ingress_max_inflight: 100,
-        degrade_skip_notify: false,
-        degrade_notify_per_sec: 50,
-        source: "toml",
-      };
-      try {
-        hist = await api("/api/settings/alert-history");
-      } catch (_) {}
-      try {
-        trapTok = await api("/api/settings/trap-token");
-      } catch (_) {}
-      try {
-        storm = await api("/api/settings/storm");
-      } catch (_) {}
-      let lic = {
-        kind: "trial",
-        writable: true,
-        install_id: "—",
-        customer: null,
-        edition: null,
-        expires_at: null,
-        days_left: null,
-        reason: null,
-        has_license_token: false,
-      };
-      try {
-        lic = await api("/api/license");
-        state.license = lic;
-      } catch (_) {}
-      const canWriteSettings = can("settings:write");
-      const dis = canWriteSettings ? "" : "disabled";
-      const resolveMax =
-        storm.resolve_max_per_window == null || storm.resolve_max_per_window === ""
-          ? ""
-          : String(storm.resolve_max_per_window);
-      const licStatus = !lic.writable
-        ? "只读宽限"
-        : lic.kind === "trial"
-        ? `试用 · 剩余约 ${lic.days_left ?? "—"} 天`
-        : `已授权 · ${esc(lic.customer || "—")}`;
-      root.innerHTML = `
-        <div class="panel" style="max-width:720px;margin-bottom:16px">
-          <h3 style="margin:0 0 0.75rem;font-size:1rem">产品许可</h3>
-          <p class="hint" style="margin:0 0 12px">
-            流程：导出授权申请 → 发给厂商签发 → 导入授权文件。首次安装自动试用 30 天；到期后只读宽限。
-          </p>
-          <div class="detail-grid" style="margin-bottom:12px">
-            <div class="field"><label>状态</label>
-              <div><span class="badge ${lic.writable ? "on" : "off"}">${esc(licStatus)}</span>
-              <span class="hint" style="margin-left:8px">${esc(licenseKindLabel(lic.kind))}</span></div></div>
-            <div class="field"><label>到期时间</label>
-              <div class="mono">${esc(fmtTime(lic.expires_at) || "—")}</div></div>
-            <div class="field"><label>版本</label>
-              <div>${esc(lic.edition || "—")}</div></div>
-            <div class="field"><label>安装 ID</label>
-              <div class="mono" style="word-break:break-all">${esc(lic.install_id || "—")}</div></div>
-          </div>
-          ${lic.reason ? `<p class="hint" style="color:var(--danger);margin:0 0 12px">${esc(lic.reason)}</p>` : ""}
-          <div class="field"><label>客户 / 单位名称（写入申请文件）</label>
-            <input id="lic-customer" type="text" placeholder="如：某某科技有限公司" value="${esc(lic.customer || "")}" />
-          </div>
-          <div style="margin:10px 0 16px;display:flex;flex-wrap:wrap;gap:8px">
-            <button class="primary" type="button" id="lic-export-req">导出授权申请</button>
-          </div>
-          <div class="field"><label>导入授权文件</label>
-            <input id="lic-file" type="file" accept=".json,.eventide-lic.json,application/json,text/plain" ${dis} />
-            <textarea id="lic-token" rows="5" placeholder="或粘贴厂商返回的 .eventide-lic.json 全文" ${dis} style="margin-top:8px"></textarea>
-          </div>
-          ${
-            canWriteSettings
-              ? `<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
-                  <button class="primary" id="lic-save">导入授权</button>
-                  ${
-                    lic.has_license_token
-                      ? `<button class="danger" id="lic-clear">清除商业许可</button>`
-                      : ""
-                  }
-                </div>`
-              : `<p class="hint">需要 settings:write 才能导入授权文件。</p>`
-          }
-        </div>
-        <div class="panel" style="max-width:720px;margin-bottom:16px">
-          <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
-          <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
-          <div id="settings-theme"></div>
-        </div>
-        <div class="panel" style="max-width:720px;margin-bottom:16px">
-          <h3 style="margin:0 0 0.75rem;font-size:1rem">抗告警风暴</h3>
-          <p class="hint" style="margin:0 0 12px">
-            节流 / 聚合 / 接入削峰。保存后<strong>当前进程立即生效</strong>（写入 MySQL；多实例其他节点需重启或各自保存一次）。
-            来源 <code>${esc(storm.source || "toml")}</code>。详解见 README §11.8。
-          </p>
-          <h4 style="margin:8px 0 10px;font-size:0.92rem;color:var(--muted)">通知节流（P0）</h4>
-          <label class="check-row" style="margin:0 0 10px">
-            <input type="checkbox" id="storm-throttle-on" ${storm.throttle_enabled ? "checked" : ""} ${dis} />
-            <span>启用节流</span>
-          </label>
-          <div class="detail-grid" style="margin-bottom:8px">
-            <div class="field"><label>最短间隔（秒）</label>
-              <input id="storm-min-interval" type="number" min="1" value="${esc(String(storm.min_interval_seconds ?? 60))}" ${dis} /></div>
-            <div class="field"><label>窗口秒数</label>
-              <input id="storm-window" type="number" min="1" value="${esc(String(storm.window_seconds ?? 60))}" ${dis} /></div>
-            <div class="field"><label>窗口内最多发送</label>
-              <input id="storm-max-window" type="number" min="1" value="${esc(String(storm.max_per_window ?? 20))}" ${dis} /></div>
-            <div class="field"><label>恢复通知上限（可选）</label>
-              <input id="storm-resolve-max" type="number" min="1" placeholder="默认=最多发送" value="${esc(resolveMax)}" ${dis} /></div>
-          </div>
-          <div class="field"><label>节流键 throttle_key</label>
-            <input id="storm-throttle-key" type="text" placeholder="fingerprint 或 labels:alertname" value="${esc(storm.throttle_key || "fingerprint")}" ${dis} />
-          </div>
-          <h4 style="margin:16px 0 10px;font-size:0.92rem;color:var(--muted)">时间窗聚合（P1）</h4>
-          <label class="check-row" style="margin:0 0 10px">
-            <input type="checkbox" id="storm-agg-on" ${storm.aggregate_enabled ? "checked" : ""} ${dis} />
-            <span>启用聚合</span>
-          </label>
-          <div class="detail-grid" style="margin-bottom:8px">
-            <div class="field"><label>聚合窗口（秒）</label>
-              <input id="storm-agg-window" type="number" min="1" value="${esc(String(storm.aggregate_window_seconds ?? 30))}" ${dis} /></div>
-            <div class="field"><label>采样条数上限</label>
-              <input id="storm-agg-limit" type="number" min="1" value="${esc(String(storm.aggregate_sample_limit ?? 10))}" ${dis} /></div>
-          </div>
-          <div class="field"><label>分组 group_by</label>
-            <input id="storm-group-by" type="text" placeholder="alertname 或 alertname,namespace" value="${esc(storm.group_by || "alertname")}" ${dis} /></div>
-          <div class="field"><label>模式</label>
-            <select id="storm-agg-mode" ${dis}>
-              <option value="head+summary" ${storm.aggregate_mode === "head+summary" ? "selected" : ""}>head+summary（首条+摘要）</option>
-              <option value="summary_only" ${storm.aggregate_mode === "summary_only" ? "selected" : ""}>summary_only（仅摘要）</option>
-            </select>
-          </div>
-          <div class="field"><label>摘要采样标签</label>
-            <input id="storm-agg-samples" type="text" placeholder="ip,instance,alertIp" value="${esc(storm.aggregate_sample_labels || "")}" ${dis} /></div>
-          <h4 style="margin:16px 0 10px;font-size:0.92rem;color:var(--muted)">接入削峰（P2）</h4>
-          <div class="detail-grid" style="margin-bottom:8px">
-            <div class="field"><label>最大并发 inflight（0=不限）</label>
-              <input id="storm-inflight" type="number" min="0" value="${esc(String(storm.ingress_max_inflight ?? 100))}" ${dis} /></div>
-            <div class="field"><label>降级通知速率阈值 / 秒</label>
-              <input id="storm-degrade-rate" type="number" min="1" value="${esc(String(storm.degrade_notify_per_sec ?? 50))}" ${dis} /></div>
-          </div>
-          <label class="check-row" style="margin:10px 0">
-            <input type="checkbox" id="storm-degrade-skip" ${storm.degrade_skip_notify ? "checked" : ""} ${dis} />
-            <span>高压时只落库不发通知（degrade_skip_notify）</span>
-          </label>
-          ${
-            canWriteSettings
-              ? `<div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
-                  <button class="primary" id="storm-save">保存</button>
-                  <button id="storm-reset">恢复 toml 默认</button>
-                </div>`
-              : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
-          }
-        </div>
-        <div class="panel" style="max-width:720px;margin-bottom:16px">
-          <h3 style="margin:0 0 0.75rem;font-size:1rem">Trap HTTP Token</h3>
-          <p class="hint" style="margin:0 0 12px">
-            保护 Trap 服务的 stats / recent / simulate / reload（health 始终开放）。
-            控制台经 <code>/trap-api</code> 反代时自动带上；变更会写入 MySQL，并经 Redis 热更新到 Trap。
-          </p>
-          <div class="field"><label>状态</label>
-            <div>${
-              trapTok.configured
-                ? `<span class="badge on">已启用</span>`
-                : `<span class="badge off">未启用（HTTP 接口开放）</span>`
-            }
-            · 来源 <code>${esc(trapTok.source || "empty")}</code>
-            · Redis ${trapTok.redis_synced ? "已同步" : "不可用"}</div>
-          </div>
-          <div class="field"><label>当前 Token（脱敏）</label>
-            <div class="mono" id="trap-tok-preview">${esc(trapTok.token_preview || "—")}
-              ${trapTok.token_length ? `（${trapTok.token_length} 字符）` : ""}</div>
-          </div>
-          <div class="field"><label>手动设置</label>
-            <input id="trap-tok-input" type="text" autocomplete="off" placeholder="至少 8 位，或点下方生成"
-              ${dis} />
-          </div>
-          ${
-            canWriteSettings
-              ? `<div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
-                  <button class="primary" id="trap-tok-rotate">生成并保存</button>
-                  <button id="trap-tok-save">保存输入</button>
-                  <button class="danger" id="trap-tok-clear">清除（关闭鉴权）</button>
-                </div>
-                <pre id="trap-tok-reveal" class="mono" style="display:none;margin-top:12px;padding:10px;background:var(--panel-2);border-radius:6px;word-break:break-all"></pre>`
-              : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
-          }
-        </div>
-        <div class="panel" style="max-width:720px;margin-bottom:16px">
-          <h3 style="margin:0 0 0.75rem;font-size:1rem">告警历史仓库</h3>
-          <p class="hint" style="margin:0 0 12px">
-            在此填写 Elasticsearch 地址并保存即可生效（也可在 <code>eventide.toml</code> 里预置）。
-            状态：${
-              hist.es_configured
-                ? `<span class="badge on">已连接配置</span>`
-                : `<span class="badge off">未配置地址</span>`
-            }
-          </p>
-          <div class="field"><label>ES 地址</label>
-            <input id="hist-es-url" type="text" placeholder="http://127.0.0.1:9200" value="${esc(
-              hist.es_url || ""
-            )}" ${dis} />
-          </div>
-          <div class="field"><label>Index</label>
-            <input id="hist-es-index" type="text" placeholder="eventide-alerts" value="${esc(
-              hist.es_index || "eventide-alerts"
-            )}" ${dis} />
-          </div>
-          <div class="field"><label>用户名（可选）</label>
-            <input id="hist-es-user" type="text" autocomplete="off" value="${esc(
-              hist.es_username || ""
-            )}" ${dis} />
-          </div>
-          <div class="field"><label>密码（可选）</label>
-            <input id="hist-es-pass" type="password" autocomplete="new-password" placeholder="${
-              hist.es_password_set ? "已保存，留空则不修改" : "无密码可留空"
-            }" ${dis} />
-          </div>
-          <label class="check-row" style="margin:12px 0">
-            <input type="checkbox" id="hist-write-es" ${hist.write_to_es ? "checked" : ""} ${dis} />
-            <span>同步告警到历史事件（Elasticsearch）</span>
-          </label>
-          <div class="field" style="margin-top:8px">
-            <label>默认列表范围</label>
-            <select id="hist-search-store" ${dis}>
-              <option value="mysql" ${hist.search_store === "mysql" ? "selected" : ""}>最近事件</option>
-              <option value="es" ${hist.search_store === "es" ? "selected" : ""}>历史事件</option>
-            </select>
-          </div>
-          ${
-            canWriteSettings
-              ? `<div style="margin-top:14px"><button class="primary" id="hist-save">保存</button></div>`
-              : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
-          }
-        </div>
-        <div class="panel" style="max-width:720px">
-          <h3 style="margin:0 0 1rem;font-size:1rem">运行信息</h3>
-          <div class="field"><label>当前用户</label><div>${esc(me.display_name || me.username)}（${esc(
-        me.username
-      )}）</div></div>
-          <div class="field"><label>权限</label><div class="mono" style="font-size:12px;word-break:break-all">${esc(
-            perms
-          )}</div></div>
-          <div class="field"><label>监听地址</label><div class="mono">${esc(me.listen)}</div></div>
-          <div class="field"><label>数据库</label><div class="mono">${esc(me.database_path)}</div></div>
-          <div class="field"><label>静态资源目录</label><div class="mono">${esc(me.static_dir)}</div></div>
-          <div class="field"><label>调度周期</label><div>${me.scheduler_tick_seconds} 秒</div></div>
-          <div class="field"><label>Token 有效期</label><div>${me.token_ttl_hours} 小时</div></div>
-          <p style="color:var(--muted);font-size:0.88rem;margin:1rem 0 0">
-            账号请在「用户管理」维护。JWT 密钥与有效期见 <code>eventide.toml</code> 的 <code>[auth]</code> 段（<code>jwt_secret</code> / <code>token_ttl_hours</code>）；首次空库会用其中的 username/password 种子管理员。
-          </p>
-        </div>`;
-      bindThemeHost(document.getElementById("settings-theme"), "cards");
-
-      const downloadTextFile = (filename, text, mime = "application/json") => {
-        const blob = new Blob([text], { type: mime });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      };
-
-      const licExport = document.getElementById("lic-export-req");
-      if (licExport) {
-        licExport.onclick = async () => {
-          try {
-            const customer = (document.getElementById("lic-customer")?.value || "").trim();
-            const params = new URLSearchParams();
-            if (customer) params.set("customer", customer);
-            const req = await api(
-              "/api/license/request" + (params.toString() ? `?${params}` : "")
-            );
-            const name = `eventide-license-request-${(req.install_id || "install").slice(0, 8)}.json`;
-            downloadTextFile(name, JSON.stringify(req, null, 2) + "\n");
-            toast("已导出授权申请，请发给厂商签发");
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-
-      const licFile = document.getElementById("lic-file");
-      if (licFile) {
-        licFile.onchange = async () => {
-          const f = licFile.files && licFile.files[0];
-          if (!f) return;
-          try {
-            const text = await f.text();
-            const ta = document.getElementById("lic-token");
-            if (ta) ta.value = text.trim();
-          } catch (e) {
-            toast(e.message || "读取文件失败", true);
-          }
-        };
-      }
-
-      const licSave = document.getElementById("lic-save");
-      if (licSave) {
-        licSave.onclick = async () => {
-          try {
-            const content = (document.getElementById("lic-token")?.value || "").trim();
-            if (!content) {
-              toast("请选择或粘贴授权文件", true);
-              return;
-            }
-            await api("/api/license", {
-              method: "PUT",
-              body: JSON.stringify({ content }),
-            });
-            toast("授权已导入");
-            refreshLicenseBanner();
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      const licClear = document.getElementById("lic-clear");
-      if (licClear) {
-        licClear.onclick = async () => {
-          if (!confirm("清除商业许可后将回到试用/过期态，确定？")) return;
-          try {
-            await api("/api/license", { method: "DELETE" });
-            toast("已清除商业许可");
-            refreshLicenseBanner();
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-
-      const revealTok = (tok) => {
-        const el = document.getElementById("trap-tok-reveal");
-        if (!el || !tok) return;
-        el.style.display = "block";
-        el.textContent = `新 Token（请立即复制，刷新后不再明文显示）：\n${tok}`;
-      };
-      const applyTrapTok = async (body) => {
-        const r = await api("/api/settings/trap-token", {
-          method: "PUT",
-          body: JSON.stringify(body),
-        });
-        if (r.token) revealTok(r.token);
-        else renderPage();
-        return r;
-      };
-      const rotateBtn = document.getElementById("trap-tok-rotate");
-      if (rotateBtn) {
-        rotateBtn.onclick = async () => {
-          try {
-            await applyTrapTok({ rotate: true });
-            toast("已生成并同步 Trap Token");
-            document.getElementById("trap-tok-preview").textContent = "(见下方明文，请复制)";
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      const saveTokBtn = document.getElementById("trap-tok-save");
-      if (saveTokBtn) {
-        saveTokBtn.onclick = async () => {
-          try {
-            const token = (document.getElementById("trap-tok-input")?.value || "").trim();
-            if (token.length < 8) {
-              toast("token 至少 8 个字符", true);
-              return;
-            }
-            await applyTrapTok({ token });
-            toast("Trap Token 已保存");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      const clearTokBtn = document.getElementById("trap-tok-clear");
-      if (clearTokBtn) {
-        clearTokBtn.onclick = async () => {
-          if (!confirm("清除后 Trap HTTP（除 health）将不再校验 Token，确定？")) return;
-          try {
-            await applyTrapTok({ clear: true });
-            toast("已清除 Trap Token");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      const saveBtn = document.getElementById("hist-save");
-      if (saveBtn) {
-        saveBtn.onclick = async () => {
-          try {
-            const body = {
-              write_to_es: !!document.getElementById("hist-write-es")?.checked,
-              search_store: document.getElementById("hist-search-store")?.value || "mysql",
-              es_url: (document.getElementById("hist-es-url")?.value || "").trim(),
-              es_index: (document.getElementById("hist-es-index")?.value || "").trim(),
-              es_username: (document.getElementById("hist-es-user")?.value || "").trim(),
-              es_password: document.getElementById("hist-es-pass")?.value || "",
-            };
-            hist = await api("/api/settings/alert-history", {
-              method: "PUT",
-              body: JSON.stringify(body),
-            });
-            toast("告警历史设置已保存");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      const stormSave = document.getElementById("storm-save");
-      if (stormSave) {
-        stormSave.onclick = async () => {
-          try {
-            const resolveRaw = (document.getElementById("storm-resolve-max")?.value || "").trim();
-            const body = {
-              throttle_enabled: !!document.getElementById("storm-throttle-on")?.checked,
-              min_interval_seconds: Number(document.getElementById("storm-min-interval")?.value || 60),
-              max_per_window: Number(document.getElementById("storm-max-window")?.value || 20),
-              window_seconds: Number(document.getElementById("storm-window")?.value || 60),
-              throttle_key: (document.getElementById("storm-throttle-key")?.value || "").trim(),
-              resolve_max_per_window: resolveRaw === "" ? null : Number(resolveRaw),
-              aggregate_enabled: !!document.getElementById("storm-agg-on")?.checked,
-              aggregate_window_seconds: Number(document.getElementById("storm-agg-window")?.value || 30),
-              group_by: (document.getElementById("storm-group-by")?.value || "").trim(),
-              aggregate_mode: document.getElementById("storm-agg-mode")?.value || "head+summary",
-              aggregate_sample_labels: (document.getElementById("storm-agg-samples")?.value || "").trim(),
-              aggregate_sample_limit: Number(document.getElementById("storm-agg-limit")?.value || 10),
-              ingress_max_inflight: Number(document.getElementById("storm-inflight")?.value || 100),
-              degrade_skip_notify: !!document.getElementById("storm-degrade-skip")?.checked,
-              degrade_notify_per_sec: Number(document.getElementById("storm-degrade-rate")?.value || 50),
-            };
-            await api("/api/settings/storm", {
-              method: "PUT",
-              body: JSON.stringify(body),
-            });
-            toast("抗风暴配置已保存并生效");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-      const stormReset = document.getElementById("storm-reset");
-      if (stormReset) {
-        stormReset.onclick = async () => {
-          if (!confirm("清除控制台覆盖，恢复为 eventide.toml [storm]？")) return;
-          try {
-            await api("/api/settings/storm", {
-              method: "PUT",
-              body: JSON.stringify({ reset: true }),
-            });
-            toast("已恢复 toml [storm]");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      }
-    },
-
-    async users(root) {
-      const canWrite = can("users:write");
-      setActions(
-        canWrite ? `<button class="primary" id="btn-add">新建用户</button>` : ""
-      );
-      if (canWrite) document.getElementById("btn-add").onclick = () => editUser();
-      const [rows, roles, depts] = await Promise.all([
-        api("/api/users"),
-        api("/api/roles"),
-        api("/api/departments"),
-      ]);
-      state.cache.roles = roles;
-      state.cache.departments = depts;
-      const roleMap = Object.fromEntries(roles.map((r) => [r.id, r.name]));
-      const deptMap = Object.fromEntries(depts.map((d) => [d.id, d.name]));
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>用户名</th><th>显示名</th><th>部门</th><th>角色</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map((u) => {
-                const roleNames = (u.role_ids || [])
-                  .map((id) => roleMap[id] || id.slice(0, 8))
-                  .join("、") || "—";
-                const dept = u.department_id ? deptMap[u.department_id] || "—" : "—";
-                return `<tr>
-              <td class="mono">${esc(u.username)}</td>
-              <td>${esc(u.display_name || "—")}</td>
-              <td>${esc(dept)}</td>
-              <td>${esc(roleNames)}</td>
-              <td><span class="badge ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span></td>
-              <td class="actions">${
-                canWrite
-                  ? `<button data-edit="${u.id}">编辑</button>
-                <button data-pw="${u.id}">重置密码</button>
-                <button class="danger" data-del="${u.id}">删除</button>`
-                  : ""
-              }</td></tr>`;
-              })
-              .join("")}</tbody></table>`
-          : `<div class="empty">暂无用户。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editUser(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-pw]").forEach((b) => {
-        b.onclick = () => resetUserPassword(b.dataset.pw);
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该用户？")) return;
-          try {
-            await api(`/api/users/${b.dataset.del}`, { method: "DELETE" });
-            toast("已删除");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      });
-    },
-
-    async roles(root) {
-      const canWrite = can("roles:write");
-      setActions(canWrite ? `<button class="primary" id="btn-add">新建角色</button>` : "");
-      if (canWrite) document.getElementById("btn-add").onclick = () => editRole();
-      const [rows, catalog] = await Promise.all([api("/api/roles"), api("/api/permissions")]);
-      state.cache.permCatalog = catalog;
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>名称</th><th>说明</th><th>权限</th><th></th></tr></thead>
-            <tbody>${rows
-              .map((r) => {
-                const perms = (r.permissions || []).join(", ") || "—";
-                return `<tr>
-              <td>${esc(r.name)}${r.is_system ? ' <span class="badge on">系统</span>' : ""}</td>
-              <td>${esc(r.description || "—")}</td>
-              <td class="mono" style="font-size:12px;max-width:360px;word-break:break-all">${esc(
-                perms
-              )}</td>
-              <td class="actions">${
-                canWrite
-                  ? `<button data-edit="${r.id}">编辑</button>
-                ${
-                  r.is_system
-                    ? ""
-                    : `<button class="danger" data-del="${r.id}">删除</button>`
-                }`
-                  : ""
-              }</td></tr>`;
-              })
-              .join("")}</tbody></table>`
-          : `<div class="empty">暂无角色。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editRole(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该角色？")) return;
-          try {
-            await api(`/api/roles/${b.dataset.del}`, { method: "DELETE" });
-            toast("已删除");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      });
-    },
-
-    async departments(root) {
-      const canWrite = can("departments:write");
-      setActions(canWrite ? `<button class="primary" id="btn-add">新建部门</button>` : "");
-      if (canWrite) document.getElementById("btn-add").onclick = () => editDepartment();
-      const rows = await api("/api/departments");
-      state.cache.departments = rows;
-      const byId = Object.fromEntries(rows.map((d) => [d.id, d]));
-      root.innerHTML = `<div class="panel">${
-        rows.length
-          ? `<table class="data"><thead><tr><th>名称</th><th>上级</th><th>排序</th><th>状态</th><th></th></tr></thead>
-            <tbody>${rows
-              .map((d) => {
-                const parent = d.parent_id
-                  ? (byId[d.parent_id] && byId[d.parent_id].name) || "—"
-                  : "—";
-                return `<tr>
-              <td>${esc(d.name)}</td>
-              <td>${esc(parent)}</td>
-              <td>${d.sort_order}</td>
-              <td><span class="badge ${d.enabled ? "on" : "off"}">${d.enabled ? "启用" : "停用"}</span></td>
-              <td class="actions">${
-                canWrite
-                  ? `<button data-edit="${d.id}">编辑</button>
-                <button class="danger" data-del="${d.id}">删除</button>`
-                  : ""
-              }</td></tr>`;
-              })
-              .join("")}</tbody></table>`
-          : `<div class="empty">暂无部门。</div>`
-      }</div>`;
-      root.querySelectorAll("[data-edit]").forEach((b) => {
-        b.onclick = () => editDepartment(rows.find((x) => x.id === b.dataset.edit));
-      });
-      root.querySelectorAll("[data-del]").forEach((b) => {
-        b.onclick = async () => {
-          if (!confirm("确认删除该部门？")) return;
-          try {
-            await api(`/api/departments/${b.dataset.del}`, { method: "DELETE" });
-            toast("已删除");
-            renderPage();
-          } catch (e) {
-            toast(e.message, true);
-          }
-        };
-      });
-    },
-  };
-
-  function getAlertView() {
-    const v = localStorage.getItem(ALERT_VIEW_KEY);
-    return v === "table" ? "table" : "cards";
-  }
-
-  function setAlertView(v) {
-    localStorage.setItem(ALERT_VIEW_KEY, v === "table" ? "table" : "cards");
-  }
-
-  function getAlertAutoRefresh() {
-    const v = Number(localStorage.getItem(ALERT_AUTO_KEY));
-    return [0, 15, 30, 60].includes(v) ? v : 15;
-  }
-
-  function setAlertAutoRefresh(v) {
-    const n = Number(v);
-    localStorage.setItem(ALERT_AUTO_KEY, String([0, 15, 30, 60].includes(n) ? n : 15));
-  }
-
-  function scheduleAlertsAutoRefresh(tick) {
-    stopAlertsTimer();
-    const sec = getAlertAutoRefresh();
-    if (!sec || typeof tick !== "function") return;
-    alertsTimer = setInterval(() => {
-      if (state.page !== "alerts") {
-        stopAlertsTimer();
-        return;
-      }
-      tick();
-    }, sec * 1000);
-  }
-
-  function normalizeAlertList(data) {
-    if (Array.isArray(data)) {
-      const items = data;
-      return {
-        items,
-        total: items.length,
-        page: 1,
-        limit: items.length || ALERT_PAGE_SIZE,
-        status_counts: {
-          firing: items.filter((a) => a.status === "firing").length,
-          pending: items.filter((a) => a.status === "pending").length,
-          resolved: items.filter((a) => a.status === "resolved").length,
-        },
       };
     }
-    const items = Array.isArray(data?.items) ? data.items : [];
-    const sc = data?.status_counts || {};
-    return {
-      items,
-      total: Number(data?.total) || items.length,
-      page: Number(data?.page) || 1,
-      limit: Number(data?.limit) || ALERT_PAGE_SIZE,
-      status_counts: {
-        firing: Number(sc.firing) || 0,
-        pending: Number(sc.pending) || 0,
-        resolved: Number(sc.resolved) || 0,
-      },
-    };
-  }
-
-  function alertPagerHtml(page, pages, total, limit) {
-    if (total <= 0) return "";
-    const from = (page - 1) * limit + 1;
-    const to = Math.min(page * limit, total);
-    return `<div class="alert-pager">
-      <span class="alert-pager-meta">第 ${from}–${to} 条，共 ${total} 条</span>
-      <div class="alert-pager-btns">
-        <button type="button" class="ghost" data-alert-page="prev" ${page <= 1 ? "disabled" : ""}>上一页</button>
-        <span class="alert-pager-page">${page} / ${pages}</span>
-        <button type="button" class="ghost" data-alert-page="next" ${page >= pages ? "disabled" : ""}>下一页</button>
-      </div>
-    </div>`;
-  }
-
-  function bindAlertPager(root, reload) {
-    root.querySelectorAll("[data-alert-page]").forEach((btn) => {
-      btn.onclick = () => {
-        const cur = Number(state.alertFilters?.page) || 1;
-        const next = btn.dataset.alertPage === "prev" ? cur - 1 : cur + 1;
-        if (next < 1) return;
-        state.alertFilters = { ...(state.alertFilters || {}), page: next };
-        reload();
-      };
-    });
-  }
-
-  function alertTargetIp(a) {
-    const l = a.labels || {};
-    return l.alertIp || l.ip || l.ipaddr || l.instance || l.host || l.hostname || "";
-  }
-
-  function alertCards(rows, ingressMap) {
-    return `<div class="alert-feed">${rows
-      .map((a, i) => {
-        const name = alertDisplayName(a);
-        const summary = alertSummary(a);
-        const dur = alertDuration(a);
-        const src = alertSourceLabel(a, ingressMap);
-        const val = fmtValue(a.value);
-        const ip = alertTargetIp(a);
-        const chips = labelChips(
-          a.labels,
-          ["alertname", "severity", "source", "alertIp", "ip", "ipaddr", "instance", "host", "hostname"],
-          3
-        );
-        return `<article class="alert-card status-${esc(a.status)} sev-${esc(
-          a.severity
-        )}" data-alert-idx="${i}" tabindex="0" role="button">
-          <div class="ac-rail" aria-hidden="true"></div>
-          <div class="ac-body">
-            <div class="ac-top">
-              <div class="ac-title-row">
-                <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
-                <span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span>
-                <h3 class="ac-name">${esc(name)}</h3>
-              </div>
-              <button type="button" class="ghost ac-detail" data-alert-detail="${i}">详情</button>
-            </div>
-            <p class="ac-summary">${esc(summary || "无描述")}</p>
-            <div class="ac-meta">
-              <span>${esc(src)}</span>
-              ${
-                ip
-                  ? `<span class="dot">·</span><span class="ac-ip" title="告警 IP">IP ${esc(ip)}</span>`
-                  : ""
-              }
-              <span class="dot">·</span>
-              <span>持续 ${esc(dur)}</span>
-              ${val !== "—" ? `<span class="dot">·</span><span class="mono">值 ${esc(val)}</span>` : ""}
-              <span class="dot">·</span>
-              <span>更新于 ${esc(fmtTime(a.last_evaluated_at))}</span>
-            </div>
-            <div class="alert-labels">${chips}</div>
-          </div>
-        </article>`;
-      })
-      .join("")}</div>`;
-  }
-
-  function silenceFromAlert(a) {
-    if (!a) return;
-    const matchers = { ...(a.labels || {}) };
-    delete matchers.source;
-    editSilence({
-      comment: `静默 ${alertDisplayName(a)}`,
-      matchers,
-      rule_id: null,
-    });
-  }
-
-  function filterAlertsByQuery(q) {
-    const query = String(q || "").trim();
-    if (!query) {
-      toast("筛选关键词为空", true);
-      return;
-    }
-    state.alertFilters = { ...(state.alertFilters || {}), q: query, page: 1 };
-    navigate("alerts");
-  }
-
-  function filterAlertsByIp(ip) {
-    const value = String(ip || "").trim();
-    if (!value) {
-      toast("IP 为空", true);
-      return;
-    }
-    state.alertFilters = { ...(state.alertFilters || {}), ip: value, page: 1 };
-    navigate("alerts");
-  }
-
-  function openAlertContextMenu(e, a, ingressMap) {
-    if (!a) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const summary = alertSummary(a);
-    const ip = alertTargetIp(a);
-    const name = alertDisplayName(a);
-    const nameOk = !!name && name !== "未命名告警";
-    showCtxMenu(e.clientX, e.clientY, [
-      {
-        label: "查看详情",
-        onClick: () => showAlertDetail(a, ingressMap || {}),
-      },
-      {
-        label: "据此静默",
-        onClick: () => silenceFromAlert(a),
-      },
-      { sep: true },
-      {
-        label: "复制告警描述",
-        disabled: !summary,
-        onClick: () => copyText(summary, "告警描述"),
-      },
-      {
-        label: "复制告警 IP",
-        disabled: !ip,
-        onClick: () => copyText(ip, "告警 IP"),
-      },
-      {
-        label: "复制告警标识",
-        disabled: !a.fingerprint,
-        onClick: () => copyText(a.fingerprint, "告警标识"),
-      },
-      { sep: true },
-      {
-        label: "按此告警名称筛选",
-        disabled: !nameOk,
-        onClick: () => filterAlertsByQuery(name),
-      },
-      {
-        label: "按此 IP 筛选",
-        disabled: !ip,
-        onClick: () => filterAlertsByIp(ip),
-      },
-    ]);
-  }
-
-  function bindAlertCards(container, rows, ingressMap) {
-    if (!container || !rows?.length) return;
-    const open = (i) => showAlertDetail(rows[i], ingressMap || {});
-    container.querySelectorAll(".alert-card").forEach((card) => {
-      card.addEventListener("click", (e) => {
-        if (e.target.closest("[data-alert-detail]")) return;
-        open(Number(card.dataset.alertIdx));
-      });
-      card.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          open(Number(card.dataset.alertIdx));
-        }
-      });
-      card.addEventListener("contextmenu", (e) => {
-        const idx = Number(card.dataset.alertIdx);
-        openAlertContextMenu(e, rows[idx], ingressMap);
-      });
-    });
-    container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        open(Number(btn.dataset.alertDetail));
-      });
-    });
-  }
-
-  function alertTableGrid(rows, ingressMap) {
-    return `<table class="data alert-table"><thead><tr>
-      <th>状态</th><th>级别</th><th>告警名称</th><th>告警描述</th><th>告警 IP</th><th>当前值</th>
-      <th class="col-src">来源</th><th class="col-time">开始时间</th><th class="col-dur">持续</th><th class="col-time">最后更新</th><th class="col-act"></th>
-    </tr></thead><tbody>${rows
-      .map((a, i) => {
-        const name = alertDisplayName(a);
-        const summary = alertSummary(a);
-        const dur = alertDuration(a);
-        const src = alertSourceLabel(a, ingressMap);
-        const ip = alertTargetIp(a);
-        return `<tr data-alert-idx="${i}">
-      <td><span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span></td>
-      <td><span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span></td>
-      <td>
-        <div class="alert-name">${esc(name)}</div>
-        <div class="alert-labels">${labelChips(
-          a.labels,
-          ["alertname", "severity", "source", "alertIp", "ip", "ipaddr", "instance", "host", "hostname"],
-          3
-        )}</div>
-      </td>
-      <td title="${esc(summary)}"><div class="alert-summary-text">${esc(summary || "—")}</div></td>
-      <td class="mono">${esc(ip || "—")}</td>
-      <td class="mono">${fmtValue(a.value)}</td>
-      <td class="col-src"><span class="source-tag" title="${esc(src)}">${esc(src)}</span></td>
-      <td class="col-time">${esc(fmtTime(a.starts_at))}</td>
-      <td class="col-dur">${esc(dur)}</td>
-      <td class="col-time">${esc(fmtTime(a.last_evaluated_at))}</td>
-      <td class="col-act"><button type="button" data-alert-detail="${i}">详情</button></td>
-    </tr>`;
-      })
-      .join("")}</tbody></table>`;
-  }
-
-  function bindAlertTableGrid(container, rows, ingressMap) {
-    if (!container || !rows?.length) return;
-    container.querySelectorAll("table.alert-table tbody tr[data-alert-idx]").forEach((tr) => {
-      tr.addEventListener("contextmenu", (e) => {
-        const idx = Number(tr.dataset.alertIdx);
-        openAlertContextMenu(e, rows[idx], ingressMap);
-      });
-    });
-    container.querySelectorAll("[data-alert-detail]").forEach((btn) => {
-      btn.onclick = () =>
-        showAlertDetail(rows[Number(btn.dataset.alertDetail)], ingressMap || {});
-    });
-  }
-
-  function alertTable(rows, opts = {}) {
-    if (!rows.length) return `<div class="empty">暂无告警事件</div>`;
-    const compact = !!opts.compact;
-    const ingressMap = opts.ingressMap || {};
-    if (!compact) {
-      return getAlertView() === "table"
-        ? alertTableGrid(rows, ingressMap)
-        : alertCards(rows, ingressMap);
-    }
-    // Overview: always compact cards
-    return `<div class="alert-feed compact">${rows
-      .slice(0, 8)
-      .map((a, i) => {
-        const name = alertDisplayName(a);
-        const summary = alertSummary(a);
-        const src = alertSourceLabel(a, ingressMap);
-        return `<article class="alert-card compact status-${esc(a.status)}" data-alert-idx="${i}" tabindex="0" role="button">
-          <div class="ac-rail"></div>
-          <div class="ac-body">
-            <div class="ac-top">
-              <div class="ac-title-row">
-                <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
-                <h3 class="ac-name">${esc(name)}</h3>
-              </div>
-              <span class="ac-when">${esc(fmtTime(a.last_evaluated_at))}</span>
-            </div>
-            <p class="ac-summary">${esc(summary || src)}</p>
-          </div>
-        </article>`;
-      })
-      .join("")}</div>`;
-  }
-
-  function bindAlertTable(container, rows, ingressMap) {
-    bindAlertCards(container, rows, ingressMap);
-  }
-
-  function labelChips(labels, hide = [], max = 6) {
-    const entries = Object.entries(labels || {}).filter(([k]) => !hide.includes(k));
-    if (!entries.length) return "";
-    const shown = entries.slice(0, max);
-    const more = entries.length - shown.length;
-    return (
-      shown
-        .map(
-          ([k, v]) =>
-            `<span class="chip" title="${esc(k)}=${esc(v)}"><b>${esc(k)}</b>${esc(
-              String(v).length > 24 ? String(v).slice(0, 24) + "…" : v
-            )}</span>`
-        )
-        .join("") + (more > 0 ? `<span class="chip more">+${more}</span>` : "")
-    );
-  }
-
-  function alertSourceLabel(a, ingressMap) {
-    const s = (a.labels && a.labels.source) || "";
-    const route = ingressMap && ingressMap[a.rule_id];
-    if (s.startsWith("ingress:") || route) {
-      const kind = s.startsWith("ingress:") ? s.slice("ingress:".length) : route?.kind || "";
-      const name = route?.name;
-      if (name) return `接入 · ${name}`;
-      return kind === "alertmanager" ? "AM 接入" : kind === "kafka" ? "Kafka 接入" : "告警接入";
-    }
-    return "规则评估";
-  }
-
-  function alertDisplayName(a) {
-    const l = a.labels || {};
-    return l.alertname || l.bizchainName || l.businessName || l.rule || "未命名告警";
-  }
-
-  function alertSummary(a) {
-    const an = a.annotations || {};
-    // Prefer summary: Trap 策略「摘要模板」/ 丰富「告警描述」都写 annotations.summary；
-    // description 多为策略静态说明，不应盖住真正的告警正文。
-    return (
-      an.summary ||
-      an.description ||
-      an.message ||
-      an.retMessage ||
-      an.title ||
-      ""
-    );
-  }
-
-  function statusLabel(s) {
-    return { firing: "告警中", pending: "等待中", resolved: "已恢复" }[s] || s;
-  }
-
-  function fmtValue(v) {
-    if (v == null || v === "") return "—";
-    const n = Number(v);
-    if (Number.isFinite(n)) {
-      return Number.isInteger(n) ? String(n) : n.toFixed(4).replace(/\.?0+$/, "");
-    }
-    return String(v);
-  }
-
-  function alertDuration(a) {
-    if (!a.starts_at) return "—";
-    const start = new Date(a.starts_at).getTime();
-    const end =
-      a.status === "resolved" && a.ends_at
-        ? new Date(a.ends_at).getTime()
-        : Date.now();
-    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "—";
-    const sec = Math.floor((end - start) / 1000);
-    if (sec < 60) return `${sec}s`;
-    if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
-    const h = Math.floor(sec / 3600);
-    const m = Math.floor((sec % 3600) / 60);
-    if (h < 48) return `${h}h ${m}m`;
-    return `${Math.floor(h / 24)}d ${h % 24}h`;
-  }
-
-  function kvTable(obj) {
-    const entries = Object.entries(obj || {});
-    if (!entries.length) return `<div class="empty" style="padding:8px 0">无</div>`;
-    return `<table class="data kv"><tbody>${entries
-      .map(
-        ([k, v]) =>
-          `<tr><th>${esc(k)}</th><td class="mono">${esc(String(v))}</td></tr>`
-      )
-      .join("")}</tbody></table>`;
-  }
-
-  /** Longest-prefix match: numeric OID → OBJECTS name via policy object_oids (name→base). */
-  function nameFromObjectOids(oid, objectOids) {
-    if (!oid || !objectOids) return "";
-    let best = "";
-    let bestLen = -1;
-    for (const [name, baseRaw] of Object.entries(objectOids)) {
-      const base = String(baseRaw || "").trim();
-      if (!base) continue;
-      if (oid === base || oid.startsWith(base + ".")) {
-        if (base.length > bestLen) {
-          bestLen = base.length;
-          best = name;
-        }
-      }
-    }
-    return best;
-  }
-
-  /** Extract OID→value(+name) rows from trap alert annotations. */
-  function trapVarbindRows(alert, objectOidsFallback) {
-    const an = (alert && alert.annotations) || {};
-    let nameMap = {};
-    if (an.varbind_names) {
-      try {
-        nameMap =
-          typeof an.varbind_names === "string"
-            ? JSON.parse(an.varbind_names)
-            : an.varbind_names || {};
-      } catch (_) {
-        nameMap = {};
-      }
-    }
-    for (let i = 0; i < 512; i++) {
-      const oid = an[`vb${i}_oid`];
-      if (oid == null || oid === "") break;
-      const nm = an[`vb${i}_name`];
-      if (nm && !nameMap[oid]) nameMap[String(oid)] = String(nm);
-    }
-    const resolveName = (oid) => {
-      if (nameMap[oid]) return String(nameMap[oid]);
-      return nameFromObjectOids(oid, objectOidsFallback) || "";
-    };
-    if (an.varbinds) {
-      try {
-        const obj = typeof an.varbinds === "string" ? JSON.parse(an.varbinds) : an.varbinds;
-        return Object.entries(obj || {}).map(([oid, val]) => ({
-          oid,
-          val: String(val),
-          name: resolveName(oid),
-        }));
-      } catch (_) {}
-    }
-    const rows = [];
-    for (let i = 0; i < 512; i++) {
-      const oid = an[`vb${i}_oid`];
-      if (oid == null || oid === "") break;
-      const o = String(oid);
-      rows.push({
-        oid: o,
-        val: String(an[`vb${i}_val`] ?? ""),
-        name: resolveName(o),
-      });
-    }
-    return rows;
-  }
-
-  async function showTrapRecentDetail(it) {
-    if (!it) return;
-    const alert = it.alert || {};
-    const labels = alert.labels || {};
-    const an = alert.annotations || {};
-    let objectOids = null;
-    const needFallback = () => {
-      const rows = trapVarbindRows(alert, null);
-      return rows.some((r) => r.oid && !r.name);
-    };
-    if (needFallback()) {
-      const pid = labels.trap_policy_id;
-      try {
-        if (pid) {
-          const p = await api(`/api/policies/${encodeURIComponent(pid)}`);
-          objectOids = (p && p.object_oids) || null;
-        }
-        if (!objectOids || !Object.keys(objectOids).length) {
-          const data = await api("/api/policies");
-          const list = (data && data.items) || data || [];
-          const oid = it.trap_oid || labels.trap_oid || "";
-          const hit = Array.isArray(list)
-            ? list.find((p) => p && p.trap_oid === oid && p.object_oids)
-            : null;
-          if (hit) objectOids = hit.object_oids;
-        }
-      } catch (_) {}
-    }
-    const vbs = trapVarbindRows(alert, objectOids);
-    const named = vbs.filter((r) => r.name).length;
-    openModal(
-      `
-      <div class="modal-head">
-        <h3>Trap 详情</h3>
-        <p class="desc">
-          <span class="mono">${esc(it.peer || labels.ip || "—")}</span>
-          · ${esc(it.alertname || labels.alertname || "—")}
-          <span class="hint" style="margin-left:8px">${esc(fmtTime(it.at))}</span>
-        </p>
-      </div>
-      <div class="modal-body">
-        <div class="field"><label>Trap OID</label>
-          <div class="summary-box mono">${esc(it.trap_oid || labels.trap_oid || "—")}</div>
-        </div>
-        <div class="field"><label>摘要</label>
-          <div class="summary-box">${esc(an.summary || "—")}</div>
-        </div>
-        <div class="field"><label>Varbinds（OID / 变量名 / 值，共 ${vbs.length}${
-          named ? `，已识别 ${named}` : ""
-        }）</label>
-          ${
-            vbs.length
-              ? `<div class="alert-table-scroll"><table class="data"><thead><tr><th style="width:3rem">#</th><th>变量名</th><th>OID</th><th>值</th></tr></thead>
-                <tbody>${vbs
-                  .map(
-                    (r, i) =>
-                      `<tr><td>${i}</td><td class="mono">${esc(r.name || "—")}</td><td class="mono">${esc(
-                        r.oid
-                      )}</td><td class="mono">${esc(r.val)}</td></tr>`
-                  )
-                  .join("")}</tbody></table></div>`
-              : `<div class="empty" style="padding:8px 0">无 varbind</div>`
-          }
-        </div>
-        <div class="field"><label>Labels</label>${kvTable(labels)}</div>
-        <details style="margin-top:12px">
-          <summary class="hint" style="cursor:pointer">原始告警 JSON</summary>
-          <pre class="mono" style="white-space:pre-wrap;font-size:0.78rem;max-height:280px;overflow:auto;margin-top:8px">${esc(
-            JSON.stringify(alert, null, 2)
-          )}</pre>
-        </details>
-      </div>
-      <div class="modal-foot"><button type="button" class="ghost" id="trap-detail-close">关闭</button></div>
-    `,
-      { xl: true }
-    );
-    const closeBtn = document.getElementById("trap-detail-close");
-    if (closeBtn) closeBtn.onclick = () => closeModal();
-  }
-
-  async function showAlertDetail(a, ingressMap = {}) {
-    if (!a) return;
-    const name = alertDisplayName(a);
-    const srcLabel = alertSourceLabel(a, ingressMap);
-    const ip = alertTargetIp(a);
-    let notifies = [];
-    try {
-      notifies = await api(`/api/alerts/${a.id}/notifies`);
-    } catch {
-      notifies = [];
-    }
-    const notifyHtml = notifies.length
-      ? `<table class="data"><thead><tr><th>时间</th><th>边沿</th><th>结果</th><th>内容摘要</th><th>错误</th><th></th></tr></thead>
-         <tbody>${notifies
-           .map(
-             (n, i) => `<tr>
-           <td>${esc(fmtTime(n.created_at))}</td>
-           <td>${esc(
-             n.transition === "became_firing"
-               ? "触发通知"
-               : n.transition === "became_resolved"
-               ? "恢复通知"
-               : n.transition
-           )}</td>
-           <td><span class="badge ${n.success ? "on" : "firing"}">${
-             n.success ? "成功" : "失败"
-           }</span></td>
-           <td class="mono">${esc(
-             String(n.body || "")
-               .replace(/\s+/g, " ")
-               .trim()
-               .slice(0, 48) || "—"
-           )}${String(n.body || "").length > 48 ? "…" : ""}</td>
-           <td class="mono">${esc(n.error || "—")}</td>
-           <td class="actions"><button type="button" data-nlog="${i}">查看</button></td>
-         </tr>`
-           )
-           .join("")}</tbody></table>`
-      : `<div class="empty" style="padding:8px 0">暂无通知记录（可能未绑定渠道，或尚未发生状态边沿）</div>`;
-
-    const trapVbs = trapVarbindRows(a);
-    const anForTable = { ...(a.annotations || {}) };
-    delete anForTable.varbinds;
-    delete anForTable.varbind_count;
-    Object.keys(anForTable).forEach((k) => {
-      if (/^vb\d+_(oid|val)$/.test(k)) delete anForTable[k];
-    });
-    const trapVbHtml = trapVbs.length
-      ? `<div class="field">
-          <label>SNMP Varbinds（完整 OID / 值，共 ${trapVbs.length}）</label>
-          <div class="alert-table-scroll"><table class="data"><thead><tr><th style="width:3rem">#</th><th>OID</th><th>值</th></tr></thead>
-            <tbody>${trapVbs
-              .map(
-                (r, i) =>
-                  `<tr><td>${i}</td><td class="mono">${esc(r.oid)}</td><td class="mono">${esc(
-                    r.val
-                  )}</td></tr>`
-              )
-              .join("")}</tbody></table></div>
-        </div>`
-      : "";
-
-    openModal(`
-      <div class="modal-head">
-        <h3>${esc(name)}</h3>
-        <p class="desc">
-          <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
-          <span class="sev sev-${esc(a.severity)}" style="margin-left:8px">${esc(severityLabel(a.severity))}</span>
-          <span class="source-tag" style="margin-left:8px">${esc(srcLabel)}</span>
-          ${ip ? `<span class="ac-ip" style="margin-left:8px">IP ${esc(ip)}</span>` : ""}
-        </p>
-      </div>
-      <div class="modal-body alert-detail">
-        <div class="detail-grid">
-          <div><label>告警 IP</label><div class="mono">${esc(ip || "—")}</div></div>
-          <div><label>当前值</label><div class="mono">${fmtValue(a.value)}</div></div>
-          <div><label>持续时长</label><div>${esc(alertDuration(a))}</div></div>
-          <div><label>开始时间</label><div>${esc(fmtTime(a.starts_at))}</div></div>
-          <div><label>结束时间</label><div>${esc(a.ends_at ? fmtTime(a.ends_at) : "—")}</div></div>
-          <div><label>最后更新</label><div>${esc(fmtTime(a.last_evaluated_at))}</div></div>
-          <div><label>Pending 起</label><div>${esc(
-            a.pending_since ? fmtTime(a.pending_since) : "—"
-          )}</div></div>
-          <div><label>已通知触发</label><div>${a.notified_firing ? "是" : "否"}</div></div>
-          <div><label>已通知恢复</label><div>${a.notified_resolved ? "是" : "否"}</div></div>
-        </div>
-        <div class="field">
-          <label>告警描述</label>
-          <div class="summary-box">${esc(alertSummary(a) || "—")}</div>
-          ${kvTable(anForTable)}
-        </div>
-        ${trapVbHtml}
-        <div class="field">
-          <label>标签</label>
-          ${kvTable(a.labels)}
-        </div>
-        <div class="field">
-          <label>告警标识</label>
-          <div class="mono" style="word-break:break-all">${esc(a.fingerprint)}</div>
-        </div>
-        <div class="field">
-          <label>通知记录</label>
-          ${notifyHtml}
-        </div>
-        <div class="field">
-          <label>事件 ID / 规则·路由 ID</label>
-          <div class="mono" style="font-size:12px">alert: ${esc(a.id)}<br/>rule/route: ${esc(
-            a.rule_id
-          )}</div>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-silence">据此静默</button>
-        <button type="button" class="primary" id="m-close">关闭</button>
-      </div>`, { xl: true });
-    document.getElementById("m-close").onclick = closeModal;
-    document.querySelectorAll("[data-nlog]").forEach((b) => {
-      b.onclick = () => {
-        const n = notifies[Number(b.dataset.nlog)];
-        if (!n) return;
-        showNotifyLogDetail({
-          ...n,
-          channel_name: n.channel_name || "",
-        });
-      };
-    });
-    document.getElementById("m-silence").onclick = () => {
-      closeModal();
-      silenceFromAlert(a);
-    };
-  }
-
-  function openIngressTest(row) {
-    if (!row) return;
-    const isProbeFriendly = row.kind === "generic" || row.kind === "kafka";
-    openModal(`
-      <div class="modal-head">
-        <h3>试推送 · ${esc(row.name)}</h3>
-        <p class="desc">写入一条样例告警，走完整接入 → 去重 → 通知链路，用于验证配置。</p>
-      </div>
-      <div class="modal-body">
-        <div class="field">
-          <label>场景</label>
-          <div class="type-list">
-            <label class="type-row"><input type="radio" name="scenario" value="fire" checked />
-              <span class="t-main"><span class="t-name">触发告警</span><span class="t-desc">Generic firing 样例</span></span></label>
-            <label class="type-row"><input type="radio" name="scenario" value="recover" />
-              <span class="t-main"><span class="t-name">恢复告警</span><span class="t-desc">同一告警标识的 resolved</span></span></label>
-            ${
-              isProbeFriendly
-                ? `<label class="type-row"><input type="radio" name="scenario" value="probe_fire" />
-              <span class="t-main"><span class="t-name">拨测失败</span><span class="t-desc">Jeecg probe-alert fire</span></span></label>
-            <label class="type-row"><input type="radio" name="scenario" value="probe_recover" />
-              <span class="t-main"><span class="t-name">拨测恢复</span><span class="t-desc">Jeecg probe-alert recover</span></span></label>`
-                : ""
-            }
-          </div>
-        </div>
-        <div class="hint">试推送使用控制台登录态，不经过接入 Token 校验。</div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button type="button" class="primary" id="m-run">推送</button>
-      </div>`, { wide: true });
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("m-run").onclick = async () => {
-      const scenario =
-        document.querySelector('input[name="scenario"]:checked')?.value || "fire";
-      try {
-        const res = await api(`/api/ingress/${row.id}/test`, {
-          method: "POST",
-          body: JSON.stringify({ scenario }),
-        });
-        closeModal();
-        toast(res.hint || `已接受 ${res.accepted} 条`);
-        state.alertFilters = {
-          source: "ingress",
-          status: "",
-          severity: "",
-          q: "",
-          ip: "",
-          page: 1,
-        };
-        navigate("alerts");
-      } catch (e) {
-        toast(e.message || "试推送失败", true);
-      }
-    };
-  }
-
-  // ---------- Editors ----------
-  const DATASOURCE_TYPES = [
-    {
-      id: "prometheus",
-      name: "Prometheus",
-      desc: "PromQL 指标查询",
-      icon: "PM",
-      tone: "orange",
-    },
-    {
-      id: "victoriametrics",
-      name: "VictoriaMetrics",
-      desc: "兼容 PromQL",
-      icon: "VM",
-      tone: "blue",
-    },
-    {
-      id: "kafka",
-      name: "Kafka",
-      desc: "消息管道 · JSON 字段告警",
-      icon: "K",
-      tone: "amber",
-    },
-    {
-      id: "log",
-      name: "Loki 日志",
-      desc: "LogQL 日志统计",
-      icon: "Lo",
-      tone: "teal",
-    },
-  ];
-
-  function pickDatasourceKind() {
-    openModal(`
-      <div class="modal-head">
-        <h3>选择数据源类型</h3>
-        <p class="desc">先选类型，再填写连接信息；规则评估会按类型自动拉数。</p>
-      </div>
-      <div class="modal-body">
-        <div class="type-pick-grid">
-          ${DATASOURCE_TYPES.map(
-            (t) => `<button type="button" class="type-pick-card" data-kind="${esc(t.id)}">
-              <span class="type-pick-ico tone-${esc(t.tone)}" aria-hidden="true">${esc(t.icon)}</span>
-              <span class="type-pick-name">${esc(t.name)}</span>
-              <span class="type-pick-desc">${esc(t.desc)}</span>
-            </button>`
-          ).join("")}
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-      </div>`);
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.querySelectorAll(".type-pick-card").forEach((btn) => {
-      btn.onclick = () => editDatasource(null, { kind: btn.dataset.kind });
-    });
-  }
-
-  function editDatasource(row, opts = {}) {
-    if (!row && !opts.kind) {
-      pickDatasourceKind();
-      return;
-    }
-    const kind = row?.kind || opts.kind || "prometheus";
-    const typeMeta = DATASOURCE_TYPES.find((t) => t.id === kind) || DATASOURCE_TYPES[0];
-    const opt = row?.options || {};
-    openModal(`
-      <div class="modal-head">
-        <h3>${row ? "编辑数据源" : "新建数据源"}</h3>
-        <p class="desc">填写连接信息，规则评估会按类型自动拉数。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="field">
-          <label>名称</label>
-          <input name="name" required placeholder="例如：生产 Prometheus" value="${esc(row?.name || "")}" />
-        </div>
-        <div class="field">
-          <label>类型</label>
-          <input type="hidden" name="kind" value="${esc(kind)}" />
-          <div class="type-picked">
-            <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
-              typeMeta.icon
-            )}</span>
-            <div class="type-picked-text">
-              <div class="t-name">${esc(typeMeta.name)}</div>
-              <div class="t-desc">${esc(typeMeta.desc)}</div>
-            </div>
-            ${
-              row
-                ? ""
-                : `<button type="button" class="ghost" id="ds-repick">重选类型</button>`
-            }
-          </div>
-        </div>
-        <div class="field">
-          <label class="check-row">
-            <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
-            <span>启用此数据源；停用后关联规则将跳过评估</span>
-          </label>
-        </div>
-
-        <div class="kind-panel" data-kinds="prometheus,victoriametrics,log" id="panel-http">
-          <div class="field">
-            <label id="url-label">HTTP 地址</label>
-            <input name="url_http" placeholder="http://127.0.0.1:9090" value="${esc(
-              kind === "kafka" ? "" : row?.url || ""
-            )}" />
-            <div class="hint" id="url-hint">填写查询 API 根地址。</div>
-          </div>
-        </div>
-
-        <div class="kind-panel" data-kinds="kafka" id="panel-kafka" hidden>
-          <div class="field">
-            <label>Brokers</label>
-            <input name="url_kafka" placeholder="127.0.0.1:9092" value="${esc(
-              kind === "kafka" ? row?.url || "" : ""
-            )}" />
-            <div class="hint">多个 broker 用英文逗号分隔。消息按 JSON 解析字段后走阈值规则。</div>
-          </div>
-          <div class="row">
-            <div class="field">
-              <label>Topic</label>
-              <input name="topic" placeholder="orders" value="${esc(opt.topic || "")}" />
-            </div>
-            <div class="field">
-              <label>数值字段（JSON 路径）</label>
-              <input name="field" placeholder="latency_ms 或 metrics.p99" value="${esc(opt.field || "")}" />
-            </div>
-          </div>
-          <div class="row">
-            <div class="field">
-              <label>标签字段（可选）</label>
-              <input name="label_fields" placeholder="service,instance" value="${esc(opt.label_fields || "")}" />
-              <div class="hint">从消息中取出作为标签，用于分组与告警标识。</div>
-            </div>
-            <div class="field">
-              <label>每次拉取条数</label>
-              <input name="max_records" type="number" min="1" placeholder="100" value="${esc(opt.max_records || "100")}" />
-            </div>
-          </div>
-          <div class="row">
-            <div class="field">
-              <label>评估模式</label>
-              <select name="mode">
-                <option value="field" ${!opt.mode || opt.mode === "field" ? "selected" : ""}>字段解析 field（推荐）</option>
-                <option value="depth" ${opt.mode === "depth" ? "selected" : ""}>堆积深度 depth</option>
-                <option value="count" ${opt.mode === "count" ? "selected" : ""}>近期消息数 count</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>扫描分区数</label>
-              <input name="partitions" type="number" min="1" placeholder="8" value="${esc(opt.partitions || "8")}" />
-            </div>
-          </div>
-          <div class="hint">规则表达式可覆盖数值字段路径；例如消息 {"latency_ms":820,"service":"api"}，字段填 latency_ms，阈值 &gt; 500。</div>
-        </div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`, { wide: true });
-
-    const form = document.getElementById("f");
-    const syncKind = () => {
-      form.querySelectorAll(".kind-panel").forEach((p) => {
-        const kinds = (p.dataset.kinds || "").split(",");
-        p.hidden = !kinds.includes(kind);
-      });
-      const urlLabel = document.getElementById("url-label");
-      const urlHint = document.getElementById("url-hint");
-      const httpInput = form.querySelector('[name="url_http"]');
-      if (!urlLabel || !httpInput) return;
-      if (kind === "log") {
-        urlLabel.textContent = "Loki 地址";
-        httpInput.placeholder = "http://127.0.0.1:3100";
-        urlHint.textContent = "填写 Loki 根地址。规则表达式使用 LogQL。";
-      } else if (kind === "victoriametrics") {
-        urlLabel.textContent = "VictoriaMetrics 地址";
-        httpInput.placeholder = "http://127.0.0.1:8428";
-        urlHint.textContent = "兼容 PromQL 的查询入口。";
-      } else {
-        urlLabel.textContent = "Prometheus 地址";
-        httpInput.placeholder = "http://127.0.0.1:9090";
-        urlHint.textContent = "填写 Prometheus 查询 API 根地址。";
-      }
-    };
-    syncKind();
-
-    document.getElementById("m-cancel").onclick = closeModal;
-    const repick = document.getElementById("ds-repick");
-    if (repick) repick.onclick = () => pickDatasourceKind();
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(form);
-      const k = String(fd.get("kind") || kind || "prometheus");
-      const options = {};
-      let url = "";
-      if (k === "kafka") {
-        url = String(fd.get("url_kafka") || "").trim();
-        const topic = String(fd.get("topic") || "").trim();
-        if (!topic) {
-          toast("请填写 Kafka Topic", true);
-          return;
-        }
-        options.topic = topic;
-        options.mode = String(fd.get("mode") || "field");
-        const field = String(fd.get("field") || "").trim();
-        if (field) options.field = field;
-        const labelFields = String(fd.get("label_fields") || "").trim();
-        if (labelFields) options.label_fields = labelFields;
-        const maxRecords = String(fd.get("max_records") || "").trim();
-        if (maxRecords) options.max_records = maxRecords;
-        const partitions = String(fd.get("partitions") || "").trim();
-        if (partitions) options.partitions = partitions;
-      } else {
-        url = String(fd.get("url_http") || "").trim();
-      }
-      if (!url) {
-        toast("请填写连接地址", true);
-        return;
-      }
-      const body = {
-        name: fd.get("name"),
-        kind: k,
-        url,
-        options,
-        enabled: form.querySelector('[name="enabled"]').checked,
-      };
-      if (row) await api(`/api/datasources/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      else await api("/api/datasources", { method: "POST", body: JSON.stringify(body) });
-      closeModal();
-      toast("已保存");
-      renderPage();
-    };
-  }
-
-  function showNotifyLogDetail(n) {
-    if (!n) return;
-    const edge =
-      n.transition === "became_firing"
-        ? "触发通知"
-        : n.transition === "became_resolved"
-        ? "恢复通知"
-        : n.error === "test"
-        ? "渠道测试"
-        : n.transition || "其他";
-    openModal(`
-      <div class="modal-head">
-        <h3>通知内容</h3>
-        <p class="desc">
-          <span class="badge ${n.success ? "on" : "firing"}">${n.success ? "成功" : "失败"}</span>
-          <span style="margin-left:8px">${esc(edge)}</span>
-          <span style="margin-left:8px">${esc(n.channel_name || "")}</span>
-          <span class="hint" style="margin-left:8px">${esc(fmtTime(n.created_at))}</span>
-        </p>
-      </div>
-      <div class="modal-body">
-        ${
-          n.error
-            ? `<div class="field"><label>状态 / 错误</label><div class="summary-box mono">${esc(
-                n.error
-              )}</div></div>`
-            : ""
-        }
-        <div class="field">
-          <label>告警 ID</label>
-          <div class="summary-box mono">${esc(
-            n.alert_id && n.alert_id !== "00000000-0000-0000-0000-000000000000"
-              ? n.alert_id
-              : "—"
-          )}</div>
-        </div>
-        <div class="field">
-          <label>发送正文</label>
-          <pre class="summary-box mono">${esc(n.body || "(无正文)")}</pre>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="primary" id="m-close">关闭</button>
-      </div>`);
-    document.getElementById("m-close").onclick = closeModal;
-  }
-
-  function prettyJson(v) {
-    try {
-      if (typeof v === "string") {
-        const t = v.trim();
-        if (!t) return "(空)";
-        try {
-          return JSON.stringify(JSON.parse(t), null, 2);
-        } catch {
-          return v;
-        }
-      }
-      return JSON.stringify(v ?? null, null, 2);
-    } catch {
-      return String(v ?? "");
-    }
-  }
-
-  function showChannelTestResult(res) {
-    const ok = !!res.ok;
-    openModal(`
-      <div class="modal-head">
-        <h3>渠道测试${ok ? "成功" : "失败"}</h3>
-        <p class="desc">${esc(res.hint || "")}</p>
-      </div>
-      <div class="modal-body">
-        ${
-          res.error
-            ? `<div class="field"><label>错误</label><div class="summary-box" style="color:var(--crit)">${esc(
-                res.error
-              )}</div></div>`
-            : ""
-        }
-        <div class="field">
-          <label>发送正文</label>
-          <pre class="summary-box mono">${esc(res.text || "")}</pre>
-        </div>
-        <div class="field">
-          <label>请求 URL</label>
-          <pre class="summary-box mono">${esc(res.request_url || "")}</pre>
-        </div>
-        <div class="field">
-          <label>请求报文</label>
-          <pre class="summary-box mono">${esc(prettyJson(res.request_body))}</pre>
-        </div>
-        <div class="field">
-          <label>HTTP 状态</label>
-          <div class="summary-box mono">${esc(
-            res.http_status != null ? String(res.http_status) : "(无响应)"
-          )}</div>
-        </div>
-        <div class="field">
-          <label>返回内容</label>
-          <pre class="summary-box mono">${esc(prettyJson(res.response_body))}</pre>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="primary" id="m-close">关闭</button>
-      </div>`);
-    document.getElementById("m-close").onclick = closeModal;
-  }
-
-  async function testChannel(id, btn) {
-    if (!id) return;
-    if (btn) btn.disabled = true;
-    try {
-      const res = await api(`/api/channels/${id}/test`, { method: "POST" });
-      toast(res.ok ? res.hint || "测试成功" : res.error || "测试失败", !res.ok);
-      showChannelTestResult(res);
-    } catch (e) {
-      toast(e.message || "测试失败", true);
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  function editChannel(row) {
-    const opt = row?.options || {};
-    const tplFire = opt.template_firing || "";
-    const tplResolve = opt.template_resolved || "";
-    const jsonFire = opt.json_firing || "";
-    const jsonResolve = opt.json_resolved || "";
-    const kindOpts = [
-      { id: "webhook", label: "Webhook（固定 Eventide JSON）" },
-      { id: "http", label: "自定义 HTTP JSON" },
-      { id: "dingtalk", label: "钉钉" },
-      { id: "wecom", label: "企业微信" },
-      { id: "feishu", label: "飞书" },
-      { id: "slack", label: "Slack" },
-      { id: "telegram", label: "Telegram" },
-    ];
-    const chips = [
-      "title",
-      "transition",
-      "severity",
-      "status",
-      "value",
-      "rule.name",
-      "fingerprint",
-      "labels",
-      "annotations",
-      "annotations.summary",
-      "annotations.summary|json",
-      "labels.instance",
-      "labels.alertname",
-    ];
-    openModal(`
-      <div class="modal-head">
-        <h3>${row ? "编辑渠道" : "新建通知渠道"}</h3>
-        <p class="desc">告警边沿触发时，向所选渠道发送通知。可自定义正文模板与消息格式。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="field"><label>名称</label><input name="name" required placeholder="例如：值班钉钉群" value="${esc(
-          row?.name || ""
-        )}" /></div>
-        <div class="field"><label>类型</label>
-          <select name="kind" id="ch-kind">
-            ${kindOpts
-              .map(
-                (k) =>
-                  `<option value="${k.id}" ${
-                    row?.kind === k.id || (!row && k.id === "webhook") ? "selected" : ""
-                  }>${k.label}</option>`
-              )
-              .join("")}
-          </select>
-        </div>
-        <div class="field" id="ch-url-field">
-          <label id="ch-url-label">Webhook / 机器人 URL</label>
-          <input name="url" required value="${esc(row?.url || "")}" placeholder="https://..." />
-          <div class="hint" id="ch-url-hint"></div>
-        </div>
-        <div class="field" id="ch-method-field" hidden>
-          <label>HTTP 方法</label>
-          <select name="http_method">
-            ${["POST", "PUT", "PATCH"]
-              .map(
-                (m) =>
-                  `<option value="${m}" ${
-                    (opt.http_method || "POST").toUpperCase() === m ? "selected" : ""
-                  }>${m}</option>`
-              )
-              .join("")}
-          </select>
-        </div>
-        <div class="field" id="ch-secret-field">
-          <label id="ch-secret-label">签名密钥（可选）</label>
-          <input name="secret" value="${esc(row?.secret || "")}" placeholder="钉钉 / 飞书 secret" />
-          <div class="hint" id="ch-secret-hint"></div>
-        </div>
-        <div class="field" id="ch-headers-field" hidden>
-          <label>自定义请求头（JSON 对象）</label>
-          <textarea name="headers_json" rows="3" placeholder='{"X-Token":"xxx","Content-Type":"application/json"}'>${esc(
-            opt.headers_json || ""
-          )}</textarea>
-        </div>
-        <div class="field" id="ch-chat-field" hidden>
-          <label>Telegram chat_id</label>
-          <input name="chat_id" value="${esc(opt.chat_id || "")}" placeholder="群/用户 ID，如 -100123... 或 123456" />
-        </div>
-        <div class="field" id="ch-msg-field">
-          <label>消息格式</label>
-          <select name="msg_type" id="ch-msg-type">
-            <option value="text" ${!opt.msg_type || opt.msg_type === "text" ? "selected" : ""}>纯文本 text</option>
-            <option value="markdown" ${opt.msg_type === "markdown" ? "selected" : ""}>Markdown（钉钉/企微/飞书卡片/Slack）</option>
-          </select>
-          <div class="hint">企微 Markdown 可用 <code>&lt;font&gt;</code>；飞书为卡片 lark_md；Telegram Markdown 按 HTML 解析。</div>
-        </div>
-        <div class="field" id="ch-at-field">
-          <label class="check-row">
-            <input type="checkbox" name="at_all" ${
-              opt.at_all === "1" || opt.at_all === "true" ? "checked" : ""
-            } />
-            <span>@所有人（钉钉 / 企微 text）</span>
-          </label>
-          <input name="at_mobiles" style="margin-top:8px" value="${esc(
-            opt.at_mobiles || ""
-          )}" placeholder="艾特手机号，逗号分隔（钉钉 / 企微 text）" />
-        </div>
-        <div class="field">
-          <label class="check-row">
-            <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
-            <span>启用此渠道</span>
-          </label>
-        </div>
-        <div class="seg" id="seg-text-tpl">
-          <div class="seg-title">通知模板</div>
-          <div class="hint" style="margin-bottom:10px">留空则用默认正文。语法与丰富规则相同。点芯片可插入到当前模板框。</div>
-          <div class="chip-row tpl-chips" style="margin-bottom:12px">
-            ${chips
-              .map(
-                (c) =>
-                  `<button type="button" class="chip-tag" data-chip="${esc(c)}">{{${esc(
-                    c
-                  )}}}</button>`
-              )
-              .join("")}
-          </div>
-          <div class="field">
-            <label>触发通知模板（firing）</label>
-            <textarea name="template_firing" rows="6" placeholder="[{{severity}}] {{rule.name}}&#10;状态: {{transition}}&#10;{{annotations.summary}}&#10;值: {{value}}">${esc(
-              tplFire
-            )}</textarea>
-          </div>
-          <div class="field">
-            <label>恢复通知模板（resolved）</label>
-            <textarea name="template_resolved" rows="5" placeholder="[恢复] {{rule.name}}&#10;{{annotations.summary}}">${esc(
-              tplResolve
-            )}</textarea>
-          </div>
-        </div>
-        <div class="seg" id="seg-json-tpl" hidden>
-          <div class="seg-title">自定义 JSON 报文</div>
-          <div class="hint" style="margin-bottom:10px">
-            必须是合法 JSON。字符串字段请用 <code>{{annotations.summary|json}}</code>（自带引号与转义）；
-            对象可用 <code>{{labels}}</code> / <code>{{annotations}}</code>。留空则发送默认 Eventide 结构。
-          </div>
-          <div class="chip-row tpl-chips" style="margin-bottom:12px">
-            ${chips
-              .map(
-                (c) =>
-                  `<button type="button" class="chip-tag" data-chip="${esc(c)}">{{${esc(
-                    c
-                  )}}}</button>`
-              )
-              .join("")}
-          </div>
-          <div class="field">
-            <label>触发 JSON（firing）</label>
-            <textarea name="json_firing" rows="8" class="mono" placeholder='{"msg": {{annotations.summary|json}}, "severity": {{severity|json}}, "labels": {{labels}}}'>${esc(
-              jsonFire
-            )}</textarea>
-          </div>
-          <div class="field">
-            <label>恢复 JSON（resolved）</label>
-            <textarea name="json_resolved" rows="6" class="mono" placeholder='{"msg": {{annotations.summary|json}}, "status": "resolved"}'>${esc(
-              jsonResolve
-            )}</textarea>
-          </div>
-        </div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        ${
-          row
-            ? `<button type="button" class="ghost" id="m-test">测试发送</button>`
-            : ""
-        }
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`, { wide: true });
-    document.getElementById("m-cancel").onclick = closeModal;
-    const testBtn = document.getElementById("m-test");
-    if (testBtn) testBtn.onclick = () => testChannel(row.id, testBtn);
-
-    const syncKindUi = () => {
-      const k = document.getElementById("ch-kind")?.value || "webhook";
-      const urlLabel = document.getElementById("ch-url-label");
-      const urlHint = document.getElementById("ch-url-hint");
-      const urlInput = document.querySelector('[name="url"]');
-      const secretField = document.getElementById("ch-secret-field");
-      const secretLabel = document.getElementById("ch-secret-label");
-      const secretHint = document.getElementById("ch-secret-hint");
-      const chatField = document.getElementById("ch-chat-field");
-      const msgField = document.getElementById("ch-msg-field");
-      const atField = document.getElementById("ch-at-field");
-      const methodField = document.getElementById("ch-method-field");
-      const headersField = document.getElementById("ch-headers-field");
-      const textSeg = document.getElementById("seg-text-tpl");
-      const jsonSeg = document.getElementById("seg-json-tpl");
-
-      const isHttp = k === "http";
-      secretField.hidden = !(k === "dingtalk" || k === "feishu" || isHttp);
-      chatField.hidden = k !== "telegram";
-      msgField.hidden = k === "webhook" || isHttp;
-      atField.hidden = !(k === "dingtalk" || k === "wecom");
-      methodField.hidden = !isHttp;
-      headersField.hidden = !isHttp;
-      textSeg.hidden = isHttp;
-      jsonSeg.hidden = !isHttp;
-
-      if (k === "telegram") {
-        urlLabel.textContent = "Bot API 基址";
-        urlInput.placeholder = "https://api.telegram.org/bot<token>";
-        urlHint.textContent = "填 Bot Token 基址即可，会自动追加 /sendMessage；chat_id 必填。";
-      } else if (k === "slack") {
-        urlLabel.textContent = "Slack Incoming Webhook";
-        urlInput.placeholder = "https://hooks.slack.com/services/...";
-        urlHint.textContent = "Slack 应用 Incoming Webhooks 生成的 URL。";
-      } else if (isHttp) {
-        urlLabel.textContent = "HTTP 接口地址";
-        urlInput.placeholder = "https://example.com/hooks/alert";
-        urlHint.textContent = "向该地址发送 JSON；可用自定义请求头与 Bearer Token。";
-        secretLabel.textContent = "Bearer Token（可选）";
-        document.querySelector('[name="secret"]').placeholder = "Authorization: Bearer …";
-        secretHint.textContent = "若填写，将自动加 Authorization: Bearer &lt;secret&gt;。";
-      } else {
-        urlLabel.textContent = "Webhook / 机器人 URL";
-        urlInput.placeholder = "https://...";
-        urlHint.textContent = "";
-        secretLabel.textContent = "签名密钥（可选）";
-        document.querySelector('[name="secret"]').placeholder = "钉钉 / 飞书 secret";
-        secretHint.textContent = "";
-      }
-    };
-    document.getElementById("ch-kind").onchange = syncKindUi;
-    syncKindUi();
-
-    let lastTpl = document.querySelector('[name="template_firing"],[name="json_firing"]');
-    document
-      .querySelectorAll(
-        '[name="template_firing"],[name="template_resolved"],[name="json_firing"],[name="json_resolved"]'
-      )
-      .forEach((el) => {
-        el.addEventListener("focus", () => {
-          lastTpl = el;
-        });
-      });
-    document.querySelectorAll(".tpl-chips [data-chip]").forEach((b) => {
-      b.onclick = () => {
-        const el =
-          lastTpl ||
-          document.querySelector(
-            document.getElementById("seg-json-tpl")?.hidden
-              ? '[name="template_firing"]'
-              : '[name="json_firing"]'
-          );
-        if (!el) return;
-        const token = `{{${b.dataset.chip}}}`;
-        const start = el.selectionStart ?? el.value.length;
-        const end = el.selectionEnd ?? start;
-        el.value = el.value.slice(0, start) + token + el.value.slice(end);
-        el.focus();
-        const pos = start + token.length;
-        el.setSelectionRange(pos, pos);
-      };
-    });
-
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const fd = new FormData(form);
-      const secret = String(fd.get("secret") || "").trim();
-      const kind = String(fd.get("kind") || "webhook");
-      const options = { ...(row?.options || {}) };
-      const fire = String(fd.get("template_firing") || "");
-      const resolved = String(fd.get("template_resolved") || "");
-      if (kind !== "http") {
-        if (fire.trim()) options.template_firing = fire;
-        else delete options.template_firing;
-        if (resolved.trim()) options.template_resolved = resolved;
-        else delete options.template_resolved;
-        delete options.json_firing;
-        delete options.json_resolved;
-        delete options.http_method;
-        delete options.headers_json;
-      } else {
-        delete options.template_firing;
-        delete options.template_resolved;
-        const jf = String(fd.get("json_firing") || "");
-        const jr = String(fd.get("json_resolved") || "");
-        if (jf.trim()) {
-          try {
-            JSON.parse(jf.replace(/\{\{[^}]+\}\}/g, "null"));
-          } catch {
-            // allow templates that aren't valid until rendered; only warn soft
-          }
-          options.json_firing = jf;
-        } else delete options.json_firing;
-        if (jr.trim()) options.json_resolved = jr;
-        else delete options.json_resolved;
-        const method = String(fd.get("http_method") || "POST").toUpperCase();
-        if (method && method !== "POST") options.http_method = method;
-        else delete options.http_method;
-        const headers = String(fd.get("headers_json") || "").trim();
-        if (headers) {
-          try {
-            const obj = JSON.parse(headers);
-            if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
-              toast("请求头必须是 JSON 对象", true);
-              return;
-            }
-            options.headers_json = JSON.stringify(obj);
-          } catch {
-            toast("请求头 JSON 无效", true);
-            return;
-          }
-        } else delete options.headers_json;
-      }
-
-      const msgType = String(fd.get("msg_type") || "text");
-      if (kind !== "webhook" && kind !== "http" && msgType && msgType !== "text")
-        options.msg_type = msgType;
-      else delete options.msg_type;
-
-      if (kind === "dingtalk" || kind === "wecom") {
-        if (form.querySelector('[name="at_all"]')?.checked) options.at_all = "1";
-        else delete options.at_all;
-        const mobiles = String(fd.get("at_mobiles") || "").trim();
-        if (mobiles) options.at_mobiles = mobiles;
-        else delete options.at_mobiles;
-      } else {
-        delete options.at_all;
-        delete options.at_mobiles;
-      }
-
-      if (kind === "telegram") {
-        const chatId = String(fd.get("chat_id") || "").trim();
-        if (!chatId) {
-          toast("Telegram 请填写 chat_id", true);
-          return;
-        }
-        options.chat_id = chatId;
-      } else {
-        delete options.chat_id;
-      }
-
-      const body = {
-        name: fd.get("name"),
-        kind,
-        url: fd.get("url"),
-        secret: secret || null,
-        options,
-        enabled: form.querySelector('[name="enabled"]').checked,
-      };
-      if (row) await api(`/api/channels/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      else await api("/api/channels", { method: "POST", body: JSON.stringify(body) });
-      closeModal();
-      toast("已保存");
-      renderPage();
-    };
-  }
-
-  async function editRule(row) {
-    const dss = state.cache.datasources || (await api("/api/datasources"));
-    const chs = state.cache.channels || (await api("/api/channels"));
-    if (!dss.length) {
-      toast("请先创建数据源", true);
-      return;
-    }
-    openModal(`
-      <div class="modal-head">
-        <h3>${row ? "编辑规则" : "新建告警规则"}</h3>
-        <p class="desc">绑定数据源，配置阈值条件与通知渠道。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="seg">
-          <div class="seg-title">规则</div>
-          <div class="field"><label>名称</label><input name="name" required placeholder="例如：API 不可用" value="${esc(
-            row?.name || ""
-          )}" /></div>
-          <div class="field"><label>数据源</label>
-            <select name="datasource_id">${dss
-              .map(
-                (d) =>
-                  `<option value="${d.id}" ${
-                    row?.datasource_id === d.id || (!row && d === dss[0]) ? "selected" : ""
-                  }>${esc(d.name)} · ${esc(d.kind)}</option>`
-              )
-              .join("")}</select>
-          </div>
-          <div class="field"><label>查询表达式</label><input name="expr" required value="${esc(
-            row?.expr || ""
-          )}" placeholder="PromQL / LogQL / JSON 字段路径" />
-            <div class="hint">Prometheus/VM 用 PromQL；Loki 用 LogQL；Kafka 填数值字段路径（可覆盖数据源 field，如 latency_ms）。</div>
-          </div>
-        </div>
-        <div class="seg">
-          <div class="seg-title">阈值条件</div>
-          <div class="row">
-            <div class="field"><label>比较符</label>
-              <select name="comparator">
-                ${[">", ">=", "<", "<=", "==", "!="]
-                  .map(
-                    (c) =>
-                      `<option value="${c}" ${
-                        (row && String(row.comparator) === c) ||
-                        (!row && c === ">") ||
-                        (row &&
-                          { gt: ">", gte: ">=", lt: "<", lte: "<=", eq: "==", neq: "!=" }[
-                            row.comparator
-                          ] === c)
-                          ? "selected"
-                          : ""
-                      }>${c}</option>`
-                  )
-                  .join("")}
-              </select>
-            </div>
-            <div class="field"><label>阈值</label><input name="threshold" type="number" step="any" required value="${
-              row?.threshold ?? 0
-            }" /></div>
-          </div>
-          <div class="row">
-            <div class="field"><label>持续 for（秒）</label><input name="for_seconds" type="number" min="0" value="${
-              row?.for_seconds ?? 0
-            }" /></div>
-            <div class="field"><label>评估间隔（秒）</label><input name="interval_seconds" type="number" min="5" value="${
-              row?.interval_seconds ?? 30
-            }" /></div>
-          </div>
-          <div class="row">
-            <div class="field"><label>严重级别</label>
-              <select name="severity">
-                ${severityOptions(row?.severity || "warning")}
-              </select>
-            </div>
-          </div>
-          <div class="field">
-            <label class="check-row">
-              <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
-              <span>启用此规则</span>
-            </label>
-          </div>
-        </div>
-        <div class="seg">
-          <div class="seg-title">通知与标签</div>
-          <div class="field"><label>通知渠道</label>
-            ${multiSelect(
-              "channel_ids",
-              chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
-              row?.channel_ids || []
-            )}
-          </div>
-          <div class="field"><label>附加标签（可选，JSON）</label>
-            <textarea name="labels" rows="2" placeholder='{"team":"sre"}'>${esc(
-              Object.keys(row?.labels || {}).length ? JSON.stringify(row.labels, null, 0) : ""
-            )}</textarea>
-          </div>
-          <div class="field"><label>注解 annotations（可选，JSON，支持模板）</label>
-            <textarea name="annotations" rows="3" placeholder='{"summary":"{{labels.instance}} 超阈值 {{value}}"}'>${esc(
-              Object.keys(row?.annotations || {}).length
-                ? JSON.stringify(row.annotations, null, 2)
-                : ""
-            )}</textarea>
-            <div class="hint">通知前自动渲染 {{labels.x}} / {{value}} / {{severity}} 等变量。</div>
-          </div>
-        </div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`, { wide: true });
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const fd = new FormData(form);
-      let labels = {};
-      let annotations = {};
-      const rawLabels = String(fd.get("labels") || "").trim();
-      if (rawLabels) {
-        try {
-          labels = JSON.parse(rawLabels);
-        } catch {
-          toast("标签 JSON 无效", true);
-          return;
-        }
-      }
-      const rawAnn = String(fd.get("annotations") || "").trim();
-      if (rawAnn) {
-        try {
-          annotations = JSON.parse(rawAnn);
-        } catch {
-          toast("注解 JSON 无效", true);
-          return;
-        }
-      }
-      const body = {
-        name: fd.get("name"),
-        datasource_id: fd.get("datasource_id"),
-        expr: fd.get("expr"),
-        comparator: fd.get("comparator"),
-        threshold: Number(fd.get("threshold")),
-        for_seconds: Number(fd.get("for_seconds") || 0),
-        interval_seconds: Number(fd.get("interval_seconds") || 30),
-        severity: fd.get("severity"),
-        labels,
-        annotations,
-        channel_ids: selectedValues(form, "channel_ids"),
-        enabled: form.querySelector('[name="enabled"]').checked,
-      };
-      if (row) await api(`/api/rules/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      else await api("/api/rules", { method: "POST", body: JSON.stringify(body) });
-      closeModal();
-      toast("已保存");
-      renderPage();
-    };
-  }
-
-  const INGRESS_TYPES = [
-    {
-      id: "alertmanager",
-      name: "Alertmanager",
-      desc: "Prometheus 告警 Webhook",
-      icon: "AM",
-      tone: "orange",
-    },
-    {
-      id: "generic",
-      name: "Generic / 拨测",
-      desc: "通用 JSON · 自定义字段映射",
-      icon: "{}",
-      tone: "blue",
-    },
-    {
-      id: "kafka",
-      name: "Kafka",
-      desc: "告警总线 Topic 消费",
-      icon: "K",
-      tone: "amber",
-    },
-    {
-      id: "snmptrap",
-      name: "SNMP Trap",
-      desc: "Trap→Kafka 样例（字段已对齐）",
-      icon: "⌁",
-      tone: "blue",
-    },
-  ];
-
-  function snmpTrapIngressDefaults() {
-    const brokers =
-      localStorage.getItem("eventide_kafka_brokers") || "120.26.105.115:9092";
-    const topic =
-      localStorage.getItem("eventide_kafka_topic") || "eventide.snmptrap";
-    return {
-      name: "SNMP Trap (Kafka)",
-      kind: "kafka",
-      endpoint: brokers,
-      enabled: true,
-      options: {
-        topic,
-        start: "latest",
-        partitions: "6",
-        // Trap 已写出 Generic 兼容 JSON，一般无需 map_*；下列仅作文档/对照
-        _preset: "snmptrap",
-      },
-      channel_ids: [],
-    };
-  }
-
-  function editIngressSnmpTrapSample() {
-    editIngress(snmpTrapIngressDefaults(), { kind: "kafka", preset: "snmptrap" });
-  }
-
-  function pickIngressKind() {
-    openModal(`
-      <div class="modal-head">
-        <h3>选择接入类型</h3>
-        <p class="desc">先选来源类型，再填写连接与字段映射。SNMP Trap 请选样例，字段已与 Trap 写出对齐。</p>
-      </div>
-      <div class="modal-body">
-        <div class="type-pick-grid">
-          ${INGRESS_TYPES.map(
-            (t) => `<button type="button" class="type-pick-card" data-kind="${esc(t.id)}">
-              <span class="type-pick-ico tone-${esc(t.tone)}" aria-hidden="true">${esc(t.icon)}</span>
-              <span class="type-pick-name">${esc(t.name)}</span>
-              <span class="type-pick-desc">${esc(t.desc)}</span>
-            </button>`
-          ).join("")}
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-      </div>`);
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.querySelectorAll(".type-pick-card").forEach((btn) => {
-      btn.onclick = () => {
-        if (btn.dataset.kind === "snmptrap") {
-          editIngressSnmpTrapSample();
-          return;
-        }
-        editIngress(null, { kind: btn.dataset.kind });
-      };
-    });
-  }
-
-  async function editIngress(row, opts = {}) {
-    if (!row && !opts.kind) {
-      pickIngressKind();
-      return;
-    }
-    const chs = state.cache.channels || (await api("/api/channels"));
-    const preset = opts.preset || (row?.options && row.options._preset) || "";
-    const kind = row?.kind || opts.kind || "alertmanager";
-    const typeMeta =
-      preset === "snmptrap"
-        ? INGRESS_TYPES.find((t) => t.id === "snmptrap")
-        : INGRESS_TYPES.find((t) => t.id === kind) || INGRESS_TYPES[0];
-    const opt = { ...(row?.options || {}) };
-    // Don't persist internal preset marker into form as a map field
-    const snmpPreset = preset === "snmptrap" || opt._preset === "snmptrap";
-    const mapOn = !!(
-      opt.map_status ||
-      opt.map_name ||
-      opt.map_description ||
-      opt.map_ip ||
-      opt.map_value ||
-      opt.map_fingerprint ||
-      opt.map_list ||
-      opt.map_enabled === "1"
-    );
-    const sampleJson = `{
-  "status": "firing",
-  "fingerprint": "10.0.0.1|1.3.6.1.6.3.1.1.5.3|…",
-  "severity": "warning",
-  "labels": {
-    "alertname": "linkDown",
-    "ip": "10.0.0.1",
-    "trap_oid": "1.3.6.1.6.3.1.1.5.3",
-    "source": "ingress:snmptrap",
-    "snmp_version": "v2c"
+    const addBtn = document.getElementById("btn-pol-add");
+    if (addBtn) addBtn.onclick = () => editPolicy(null);
+    await paint();
   },
-  "annotations": {
-    "summary": "SNMP Trap … from 10.0.0.1",
-    "varbinds": "{…}"
-  },
-  "startsAt": "2026-07-31T08:00:00Z"
-}`;
-    openModal(`
-      <div class="modal-head">
-        <h3>${row && row.id ? "编辑告警接入" : snmpPreset ? "新建 SNMP Trap 接入样例" : "新建告警接入"}</h3>
-        <p class="desc">${
-          snmpPreset
-            ? "Trap 服务已归一化为下方 JSON；本接入直接消费，一般无需字段映射。"
-            : "接入外部已判定的告警。非标准格式可配置字段映射。"
-        }</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="field">
-          <label>名称</label>
-          <input name="name" required placeholder="例如：生产 AM" value="${esc(
-            row?.name || (snmpPreset ? "SNMP Trap (Kafka)" : "")
-          )}" />
-        </div>
-        <div class="field">
-          <label>类型</label>
-          <input type="hidden" name="kind" value="${esc(kind === "snmptrap" ? "kafka" : kind)}" />
-          <input type="hidden" name="_preset" value="${esc(snmpPreset ? "snmptrap" : "")}" />
-          <div class="type-picked">
-            <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
-              typeMeta.icon
-            )}</span>
-            <div class="type-picked-text">
-              <div class="t-name">${esc(typeMeta.name)}</div>
-              <div class="t-desc">${esc(typeMeta.desc)}</div>
-            </div>
-            ${
-              row && row.id
-                ? ""
-                : `<button type="button" class="ghost" id="ing-repick">重选类型</button>`
-            }
-          </div>
-        </div>
-        <div class="field">
-          <label class="check-row">
-            <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
-            <span>启用此接入路由</span>
-          </label>
-        </div>
 
-        ${
-          snmpPreset
-            ? `<div class="panel" style="margin:0 0 14px;padding:12px;background:var(--surface-2,rgba(0,0,0,.04))">
-          <div class="seg-title" style="margin:0 0 8px">Trap → Kafka 字段对照（无需再 map）</div>
-          <table class="map-help-table" style="width:100%;font-size:12px">
-            <thead><tr><th>Trap JSON</th><th>告警含义</th></tr></thead>
-            <tbody>
-              <tr><td><code>status</code></td><td>firing / resolved（策略可恢复）</td></tr>
-              <tr><td><code>fingerprint</code></td><td>去重键（IP + OID + …）</td></tr>
-              <tr><td><code>severity</code></td><td>级别（策略 / 默认 warning）</td></tr>
-              <tr><td><code>labels.alertname</code></td><td>告警名（策略名或 OID 名）</td></tr>
-              <tr><td><code>labels.ip</code></td><td>设备 IP（peer）</td></tr>
-              <tr><td><code>labels.trap_oid</code></td><td>Trap OID</td></tr>
-              <tr><td><code>labels.source</code></td><td>固定 <code>ingress:snmptrap</code></td></tr>
-              <tr><td><code>annotations.summary</code></td><td>摘要（策略模板）</td></tr>
-              <tr><td><code>annotations.varbinds</code></td><td>变量绑定 JSON</td></tr>
-            </tbody>
-          </table>
-          <details style="margin-top:10px">
-            <summary style="cursor:pointer">样例报文（Trap 写出）</summary>
-            <pre class="mono" style="white-space:pre-wrap;font-size:11px;max-height:200px;overflow:auto;margin:8px 0 0">${esc(
-              sampleJson
-            )}</pre>
-          </details>
-        </div>`
-            : ""
-        }
-
-        <div class="kind-panel" data-kinds="alertmanager,generic" id="ing-http">
-          <div class="field">
-            <label>鉴权 Token（可选）</label>
-            <input name="token" value="${esc(row?.token || "")}" placeholder="请求头 Bearer / X-Eventide-Token" />
-            <div class="hint">留空则不校验。保存后在卡片上复制 Webhook，或使用「试推送」验证。</div>
-          </div>
-          <div class="hint sample-hint" id="ing-format-hint"></div>
-        </div>
-
-        <div class="kind-panel" data-kinds="kafka" id="ing-kafka" hidden>
-          <div class="field">
-            <label>Brokers</label>
-            <input name="endpoint" placeholder="127.0.0.1:9092" value="${esc(row?.endpoint || "")}" />
-          </div>
-          <div class="row">
-            <div class="field">
-              <label>Topic</label>
-              <input name="topic" placeholder="alerts" value="${esc(opt.topic || "")}" />
-            </div>
-            <div class="field">
-              <label>起始位点</label>
-              <select name="start">
-                <option value="latest" ${!opt.start || opt.start === "latest" ? "selected" : ""}>latest 仅新消息</option>
-                <option value="earliest" ${opt.start === "earliest" ? "selected" : ""}>earliest 从头消费</option>
-              </select>
-            </div>
-          </div>
-          <div class="field">
-            <label>Consumer Group ID（可选）</label>
-            <input name="group_id" placeholder="默认 eventide-ingress-{route_id}" value="${esc(opt.group_id || "")}" />
-            <div class="hint">多实例共用同一 group_id 自动分摊分区；改 group_id 会按「起始位点」重新消费。</div>
-          </div>
-          <div class="field">
-            <label>分区数（订阅范围）</label>
-            <div class="row" style="align-items:center;gap:8px">
-              <input name="partitions" type="number" min="1" placeholder="自动探测" value="${esc(opt.partitions || "")}" style="flex:1" />
-              <button type="button" class="btn ghost" id="ing-probe-parts">自动获取</button>
-            </div>
-            <div class="hint" id="ing-parts-hint">须覆盖 Topic 全部分区（优先 metadata 探测）。消费位点由 Kafka consumer group 管理，不再依赖 Redis 租约。</div>
-          </div>
-        </div>
-
-        <div class="kind-panel" data-kinds="generic,kafka" id="ing-mapping" hidden>
-          <div class="seg">
-            <div class="seg-title">字段映射（可选）</div>
-            <div class="hint" style="margin-bottom:12px">
-              ${
-                snmpPreset
-                  ? "SNMP Trap 样例<strong>不需要</strong>填写映射（Trap 已是 Eventide Generic JSON）。仅当改了 Trap 输出格式时才需要。"
-                  : `填写对方 JSON 的点分路径（如 <code>data.title</code>）。可用变换截取字符串，例如
-              <code>sourceciname|before:_</code> → <code>82.12.161.32</code>。
-              任一路径非空即启用映射，并优先于内置 Generic/拨测解析。`
-              }
-            </div>
-            <details class="map-help">
-              <summary>字段说明（点开查看）</summary>
-              <div class="map-help-body">
-                <p>路径填原始 JSON 字段；可用 <code>|before:</code> / <code>|after:</code> / <code>|split:SEP:INDEX</code> / <code>|between:起点:终点</code> 截取。</p>
-                <table class="map-help-table">
-                  <thead>
-                    <tr><th>配置项</th><th>作用</th><th>写入结果</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr><td><code>map_list</code></td><td>告警数组路径，空=整条消息当一条</td><td>—</td></tr>
-                    <tr><td><code>map_status</code></td><td>状态字段</td><td>firing / resolved</td></tr>
-                    <tr><td><code>map_fire</code></td><td>视为触发的取值（逗号分隔）</td><td>—</td></tr>
-                    <tr><td><code>map_resolve</code></td><td>视为恢复的取值</td><td>—</td></tr>
-                    <tr><td><code>map_name</code></td><td>告警名称</td><td><code>labels.alertname</code></td></tr>
-                    <tr><td><code>map_description</code></td><td>告警描述</td><td><code>annotations.summary</code> / <code>description</code></td></tr>
-                    <tr><td><code>map_ip</code></td><td>告警 IP</td><td><code>labels.ip</code> / <code>alertIp</code> / <code>instance</code></td></tr>
-                    <tr><td><code>map_value</code></td><td>当前值</td><td><code>value</code></td></tr>
-                    <tr><td><code>map_fingerprint</code></td><td>去重标识</td><td><code>fingerprint</code></td></tr>
-                    <tr><td><code>map_severity</code></td><td>级别原始值</td><td><code>labels.severity</code> + 引擎级别</td></tr>
-                    <tr><td><code>map_critical</code></td><td>哪些取值算 Disaster/High</td><td>→ disaster</td></tr>
-                    <tr><td><code>map_labels</code></td><td>额外标签，<code>目标标签:源路径,...</code></td><td>对应 <code>labels.*</code></td></tr>
-                    <tr><td><code>map_enabled</code></td><td>强制开启映射</td><td>—</td></tr>
-                  </tbody>
-                </table>
-                <p class="hint" style="margin:10px 0 0">引擎另支持 <code>map_warning</code>（警告取值列表），可在高级 options 中配置；控制台暂无单独输入框。</p>
-              </div>
-            </details>
-            <div class="field">
-              <label class="check-row">
-                <input type="checkbox" name="map_enabled" ${mapOn ? "checked" : ""} />
-                <span>启用自定义字段映射</span>
-              </label>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label>告警列表路径 map_list</label>
-                <input name="map_list" placeholder="空=整条；或 data.items" value="${esc(opt.map_list || "")}" />
-              </div>
-              <div class="field">
-                <label>状态字段 map_status</label>
-                <input name="map_status" placeholder="state / status / eventType" value="${esc(
-                  opt.map_status || ""
-                )}" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label>触发取值 map_fire</label>
-                <input name="map_fire" placeholder="默认 fire,firing,ALARM…" value="${esc(opt.map_fire || "")}" />
-              </div>
-              <div class="field">
-                <label>恢复取值 map_resolve</label>
-                <input name="map_resolve" placeholder="默认 recover,resolved,OK…" value="${esc(
-                  opt.map_resolve || ""
-                )}" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label>告警名称 map_name</label>
-                <input name="map_name" placeholder="title / alertName" value="${esc(opt.map_name || "")}" />
-              </div>
-              <div class="field">
-                <label>告警描述 map_description</label>
-                <input name="map_description" placeholder="msg / content" value="${esc(
-                  opt.map_description || ""
-                )}" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label>告警 IP map_ip</label>
-                <input name="map_ip" placeholder="sourceciname|before:_" value="${esc(opt.map_ip || "")}" />
-                <div class="hint"><code>before:_</code> / <code>after:_</code> / <code>split:_:0</code> / <code>between:起点:终点</code></div>
-              </div>
-              <div class="field">
-                <label>当前值 map_value</label>
-                <input name="map_value" placeholder="metric / value" value="${esc(opt.map_value || "")}" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label>告警标识 map_fingerprint</label>
-                <input name="map_fingerprint" placeholder="id / alertId" value="${esc(
-                  opt.map_fingerprint || ""
-                )}" />
-              </div>
-              <div class="field">
-                <label>级别 map_severity</label>
-                <input name="map_severity" placeholder="level / severity" value="${esc(
-                  opt.map_severity || ""
-                )}" />
-              </div>
-            </div>
-            <div class="row">
-              <div class="field">
-                <label>critical 取值</label>
-                <input name="map_critical" placeholder="Disaster,High,5,4" value="${esc(opt.map_critical || "")}" />
-              </div>
-              <div class="field">
-                <label>额外标签 map_labels</label>
-                <input name="map_labels" placeholder="region:zone,app:appName" value="${esc(
-                  opt.map_labels || ""
-                )}" />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="field">
-          <label>通知渠道</label>
-          <select name="channel_id">
-            <option value="">不绑定渠道</option>
-            ${chs
-              .map((c) => {
-                const selected = (row?.channel_ids || [])[0] === c.id ? "selected" : "";
-                return `<option value="${esc(c.id)}" ${selected}>${esc(c.name)}（${esc(
-                  c.kind
-                )}）</option>`;
-              })
-              .join("")}
-          </select>
-          <div class="hint">未绑定渠道时告警仍会入库，但不会发送通知。</div>
-        </div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`, { wide: true });
-
-    const form = document.getElementById("f");
-    const syncKind = () => {
-      const k = form.querySelector('input[name="kind"]')?.value || "alertmanager";
-      form.querySelectorAll(".kind-panel").forEach((p) => {
-        const kinds = (p.dataset.kinds || "").split(",");
-        p.hidden = !kinds.includes(k);
-      });
-      const hint = document.getElementById("ing-format-hint");
-      if (!hint) return;
-      if (k === "alertmanager") {
-        hint.innerHTML =
-          "载荷示例：Alertmanager <code>{\"alerts\":[{\"status\":\"firing\",\"labels\":{...}}]}</code>";
-      } else if (k === "generic") {
-        hint.innerHTML =
-          "默认支持 Generic / 拨测 JSON；其他格式请展开下方「字段映射」配置路径。";
-      } else {
-        hint.textContent = "";
-      }
+  async settings(root) {
+    const me = await api("/api/auth/me");
+    state.me = me;
+    applyNavPermissions();
+    const perms = (me.permissions || []).join(", ") || "—";
+    let hist = {
+      write_to_es: false,
+      search_store: "mysql",
+      es_configured: false,
+      es_url: "",
+      es_index: "eventide-alerts",
+      es_username: "",
+      es_password_set: false,
     };
-    syncKind();
-    const repick = document.getElementById("ing-repick");
-    if (repick) repick.onclick = () => pickIngressKind();
-
-    const probeParts = async (quiet = false) => {
-      const brokers = String(form.querySelector('[name="endpoint"]')?.value || "").trim();
-      const topic = String(form.querySelector('[name="topic"]')?.value || "").trim();
-      const hint = document.getElementById("ing-parts-hint");
-      if (!brokers || !topic) {
-        if (!quiet) toast("请先填写 Brokers 与 Topic", true);
-        return null;
-      }
-      try {
-        if (hint) hint.textContent = "正在从 Kafka 探测分区数…";
-        const data = await api("/api/ingress/kafka/partitions", {
-          method: "POST",
-          body: JSON.stringify({ brokers, topic }),
-        });
-        const n = data && data.partitions;
-        if (!n) throw new Error("未返回分区数");
-        const input = form.querySelector('[name="partitions"]');
-        if (input) input.value = String(n);
-        if (hint) {
-          hint.innerHTML = `已探测到 Topic <code>${esc(topic)}</code> 共 <strong>${esc(n)}</strong> 个分区（消费时也会再查 metadata）。`;
-        }
-        if (!quiet) toast(`已获取分区数：${n}`);
-        return n;
-      } catch (e) {
-        if (hint) {
-          hint.textContent = `自动获取失败：${e.message || e}（可手填；消费时也会尝试探测）`;
-        }
-        if (!quiet) toast(e.message || String(e), true);
-        return null;
-      }
+    let trapTok = {
+      configured: false,
+      token_preview: "",
+      token_length: 0,
+      source: "empty",
+      redis_synced: false,
     };
-    const probeBtn = document.getElementById("ing-probe-parts");
-    if (probeBtn) probeBtn.onclick = () => probeParts(false);
-    const topicEl = form.querySelector('[name="topic"]');
-    const endpointEl = form.querySelector('[name="endpoint"]');
-    let probeTimer = null;
-    const scheduleProbe = () => {
-      clearTimeout(probeTimer);
-      probeTimer = setTimeout(() => probeParts(true), 500);
+    let storm = {
+      throttle_enabled: true,
+      min_interval_seconds: 60,
+      max_per_window: 20,
+      window_seconds: 60,
+      throttle_key: "fingerprint",
+      resolve_max_per_window: null,
+      aggregate_enabled: false,
+      aggregate_window_seconds: 30,
+      group_by: "alertname",
+      aggregate_mode: "head+summary",
+      aggregate_sample_labels: "ip,instance,alertIp",
+      aggregate_sample_limit: 10,
+      ingress_max_inflight: 100,
+      degrade_skip_notify: false,
+      degrade_notify_per_sec: 50,
+      source: "toml",
     };
-    if (topicEl) topicEl.addEventListener("change", scheduleProbe);
-    if (endpointEl) endpointEl.addEventListener("change", scheduleProbe);
-    // Open existing kafka route: refresh partition count in background
-    if ((form.querySelector('input[name="kind"]')?.value || "") === "kafka") {
-      const cur = String(form.querySelector('[name="partitions"]')?.value || "").trim();
-      if (!cur) scheduleProbe();
-    }
-
-    document.getElementById("m-cancel").onclick = closeModal;
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(form);
-      const k = String(fd.get("kind") || "alertmanager");
-      const options = {};
-      let endpoint = "";
-      let token = String(fd.get("token") || "").trim();
-      const channelId = String(fd.get("channel_id") || "").trim();
-      const channelIds = channelId ? [channelId] : [];
-      if (!channelIds.length && !confirm("尚未绑定通知渠道，告警只会入库不会通知。仍要保存吗？")) {
-        return;
-      }
-      if (k === "kafka") {
-        endpoint = String(fd.get("endpoint") || "").trim();
-        const topic = String(fd.get("topic") || "").trim();
-        if (!endpoint || !topic) {
-          toast("请填写 Brokers 与 Topic", true);
-          return;
-        }
-        options.topic = topic;
-        options.start = String(fd.get("start") || "latest");
-        const groupId = String(fd.get("group_id") || "").trim();
-        if (groupId) options.group_id = groupId;
-        let parts = String(fd.get("partitions") || "").trim();
-        if (!parts) {
-          const n = await probeParts(true);
-          if (n) parts = String(n);
-        }
-        if (parts) options.partitions = parts;
-        const preset = String(fd.get("_preset") || "").trim();
-        if (preset) options._preset = preset;
-        token = "";
-      }
-      if (k === "generic" || k === "kafka") {
-        const mapKeys = [
-          "map_list",
-          "map_status",
-          "map_fire",
-          "map_resolve",
-          "map_name",
-          "map_description",
-          "map_ip",
-          "map_value",
-          "map_fingerprint",
-          "map_severity",
-          "map_critical",
-          "map_labels",
-        ];
-        let anyMap = false;
-        for (const key of mapKeys) {
-          const v = String(fd.get(key) || "").trim();
-          if (v) {
-            options[key] = v;
-            anyMap = true;
-          }
-        }
-        if (anyMap) {
-          options.map_enabled = form.querySelector('[name="map_enabled"]')?.checked
-            ? "1"
-            : "0";
-        }
-      }
-      const body = {
-        name: fd.get("name"),
-        kind: k,
-        token: token || null,
-        endpoint,
-        options,
-        channel_ids: channelIds,
-        enabled: form.querySelector('[name="enabled"]').checked,
-      };
-      let saved;
-      if (row) {
-        saved = await api(`/api/ingress/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-      } else {
-        saved = await api("/api/ingress", { method: "POST", body: JSON.stringify(body) });
-      }
-      closeModal();
-      showIngressSaved(saved || { ...body, id: row?.id });
-    };
-  }
-
-  function showIngressSaved(route) {
-    if (!route?.id) {
-      toast("已保存");
-      renderPage();
-      return;
-    }
-    const origin = location.origin;
-    const mainUrl =
-      route.kind === "kafka"
-        ? `kafka://${route.endpoint || ""}/${(route.options && route.options.topic) || ""}`
-        : route.kind === "alertmanager"
-        ? `${origin}/api/ingress/${route.id}/alertmanager`
-        : `${origin}/api/ingress/${route.id}/generic`;
-    const pushUrl = `${origin}/api/ingress/${route.id}/push`;
-    const tokenHint = route.token
-      ? `-H "Authorization: Bearer <token>"`
-      : "# 未配置 Token，可直接推送";
-    openModal(`
-      <div class="modal-head">
-        <h3>告警接入已保存</h3>
-        <p class="desc">${esc(route.name)} · ${esc(route.kind)}。复制地址或试推送验证。</p>
-      </div>
-      <div class="modal-body">
-        <div class="field">
-          <label>主接入地址</label>
-          <div class="url-row">
-            <code class="mono url-box">${esc(mainUrl)}</code>
-            <button type="button" data-copy="${esc(mainUrl)}">复制</button>
-          </div>
-        </div>
-        <div class="field">
-          <label>自动识别 / 测推</label>
-          <div class="url-row">
-            <code class="mono url-box">${esc(pushUrl)}</code>
-            <button type="button" data-copy="${esc(pushUrl)}">复制</button>
-          </div>
-          <div class="hint">curl 示例：<code class="mono">curl -X POST ${esc(pushUrl)} ${esc(
-            tokenHint
-          )} -H "Content-Type: application/json" -d "{...}"</code></div>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-test">试推送</button>
-        <button type="button" class="primary" id="m-close">完成</button>
-      </div>`, { wide: true });
-    document.querySelectorAll("#modal [data-copy]").forEach((b) => {
-      b.onclick = async () => {
-        await navigator.clipboard.writeText(b.dataset.copy);
-        toast("已复制");
-      };
-    });
-    document.getElementById("m-close").onclick = () => {
-      closeModal();
-      renderPage();
-    };
-    document.getElementById("m-test").onclick = () => {
-      closeModal();
-      openIngressTest(route);
-    };
-  }
-
-  async function editLookup(row) {
-    const initialText =
-      row && Object.keys(row.rows || {}).length
-        ? formatLookupText(row.key_label || "ip", row.rows)
-        : "";
-    openModal(`
-      <div class="modal-head">
-        <h3>${row ? "编辑台账数据" : "新建台账数据"}</h3>
-        <p class="desc">第一列是匹配键（如 IP），后面各列会补到告警上。表头可用 <code>$列名</code>，键列前加 <code>#</code>；列用 Tab 或空格分隔。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="field"><label>名称</label>
-          <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 主机台账" />
-        </div>
-        <div class="field"><label>说明（可选）</label>
-          <input name="description" value="${esc(row?.description || "")}" placeholder="来源、用途" />
-        </div>
-        <div class="field"><label>用告警的哪个标签来匹配</label>
-          <input name="key_label" id="lookup-key-label" required value="${esc(
-            row?.key_label || "ip"
-          )}" placeholder="ip" />
-          <div class="hint">从告警 labels 取这个键去查表。告警 IP 在 <code>instance</code> 里就填 instance；表头是 <code>$ip</code> 时通常填 ip。</div>
-        </div>
-        <div class="field"><label>台账内容</label>
-          <div style="display:flex;gap:0.5rem;margin-bottom:0.4rem;flex-wrap:wrap">
-            <label class="ghost" style="display:inline-flex;align-items:center;gap:0.35rem;cursor:pointer;padding:0.35rem 0.7rem;border:1px solid var(--line);border-radius:6px">
-              导入文件
-              <input type="file" id="lookup-file" accept=".lookup,.txt,.tsv,text/plain" style="display:none" />
-            </label>
-            <button type="button" class="ghost" id="lookup-to-json">转为 JSON 预览</button>
-          </div>
-          <textarea name="text" id="lookup-text" rows="12" required spellcheck="false" placeholder="#$ip&#9;$cabinet&#9;$brand&#9;$usagedesc&#10;21.13.0.32&#9;生产中心机房SC-T06&#9;华为&#9;电子渠道综合前置">${esc(
-            initialText
-          )}</textarea>
-          <div class="hint">也支持 JSON：<code>{"21.1.11.11":{"主机名":"DX-AAM"}}</code></div>
-          <pre id="lookup-parse-hint" class="mono" style="margin:0.4rem 0 0;font-size:0.78rem;color:var(--muted);white-space:pre-wrap"></pre>
-        </div>
-        <label class="check-row"><input type="checkbox" name="enabled" ${
-          row?.enabled !== false ? "checked" : ""
-        } /> <span>启用</span></label>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存台账</button>
-      </div>`, { wide: true });
-    document.getElementById("m-cancel").onclick = closeModal;
-
-    const textEl = document.getElementById("lookup-text");
-    const keyEl = document.getElementById("lookup-key-label");
-    const hintEl = document.getElementById("lookup-parse-hint");
-
-    const refreshHint = () => {
-      try {
-        const parsed = parseLookupClient(textEl.value);
-        hintEl.textContent = `已识别 ${parsed.count} 行 · 键列 ${
-          parsed.keyHint || "—"
-        } · 共 ${(parsed.columns || []).length || "?"} 列`;
-        hintEl.style.color = "var(--muted)";
-      } catch (err) {
-        hintEl.textContent = String(err.message || err);
-        hintEl.style.color = "var(--crit-soft, #c44)";
-      }
-    };
-    textEl.addEventListener("input", refreshHint);
-    refreshHint();
-
-    document.getElementById("lookup-file").onchange = async (ev) => {
-      const file = ev.target.files && ev.target.files[0];
-      if (!file) return;
-      const text = await file.text();
-      textEl.value = text;
-      try {
-        const parsed = parseLookupClient(text);
-        if (parsed.keyHint) keyEl.value = parsed.keyHint;
-        if (!document.querySelector('#f [name="name"]').value) {
-          document.querySelector('#f [name="name"]').value = file.name.replace(
-            /\.(lookup|txt|tsv)$/i,
-            ""
-          );
-        }
-        refreshHint();
-        toast(`已导入 ${parsed.count} 行`);
-      } catch (err) {
-        refreshHint();
-        toast(err.message || String(err), true);
-      }
-    };
-
-    document.getElementById("lookup-to-json").onclick = () => {
-      try {
-        const parsed = parseLookupClient(textEl.value);
-        textEl.value = JSON.stringify(parsed.rows, null, 2);
-        refreshHint();
-      } catch (err) {
-        toast(err.message || String(err), true);
-      }
-    };
-
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      const text = String(fd.get("text") || "");
-      let parsed;
-      try {
-        parsed = parseLookupClient(text);
-      } catch (err) {
-        toast(err.message || String(err), true);
-        return;
-      }
-      if (!parsed.count) {
-        toast("未识别到数据行，请检查表头与分隔符", true);
-        return;
-      }
-      const body = {
-        name: fd.get("name"),
-        description: fd.get("description") || "",
-        key_label: fd.get("key_label") || parsed.keyHint || "ip",
-        rows: parsed.rows,
-        text,
-        sync_key_from_text: false,
-        enabled: e.target.querySelector('[name="enabled"]').checked,
-      };
-      try {
-        if (row) {
-          await api(`/api/lookups/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-        } else {
-          await api("/api/lookups", { method: "POST", body: JSON.stringify(body) });
-        }
-      } catch (err) {
-        toast(err.message || String(err), true);
-        return;
-      }
-      closeModal();
-      toast(`已保存 ${parsed.count} 行`);
-      localStorage.setItem("eventide_enrich_tab", "lookups");
-      renderPage();
-    };
-  }
-
-  /** Client-side parse for Omnibus .lookup or JSON rows. */
-  function parseLookupClient(text) {
-    const trimmed = String(text || "").trim();
-    if (!trimmed) throw new Error("外表内容为空");
-    if (trimmed.startsWith("{")) {
-      const rows = JSON.parse(trimmed);
-      return { keyHint: null, rows, count: Object.keys(rows).length };
-    }
-    const lines = trimmed
-      .split(/\r?\n/)
-      .map((l) => l.replace(/\s+$/, ""))
-      .filter((l) => {
-        const t = l.trim();
-        return t && !t.startsWith("//") && !t.startsWith(";");
-      });
-    if (!lines.length) throw new Error("lookup 文件为空");
-
-    const splitFields = (line) => {
-      const s = String(line || "").trim();
-      if (!s) return [];
-      if (s.includes("\t")) return s.split("\t").map((x) => x.trim());
-      return s.split(/\s+/).filter(Boolean);
-    };
-
-    const splitRow = (line, ncols) => {
-      let fields = splitFields(line);
-      if (!ncols) return fields;
-      if (fields.length === ncols) return fields;
-      if (String(line).includes("\t") || fields.length < ncols) {
-        while (fields.length < ncols) fields.push("");
-        return fields.slice(0, ncols);
-      }
-      if (ncols === 1) return [fields.join(" ")];
-      if (ncols === 2) return [fields[0], fields.slice(1).join(" ")];
-      const last = fields[fields.length - 1];
-      const midCols = ncols - 2;
-      const midTokens = fields.slice(1, -1);
-      const out = [fields[0]];
-      if (midTokens.length <= midCols) {
-        out.push(...midTokens);
-        while (out.length < ncols - 1) out.push("");
-      } else {
-        const keep = midCols - 1;
-        out.push(...midTokens.slice(0, keep));
-        out.push(midTokens.slice(keep).join(" "));
-      }
-      out.push(last);
-      return out;
-    };
-
-    const header = splitFields(lines[0]);
-    let keyIdx = 0;
-    let foundKey = false;
-    const names = header.map((raw, i) => {
-      let s = String(raw).trim();
-      const isKey = s.startsWith("#");
-      if (isKey) {
-        keyIdx = i;
-        foundKey = true;
-      }
-      s = s.replace(/^#/, "").replace(/^\$/, "").trim();
-      if (!s) throw new Error(`第 ${i + 1} 列表头无效`);
-      return s;
-    });
-    if (!foundKey) keyIdx = 0;
-    const keyHint = names[keyIdx];
-    const rows = {};
-    for (let li = 1; li < lines.length; li++) {
-      const fields = splitRow(lines[li], names.length);
-      if (fields.every((f) => !String(f).trim())) continue;
-      if (fields.length <= keyIdx) {
-        throw new Error(
-          `第 ${li + 1} 行字段不足（表头 ${names.length} 列）。请用空格或 Tab 分隔列。`
-        );
-      }
-      const key = String(fields[keyIdx] || "").trim();
-      if (!key) continue;
-      const attrs = {};
-      names.forEach((name, i) => {
-        if (i === keyIdx) return;
-        const val = String(fields[i] || "").trim();
-        if (val) attrs[name] = val;
-      });
-      rows[key] = attrs;
-    }
-    return { keyHint, rows, count: Object.keys(rows).length, columns: names };
-  }
-
-  function formatLookupText(keyLabel, rows) {
-    const attrKeys = new Set();
-    Object.values(rows || {}).forEach((attrs) => {
-      Object.keys(attrs || {}).forEach((k) => attrKeys.add(k));
-    });
-    const cols = [...attrKeys].sort();
-    const header = [`#$${keyLabel}`, ...cols.map((k) => `$${k}`)].join("\t");
-    const body = Object.entries(rows || {})
-      .map(([key, attrs]) => [key, ...cols.map((c) => attrs[c] || "")].join("\t"))
-      .join("\n");
-    return body ? `${header}\n${body}\n` : `${header}\n`;
-  }
-
-
-  async function openEnrichPreviewModal(opts = {}) {
-    const draft = opts.draft || null;
-    const ruleId = opts.ruleId || null;
-    const fromEditor = !!opts.fromEditor;
-    const samplePayload = `{
-  "severity": 4,
-  "summary": "麒麟主机当前系统磁盘[vdb] IO使用百分比为: 97.49 %, 已超过90%阈值",
-  "lastoccurrence": "2026-07-18 08:39:33",
-  "status": 2,
-  "sourceid": 1,
-  "sourceeventid": "71978",
-  "sourceciname": "82.12.161.32_kylin",
-  "sourcealertkey": "vfs.dev.util[vdb]",
-  "sourceseverity": "High",
-  "sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]_Application:Disk vdb",
-  "ciinstance": "Application:Disk vdb",
-  "eventtypeid": "*UNKNOWN*"
-}`;
-    let savedPayload = "";
     try {
-      const stash = JSON.parse(sessionStorage.getItem("eventide_enrich_preview") || "{}");
-      savedPayload = stash.payload || "";
+      hist = await api("/api/settings/alert-history");
     } catch (_) {}
-
-    const [rules, ingressRoutes] = await Promise.all([
-      api("/api/enrich"),
-      api("/api/ingress").catch(() => []),
-    ]);
-    const mappedIngress = (ingressRoutes || []).filter((r) => {
-      const o = r.options || {};
-      return !!(
-        o.map_status ||
-        o.map_name ||
-        o.map_description ||
-        o.map_ip ||
-        o.map_fingerprint ||
-        o.map_enabled === "1"
-      );
-    });
-    const defaultIngress =
-      mappedIngress.find((r) => /zabbix/i.test(r.name || "")) || mappedIngress[0] || null;
-
-    openModal(
-      `
-      <div class="modal-head">
-        <h3>试跑预览</h3>
-        <p class="desc">粘贴原始告警 JSON，先按接入字段映射解析，再套丰富规则看结果。</p>
-      </div>
-      <div class="modal-body">
+    try {
+      trapTok = await api("/api/settings/trap-token");
+    } catch (_) {}
+    try {
+      storm = await api("/api/settings/storm");
+    } catch (_) {}
+    let lic = {
+      kind: "trial",
+      writable: true,
+      install_id: "—",
+      customer: null,
+      edition: null,
+      expires_at: null,
+      days_left: null,
+      reason: null,
+      has_license_token: false,
+    };
+    try {
+      lic = await api("/api/license");
+      state.license = lic;
+    } catch (_) {}
+    const canWriteSettings = can("settings:write");
+    const dis = canWriteSettings ? "" : "disabled";
+    const resolveMax =
+      storm.resolve_max_per_window == null || storm.resolve_max_per_window === ""
+        ? ""
+        : String(storm.resolve_max_per_window);
+    const licStatus = !lic.writable
+      ? "只读宽限"
+      : lic.kind === "trial"
+      ? `试用 · 剩余约 ${lic.days_left ?? "—"} 天`
+      : `已授权 · ${esc(lic.customer || "—")}`;
+    root.innerHTML = `
+      <div class="panel" style="max-width:720px;margin-bottom:16px">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">产品许可</h3>
+        <p class="hint" style="margin:0 0 12px">
+          流程：导出授权申请 → 发给厂商签发 → 导入授权文件。首次安装自动试用 30 天；到期后只读宽限。
+        </p>
+        <div class="detail-grid" style="margin-bottom:12px">
+          <div class="field"><label>状态</label>
+            <div><span class="badge ${lic.writable ? "on" : "off"}">${esc(licStatus)}</span>
+            <span class="hint" style="margin-left:8px">${esc(licenseKindLabel(lic.kind))}</span></div></div>
+          <div class="field"><label>到期时间</label>
+            <div class="mono">${esc(fmtTime(lic.expires_at) || "—")}</div></div>
+          <div class="field"><label>版本</label>
+            <div>${esc(lic.edition || "—")}</div></div>
+          <div class="field"><label>安装 ID</label>
+            <div class="mono" style="word-break:break-all">${esc(lic.install_id || "—")}</div></div>
+        </div>
+        ${lic.reason ? `<p class="hint" style="color:var(--danger);margin:0 0 12px">${esc(lic.reason)}</p>` : ""}
+        <div class="field"><label>客户 / 单位名称（写入申请文件）</label>
+          <input id="lic-customer" type="text" placeholder="如：某某科技有限公司" value="${esc(lic.customer || "")}" />
+        </div>
+        <div style="margin:10px 0 16px;display:flex;flex-wrap:wrap;gap:8px">
+          <button class="primary" type="button" id="lic-export-req">导出授权申请</button>
+        </div>
+        <div class="field"><label>导入授权文件</label>
+          <input id="lic-file" type="file" accept=".json,.eventide-lic.json,application/json,text/plain" ${dis} />
+          <textarea id="lic-token" rows="5" placeholder="或粘贴厂商返回的 .eventide-lic.json 全文" ${dis} style="margin-top:8px"></textarea>
+        </div>
         ${
-          draft
-            ? `<div class="enrich-preview-banner panel" style="margin-bottom:12px">
-                使用<strong>当前编辑草稿</strong>${
-                  draft.name ? `「${esc(draft.name)}」` : ""
-                }（未保存）
+          canWriteSettings
+            ? `<div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
+                <button class="primary" id="lic-save">导入授权</button>
+                ${
+                  lic.has_license_token
+                    ? `<button class="danger" id="lic-clear">清除商业许可</button>`
+                    : ""
+                }
               </div>`
-            : ""
+            : `<p class="hint">需要 settings:write 才能导入授权文件。</p>`
         }
-        <div class="enrich-preview-layout">
-          <div>
-            <div class="field">
-              <label>字段映射接入</label>
-              <select id="pv-ingress">
-                <option value="">自动 / 仅 labels 对象</option>
-                ${mappedIngress
-                  .map(
-                    (r) =>
-                      `<option value="${esc(r.id)}" ${
-                        defaultIngress && r.id === defaultIngress.id ? "selected" : ""
-                      }>${esc(r.name)}（${esc(r.kind)}）</option>`
-                  )
-                  .join("")}
-              </select>
-            </div>
-            <div class="field" ${draft ? "hidden" : ""}>
-              <label>丰富规则</label>
-              <select id="pv-rule">
-                <option value="__all__">全部已启用规则（按优先级）</option>
-                ${rules
-                  .map(
-                    (r) =>
-                      `<option value="${esc(r.id)}" ${
-                        ruleId && r.id === ruleId ? "selected" : ""
-                      }>${esc(r.name)}${r.enabled === false ? "（已停用）" : ""}</option>`
-                  )
-                  .join("")}
-              </select>
-            </div>
-            <div class="field">
-              <label>原始告警 JSON</label>
-              <textarea id="pv-payload" rows="14" class="mono">${esc(
-                savedPayload || samplePayload
-              )}</textarea>
-            </div>
-          </div>
-          <div>
-            <div id="preview-summary" class="summary-box">点「预览丰富结果」查看</div>
-            <div class="preview-metrics">
-              <div class="box"><div class="hint">告警 IP</div><div id="preview-ip" class="mono">—</div></div>
-              <div class="box"><div class="hint">级别</div><div id="preview-sev" class="mono">—</div></div>
-              <div class="box"><div class="hint">名称</div><div id="preview-name" class="mono">—</div></div>
-            </div>
-            <pre id="preview-out" class="mono enrich-preview-json"></pre>
-          </div>
-        </div>
       </div>
-      <div class="modal-actions">
+      <div class="panel" style="max-width:720px;margin-bottom:16px">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">外观主题</h3>
+        <p class="hint" style="margin:0 0 12px">选择会写入本机偏好，登录页与侧栏也可切换。</p>
+        <div id="settings-theme"></div>
+      </div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">抗告警风暴</h3>
+        <p class="hint" style="margin:0 0 12px">
+          节流 / 聚合 / 接入削峰。保存后<strong>当前进程立即生效</strong>（写入 MySQL；多实例其他节点需重启或各自保存一次）。
+          来源 <code>${esc(storm.source || "toml")}</code>。详解见 README §11.8。
+        </p>
+        <h4 style="margin:8px 0 10px;font-size:0.92rem;color:var(--muted)">通知节流（P0）</h4>
+        <label class="check-row" style="margin:0 0 10px">
+          <input type="checkbox" id="storm-throttle-on" ${storm.throttle_enabled ? "checked" : ""} ${dis} />
+          <span>启用节流</span>
+        </label>
+        <div class="detail-grid" style="margin-bottom:8px">
+          <div class="field"><label>最短间隔（秒）</label>
+            <input id="storm-min-interval" type="number" min="1" value="${esc(String(storm.min_interval_seconds ?? 60))}" ${dis} /></div>
+          <div class="field"><label>窗口秒数</label>
+            <input id="storm-window" type="number" min="1" value="${esc(String(storm.window_seconds ?? 60))}" ${dis} /></div>
+          <div class="field"><label>窗口内最多发送</label>
+            <input id="storm-max-window" type="number" min="1" value="${esc(String(storm.max_per_window ?? 20))}" ${dis} /></div>
+          <div class="field"><label>恢复通知上限（可选）</label>
+            <input id="storm-resolve-max" type="number" min="1" placeholder="默认=最多发送" value="${esc(resolveMax)}" ${dis} /></div>
+        </div>
+        <div class="field"><label>节流键 throttle_key</label>
+          <input id="storm-throttle-key" type="text" placeholder="fingerprint 或 labels:alertname" value="${esc(storm.throttle_key || "fingerprint")}" ${dis} />
+        </div>
+        <h4 style="margin:16px 0 10px;font-size:0.92rem;color:var(--muted)">时间窗聚合（P1）</h4>
+        <label class="check-row" style="margin:0 0 10px">
+          <input type="checkbox" id="storm-agg-on" ${storm.aggregate_enabled ? "checked" : ""} ${dis} />
+          <span>启用聚合</span>
+        </label>
+        <div class="detail-grid" style="margin-bottom:8px">
+          <div class="field"><label>聚合窗口（秒）</label>
+            <input id="storm-agg-window" type="number" min="1" value="${esc(String(storm.aggregate_window_seconds ?? 30))}" ${dis} /></div>
+          <div class="field"><label>采样条数上限</label>
+            <input id="storm-agg-limit" type="number" min="1" value="${esc(String(storm.aggregate_sample_limit ?? 10))}" ${dis} /></div>
+        </div>
+        <div class="field"><label>分组 group_by</label>
+          <input id="storm-group-by" type="text" placeholder="alertname 或 alertname,namespace" value="${esc(storm.group_by || "alertname")}" ${dis} /></div>
+        <div class="field"><label>模式</label>
+          <select id="storm-agg-mode" ${dis}>
+            <option value="head+summary" ${storm.aggregate_mode === "head+summary" ? "selected" : ""}>head+summary（首条+摘要）</option>
+            <option value="summary_only" ${storm.aggregate_mode === "summary_only" ? "selected" : ""}>summary_only（仅摘要）</option>
+          </select>
+        </div>
+        <div class="field"><label>摘要采样标签</label>
+          <input id="storm-agg-samples" type="text" placeholder="ip,instance,alertIp" value="${esc(storm.aggregate_sample_labels || "")}" ${dis} /></div>
+        <h4 style="margin:16px 0 10px;font-size:0.92rem;color:var(--muted)">接入削峰（P2）</h4>
+        <div class="detail-grid" style="margin-bottom:8px">
+          <div class="field"><label>最大并发 inflight（0=不限）</label>
+            <input id="storm-inflight" type="number" min="0" value="${esc(String(storm.ingress_max_inflight ?? 100))}" ${dis} /></div>
+          <div class="field"><label>降级通知速率阈值 / 秒</label>
+            <input id="storm-degrade-rate" type="number" min="1" value="${esc(String(storm.degrade_notify_per_sec ?? 50))}" ${dis} /></div>
+        </div>
+        <label class="check-row" style="margin:10px 0">
+          <input type="checkbox" id="storm-degrade-skip" ${storm.degrade_skip_notify ? "checked" : ""} ${dis} />
+          <span>高压时只落库不发通知（degrade_skip_notify）</span>
+        </label>
         ${
-          fromEditor
-            ? `<button type="button" class="ghost" id="pv-back-edit">返回编辑</button>`
-            : `<button type="button" class="ghost" id="pv-close">关闭</button>`
+          canWriteSettings
+            ? `<div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+                <button class="primary" id="storm-save">保存</button>
+                <button id="storm-reset">恢复 toml 默认</button>
+              </div>`
+            : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
         }
-        <button type="button" class="primary" id="pv-run">预览丰富结果</button>
       </div>
-    `,
-      { xl: true }
-    );
+      <div class="panel" style="max-width:720px;margin-bottom:16px">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">Trap HTTP Token</h3>
+        <p class="hint" style="margin:0 0 12px">
+          保护 Trap 服务的 stats / recent / simulate / reload（health 始终开放）。
+          控制台经 <code>/trap-api</code> 反代时自动带上；变更会写入 MySQL，并经 Redis 热更新到 Trap。
+        </p>
+        <div class="field"><label>状态</label>
+          <div>${
+            trapTok.configured
+              ? `<span class="badge on">已启用</span>`
+              : `<span class="badge off">未启用（HTTP 接口开放）</span>`
+          }
+          · 来源 <code>${esc(trapTok.source || "empty")}</code>
+          · Redis ${trapTok.redis_synced ? "已同步" : "不可用"}</div>
+        </div>
+        <div class="field"><label>当前 Token（脱敏）</label>
+          <div class="mono" id="trap-tok-preview">${esc(trapTok.token_preview || "—")}
+            ${trapTok.token_length ? `（${trapTok.token_length} 字符）` : ""}</div>
+        </div>
+        <div class="field"><label>手动设置</label>
+          <input id="trap-tok-input" type="text" autocomplete="off" placeholder="至少 8 位，或点下方生成"
+            ${dis} />
+        </div>
+        ${
+          canWriteSettings
+            ? `<div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+                <button class="primary" id="trap-tok-rotate">生成并保存</button>
+                <button id="trap-tok-save">保存输入</button>
+                <button class="danger" id="trap-tok-clear">清除（关闭鉴权）</button>
+              </div>
+              <pre id="trap-tok-reveal" class="mono" style="display:none;margin-top:12px;padding:10px;background:var(--panel-2);border-radius:6px;word-break:break-all"></pre>`
+            : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
+        }
+      </div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">告警历史仓库</h3>
+        <p class="hint" style="margin:0 0 12px">
+          在此填写 Elasticsearch 地址并保存即可生效（也可在 <code>eventide.toml</code> 里预置）。
+          状态：${
+            hist.es_configured
+              ? `<span class="badge on">已连接配置</span>`
+              : `<span class="badge off">未配置地址</span>`
+          }
+        </p>
+        <div class="field"><label>ES 地址</label>
+          <input id="hist-es-url" type="text" placeholder="http://127.0.0.1:9200" value="${esc(
+            hist.es_url || ""
+          )}" ${dis} />
+        </div>
+        <div class="field"><label>Index</label>
+          <input id="hist-es-index" type="text" placeholder="eventide-alerts" value="${esc(
+            hist.es_index || "eventide-alerts"
+          )}" ${dis} />
+        </div>
+        <div class="field"><label>用户名（可选）</label>
+          <input id="hist-es-user" type="text" autocomplete="off" value="${esc(
+            hist.es_username || ""
+          )}" ${dis} />
+        </div>
+        <div class="field"><label>密码（可选）</label>
+          <input id="hist-es-pass" type="password" autocomplete="new-password" placeholder="${
+            hist.es_password_set ? "已保存，留空则不修改" : "无密码可留空"
+          }" ${dis} />
+        </div>
+        <label class="check-row" style="margin:12px 0">
+          <input type="checkbox" id="hist-write-es" ${hist.write_to_es ? "checked" : ""} ${dis} />
+          <span>同步告警到历史事件（Elasticsearch）</span>
+        </label>
+        <div class="field" style="margin-top:8px">
+          <label>默认列表范围</label>
+          <select id="hist-search-store" ${dis}>
+            <option value="mysql" ${hist.search_store === "mysql" ? "selected" : ""}>最近事件</option>
+            <option value="es" ${hist.search_store === "es" ? "selected" : ""}>历史事件</option>
+          </select>
+        </div>
+        ${
+          canWriteSettings
+            ? `<div style="margin-top:14px"><button class="primary" id="hist-save">保存</button></div>`
+            : `<p class="hint">需要 <code>settings:write</code> 权限才能修改。</p>`
+        }
+      </div>
+      <div class="panel" style="max-width:720px">
+        <h3 style="margin:0 0 1rem;font-size:1rem">运行信息</h3>
+        <div class="field"><label>当前用户</label><div>${esc(me.display_name || me.username)}（${esc(
+      me.username
+    )}）</div></div>
+        <div class="field"><label>权限</label><div class="mono" style="font-size:12px;word-break:break-all">${esc(
+          perms
+        )}</div></div>
+        <div class="field"><label>监听地址</label><div class="mono">${esc(me.listen)}</div></div>
+        <div class="field"><label>数据库</label><div class="mono">${esc(me.database_path)}</div></div>
+        <div class="field"><label>静态资源目录</label><div class="mono">${esc(me.static_dir)}</div></div>
+        <div class="field"><label>调度周期</label><div>${me.scheduler_tick_seconds} 秒</div></div>
+        <div class="field"><label>Token 有效期</label><div>${me.token_ttl_hours} 小时</div></div>
+        <p style="color:var(--muted);font-size:0.88rem;margin:1rem 0 0">
+          账号请在「用户管理」维护。JWT 密钥与有效期见 <code>eventide.toml</code> 的 <code>[auth]</code> 段（<code>jwt_secret</code> / <code>token_ttl_hours</code>）；首次空库会用其中的 username/password 种子管理员。
+        </p>
+      </div>`;
+    bindThemeHost(document.getElementById("settings-theme"), "cards");
 
-    const persistPayload = () => {
-      try {
-        sessionStorage.setItem(
-          "eventide_enrich_preview",
-          JSON.stringify({ payload: document.getElementById("pv-payload").value })
-        );
-      } catch (_) {}
+    const downloadTextFile = (filename, text, mime = "application/json") => {
+      const blob = new Blob([text], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
     };
 
-    document.getElementById("pv-run").onclick = async () => {
-      let payload;
-      try {
-        payload = JSON.parse(document.getElementById("pv-payload").value || "{}");
-      } catch (e) {
-        toast("JSON 无效：" + e.message, true);
-        return;
-      }
-      persistPayload();
-      const ingressId = String(document.getElementById("pv-ingress").value || "").trim();
-      const body = {
-        payload,
-        annotations: {},
-        value: 1,
-        severity: "information",
-        rule_name: "PreviewRule",
+    const licExport = document.getElementById("lic-export-req");
+    if (licExport) {
+      licExport.onclick = async () => {
+        try {
+          const customer = (document.getElementById("lic-customer")?.value || "").trim();
+          const params = new URLSearchParams();
+          if (customer) params.set("customer", customer);
+          const req = await api(
+            "/api/license/request" + (params.toString() ? `?${params}` : "")
+          );
+          const name = `eventide-license-request-${(req.install_id || "install").slice(0, 8)}.json`;
+          downloadTextFile(name, JSON.stringify(req, null, 2) + "\n");
+          toast("已导出授权申请，请发给厂商签发");
+        } catch (e) {
+          toast(e.message, true);
+        }
       };
-      if (ingressId) body.ingress_id = ingressId;
+    }
 
-      if (draft) {
-        body.rule = draft;
-      } else {
-        const ruleSel = document.getElementById("pv-rule").value;
-        if (ruleSel === "__all__") {
-          body.use_saved = true;
-        } else {
-          const r = rules.find((x) => x.id === ruleSel);
-          if (!r) {
-            toast("请选择丰富规则", true);
+    const licFile = document.getElementById("lic-file");
+    if (licFile) {
+      licFile.onchange = async () => {
+        const f = licFile.files && licFile.files[0];
+        if (!f) return;
+        try {
+          const text = await f.text();
+          const ta = document.getElementById("lic-token");
+          if (ta) ta.value = text.trim();
+        } catch (e) {
+          toast(e.message || "读取文件失败", true);
+        }
+      };
+    }
+
+    const licSave = document.getElementById("lic-save");
+    if (licSave) {
+      licSave.onclick = async () => {
+        try {
+          const content = (document.getElementById("lic-token")?.value || "").trim();
+          if (!content) {
+            toast("请选择或粘贴授权文件", true);
             return;
           }
-          body.rule = {
-            name: r.name,
-            kind: r.kind || "auto",
-            matchers: r.matchers || {},
-            match_key: r.match_key || "",
-            templates: r.templates || {},
-            mappings: r.mappings || {},
-            lookup_table_ids:
-              r.lookup_table_ids || (r.lookup_table_id ? [r.lookup_table_id] : []),
-            lookup_match_keys: r.lookup_match_keys || {},
-            field_templates: r.field_templates || {},
-            label_extracts: r.label_extracts || {},
-            write_labels: r.write_labels !== false,
-            enabled: r.enabled !== false,
-            priority: r.priority ?? 100,
+          await api("/api/license", {
+            method: "PUT",
+            body: JSON.stringify({ content }),
+          });
+          toast("授权已导入");
+          refreshLicenseBanner();
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    }
+    const licClear = document.getElementById("lic-clear");
+    if (licClear) {
+      licClear.onclick = async () => {
+        if (!confirm("清除商业许可后将回到试用/过期态，确定？")) return;
+        try {
+          await api("/api/license", { method: "DELETE" });
+          toast("已清除商业许可");
+          refreshLicenseBanner();
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    }
+
+    const revealTok = (tok) => {
+      const el = document.getElementById("trap-tok-reveal");
+      if (!el || !tok) return;
+      el.style.display = "block";
+      el.textContent = `新 Token（请立即复制，刷新后不再明文显示）：\n${tok}`;
+    };
+    const applyTrapTok = async (body) => {
+      const r = await api("/api/settings/trap-token", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      if (r.token) revealTok(r.token);
+      else renderPage();
+      return r;
+    };
+    const rotateBtn = document.getElementById("trap-tok-rotate");
+    if (rotateBtn) {
+      rotateBtn.onclick = async () => {
+        try {
+          await applyTrapTok({ rotate: true });
+          toast("已生成并同步 Trap Token");
+          document.getElementById("trap-tok-preview").textContent = "(见下方明文，请复制)";
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    }
+    const saveTokBtn = document.getElementById("trap-tok-save");
+    if (saveTokBtn) {
+      saveTokBtn.onclick = async () => {
+        try {
+          const token = (document.getElementById("trap-tok-input")?.value || "").trim();
+          if (token.length < 8) {
+            toast("token 至少 8 个字符", true);
+            return;
+          }
+          await applyTrapTok({ token });
+          toast("Trap Token 已保存");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    }
+    const clearTokBtn = document.getElementById("trap-tok-clear");
+    if (clearTokBtn) {
+      clearTokBtn.onclick = async () => {
+        if (!confirm("清除后 Trap HTTP（除 health）将不再校验 Token，确定？")) return;
+        try {
+          await applyTrapTok({ clear: true });
+          toast("已清除 Trap Token");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    }
+    const saveBtn = document.getElementById("hist-save");
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        try {
+          const body = {
+            write_to_es: !!document.getElementById("hist-write-es")?.checked,
+            search_store: document.getElementById("hist-search-store")?.value || "mysql",
+            es_url: (document.getElementById("hist-es-url")?.value || "").trim(),
+            es_index: (document.getElementById("hist-es-index")?.value || "").trim(),
+            es_username: (document.getElementById("hist-es-user")?.value || "").trim(),
+            es_password: document.getElementById("hist-es-pass")?.value || "",
           };
+          hist = await api("/api/settings/alert-history", {
+            method: "PUT",
+            body: JSON.stringify(body),
+          });
+          toast("告警历史设置已保存");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
         }
-      }
-
-      try {
-        const out = await api("/api/enrich/preview", {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        const labels = out.labels || {};
-        const an = out.annotations || {};
-        document.getElementById("preview-summary").textContent =
-          an.summary || an.description || "（未生成描述）";
-        document.getElementById("preview-ip").textContent =
-          labels.alertIp || labels.ip || labels.instance || "—";
-        document.getElementById("preview-sev").textContent =
-          labels.severity || out.severity || "—";
-        document.getElementById("preview-name").textContent = labels.alertname || "—";
-        document.getElementById("preview-out").textContent = JSON.stringify(
-          {
-            parsed_via: out.parsed_via,
-            before: out.before,
-            after: {
-              labels: out.labels,
-              annotations: out.annotations,
-              severity: out.severity,
-            },
-          },
-          null,
-          2
-        );
-      } catch (e) {
-        toast(e.message, true);
-      }
-    };
-
-    const closeBtn = document.getElementById("pv-close");
-    if (closeBtn) closeBtn.onclick = closeModal;
-
-    const backBtn = document.getElementById("pv-back-edit");
-    if (backBtn) {
-      backBtn.onclick = () => {
-        persistPayload();
-        const base = ruleId ? rules.find((r) => r.id === ruleId) : null;
-        editEnrich(base || null, { draft });
       };
     }
-  }
-
-  async function editEnrich(row, opts = {}) {
-    const draft = opts.draft || null;
-    const src = draft
-      ? {
-          ...(row || {}),
-          ...draft,
-          id: row?.id,
-          lookup_table_ids:
-            draft.lookup_table_ids ||
-            row?.lookup_table_ids ||
-            (row?.lookup_table_id ? [row.lookup_table_id] : []),
-          lookup_match_keys: draft.lookup_match_keys || row?.lookup_match_keys || {},
-          field_templates: draft.field_templates || row?.field_templates || {},
-          label_extracts: draft.label_extracts || row?.label_extracts || {},
-          mappings: draft.mappings || row?.mappings || {},
-          matchers: draft.matchers || row?.matchers || {},
+    const stormSave = document.getElementById("storm-save");
+    if (stormSave) {
+      stormSave.onclick = async () => {
+        try {
+          const resolveRaw = (document.getElementById("storm-resolve-max")?.value || "").trim();
+          const body = {
+            throttle_enabled: !!document.getElementById("storm-throttle-on")?.checked,
+            min_interval_seconds: Number(document.getElementById("storm-min-interval")?.value || 60),
+            max_per_window: Number(document.getElementById("storm-max-window")?.value || 20),
+            window_seconds: Number(document.getElementById("storm-window")?.value || 60),
+            throttle_key: (document.getElementById("storm-throttle-key")?.value || "").trim(),
+            resolve_max_per_window: resolveRaw === "" ? null : Number(resolveRaw),
+            aggregate_enabled: !!document.getElementById("storm-agg-on")?.checked,
+            aggregate_window_seconds: Number(document.getElementById("storm-agg-window")?.value || 30),
+            group_by: (document.getElementById("storm-group-by")?.value || "").trim(),
+            aggregate_mode: document.getElementById("storm-agg-mode")?.value || "head+summary",
+            aggregate_sample_labels: (document.getElementById("storm-agg-samples")?.value || "").trim(),
+            aggregate_sample_limit: Number(document.getElementById("storm-agg-limit")?.value || 10),
+            ingress_max_inflight: Number(document.getElementById("storm-inflight")?.value || 100),
+            degrade_skip_notify: !!document.getElementById("storm-degrade-skip")?.checked,
+            degrade_notify_per_sec: Number(document.getElementById("storm-degrade-rate")?.value || 50),
+          };
+          await api("/api/settings/storm", {
+            method: "PUT",
+            body: JSON.stringify(body),
+          });
+          toast("抗风暴配置已保存并生效");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
         }
-      : row;
-    const lookups = state.cache.lookups || (await api("/api/lookups"));
-    state.cache.lookups = lookups;
-    const selectedIds = new Set(
-      src?.lookup_table_ids?.length
-        ? src.lookup_table_ids
-        : src?.lookup_table_id
-        ? [src.lookup_table_id]
-        : []
-    );
-    const ft = src?.field_templates || {};
-    const tpl = { ...(src?.templates || {}) };
-    const summaryTpl =
-      ft.summary ||
-      tpl.summary ||
-      (selectedIds.size
-        ? "{{labels.样例-主机台账.主机名}}（{{labels.样例-主机台账.别名}}）"
-        : "{{labels.alertname}} · {{labels.instance}}");
-    delete tpl.summary;
-    const otherTplJson = Object.keys(tpl).length ? JSON.stringify(tpl, null, 2) : "";
-    const builtinChipFields = ["ip", "instance", "alertIp", "alertname", "severity"];
-    const colsFromLookup = (t) => {
-      const set = new Set();
-      Object.values(t.rows || {}).forEach((attrs) => {
-        Object.keys(attrs || {}).forEach((k) => set.add(k));
-      });
-      return [...set].sort();
-    };
-    const matcherPairs = Object.entries(src?.matchers || {}).map(([k, v]) => ({ k, v }));
-    if (!matcherPairs.length) matcherPairs.push({ k: "", v: "" });
-
-    const matcherRowsHtml = (pairs) =>
-      pairs
-        .map(
-          (p, i) => `<div class="matcher-row" data-idx="${i}">
-            <input name="mk_key" placeholder="标签名，如 job" value="${esc(p.k)}" />
-            <span class="matcher-eq">=</span>
-            <input name="mk_val" placeholder="值，如 api" value="${esc(p.v)}" />
-            <button type="button" class="ghost" data-rm-matcher title="删除">×</button>
-          </div>`
-        )
-        .join("");
-
-    const hasAdvanced =
-      (src?.mappings && Object.keys(src.mappings).length) ||
-      otherTplJson ||
-      (src?.priority != null && src.priority !== 100) ||
-      src?.write_labels === false;
-
-    openModal(
-      `
-      <div class="modal-head">
-        <h3>${row ? "编辑丰富规则" : "新建丰富规则"}</h3>
-        <p class="desc">选台账补字段，再决定告警上显示的描述、IP 和级别。保存前可点「试跑预览」验证。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <details class="map-help enrich-help">
-          <summary>帮助说明：可用字段与语法</summary>
-          <div class="map-help-body">
-            <p><b>执行顺序</b>：查表前抽取 → 台账查表 → 内联映射 → 注解模板 → 写到告警卡片（描述/IP/级别/名称）。</p>
-
-            <p><b>模板变量</b>（可写在抽取模板、告警描述、IP、级别、名称等处）</p>
-            <table class="map-help-table">
-              <thead>
-                <tr><th>写法</th><th>含义</th></tr>
-              </thead>
-              <tbody>
-                <tr><td><code>{{labels.xxx}}</code></td><td>告警标签；常见有 <code>ip</code> / <code>alertIp</code> / <code>instance</code> / <code>alertname</code> / <code>severity</code>，以及接入 <code>map_labels</code> 写入的字段</td></tr>
-                <tr><td><code>{{labels.台账名.列名}}</code></td><td>台账查出的列（必须带台账名前缀，如 <code>{{labels.device_info_form.主机名}}</code>）</td></tr>
-                <tr><td><code>{{annotations.xxx}}</code></td><td>告警注解；常见 <code>summary</code> / <code>description</code></td></tr>
-                <tr><td><code>{{value}}</code></td><td>当前监控值</td></tr>
-                <tr><td><code>{{severity}}</code></td><td>引擎级别（Zabbix：not_classified / information / warning / average / high / disaster）</td></tr>
-                <tr><td><code>{{status}}</code></td><td>firing / resolved</td></tr>
-                <tr><td><code>{{fingerprint}}</code></td><td>告警指纹</td></tr>
-                <tr><td><code>{{rule.name}}</code></td><td>当前丰富规则名</td></tr>
-              </tbody>
-            </table>
-
-            <p style="margin-top:12px"><b>字符串截取语法</b>（加在变量路径后，用 <code>|</code> 连接）</p>
-            <table class="map-help-table">
-              <thead>
-                <tr><th>语法</th><th>说明</th><th>示例</th></tr>
-              </thead>
-              <tbody>
-                <tr><td><code>|before:SEP</code></td><td>取分隔符<strong>之前</strong></td><td><code>{{labels.sourceciname|before:_}}</code> → <code>82.12.161.32</code></td></tr>
-                <tr><td><code>|after:SEP</code></td><td>取分隔符<strong>之后</strong></td><td><code>{{annotations.summary|after:为：}}</code></td></tr>
-                <tr><td><code>|split:SEP:INDEX</code></td><td>按分隔符拆分，取第 INDEX 段（从 0 起）</td><td><code>{{labels.x|split:_:0}}</code></td></tr>
-                <tr><td><code>|between:起点:终点</code></td><td>取两段之间；起点/终点可空（空=串首/串尾）</td><td><code>{{annotations.summary|between:为：: %}}</code></td></tr>
-              </tbody>
-            </table>
-
-            <p style="margin-top:12px"><b>各配置项怎么用</b></p>
-            <table class="map-help-table">
-              <thead>
-                <tr><th>配置</th><th>说明</th></tr>
-              </thead>
-              <tbody>
-                <tr><td>何时生效</td><td>按 <code>labels</code> 精确匹配；全部满足才应用本规则；不配=全部告警</td></tr>
-                <tr><td>查表前抽取</td><td>用模板算出值，写入 <code>labels.标签名</code>（也可进 annotations），供下方「用标签」查台账。例：标签 <code>sss_ip</code> = <code>{{annotations.summary|before:_}}</code></td></tr>
-                <tr><td>从台账补字段</td><td>勾选台账；「用标签」填匹配键（默认台账的 key，可改为抽取的 <code>sss_ip</code>）。命中后写入 <code>labels.台账名.列名</code></td></tr>
-                <tr><td>告警描述</td><td>对应 field 模板 <code>summary</code>；可点/拖下方芯片插入</td></tr>
-                <tr><td>告警 IP</td><td>写入 <code>ip</code> / <code>alertIp</code>（及必要时 <code>instance</code>）</td></tr>
-                <tr><td>告警级别</td><td>Zabbix 六级：disaster / high / average / warning / information / not_classified（兼容 critical→disaster、info→information；也可用中文）</td></tr>
-                <tr><td>告警名称</td><td>可选，改写 <code>labels.alertname</code></td></tr>
-                <tr><td>高级 · 内联映射</td><td>无台账时用 JSON 对照表；匹配键填标签名</td></tr>
-              </tbody>
-            </table>
-
-            <p class="hint" style="margin:12px 0 0">推荐路径：接入已映射出 <code>ip</code> → 直接用标签 <code>ip</code> 查台账 → 描述写 <code>{{labels.台账名.主机名}}</code>。若 IP 在描述里，先抽取再把「用标签」改成抽取名。</p>
-          </div>
-        </details>
-
-        <div class="enrich-step">
-          <div class="enrich-step-head">
-            <h4>基本信息</h4>
-            <p>给规则起个名字；默认对全部告警生效。</p>
-          </div>
-          <div class="row">
-            <div class="field" style="flex:2"><label>名称</label>
-              <input name="name" required value="${esc(src?.name || "")}" placeholder="例如 主机台账丰富" />
-            </div>
-            <div class="field" style="flex:0.8;min-width:120px;align-self:flex-end">
-              <label class="check-row" style="margin:0;padding:8px 0"><input type="checkbox" name="enabled" ${
-                src?.enabled !== false ? "checked" : ""
-              }/><span>启用</span></label>
-            </div>
-          </div>
-          <details class="enrich-when" ${
-            Object.keys(src?.matchers || {}).length ? "open" : ""
-          }>
-            <summary>何时生效（可选）· 默认全部告警</summary>
-            <div class="hint" style="margin:10px 0 8px">仅当告警同时带有下列标签时才应用本规则。</div>
-            <div id="matcher-rows">${matcherRowsHtml(matcherPairs)}</div>
-            <button type="button" class="ghost" id="btn-add-matcher" style="margin-top:8px">添加条件</button>
-          </details>
-        </div>
-
-        <div class="enrich-step">
-          <div class="enrich-step-head">
-            <h4>查表前抽取标签（可选）</h4>
-            <p>从原告警描述/标签截取后写入 labels，供台账匹配。支持 <code>|before:</code> / <code>|after:</code> / <code>|split:SEP:INDEX</code> / <code>|between:起点:终点</code>。</p>
-          </div>
-          <div id="extract-rows"></div>
-          <button type="button" class="ghost" id="btn-add-extract" style="margin-top:8px">添加抽取</button>
-          <div class="hint" style="margin-top:8px">例：标签名 <code>sss_ip</code>，模板 <code>{{annotations.summary|before:_}}</code>；下方台账「用标签」填 <code>sss_ip</code>。</div>
-        </div>
-
-        <div class="enrich-step">
-          <div class="enrich-step-head">
-            <h4>从台账补字段</h4>
-            <p>勾选台账，并指定<strong>用哪个标签查表</strong>（可填上方抽取的 <code>sss_ip</code>）。查出的列用 <code>{{labels.台账名.列名}}</code>。</p>
-          </div>
-          <div class="field">
-            <div class="lookup-bind-list" id="lookup-bind-list">
-              ${
-                lookups.length
-                  ? lookups
-                      .map((t) => {
-                        const checked = selectedIds.has(t.id);
-                        const override =
-                          (src?.lookup_match_keys && src.lookup_match_keys[t.id]) || "";
-                        const defKey = t.key_label || "ip";
-                        return `<div class="lookup-bind-row">
-                    <label class="check-row lookup-bind-check">
-                      <input type="checkbox" name="lookup_table_ids" value="${esc(t.id)}" ${
-                          checked ? "checked" : ""
-                        } data-default-key="${esc(defKey)}" />
-                      <span><b>${esc(t.name)}</b> · ${Object.keys(t.rows || {}).length} 行${
-                          t.enabled ? "" : " · 已停用"
-                        }</span>
-                    </label>
-                    <div class="lookup-bind-key">
-                      <span class="hint">用标签</span>
-                      <input name="lookup_key_${esc(t.id)}" class="mono" placeholder="${esc(
-                          defKey
-                        )}" value="${esc(override || defKey)}" ${checked ? "" : "disabled"} />
-                      <span class="hint">查本表</span>
-                    </div>
-                  </div>`;
-                      })
-                      .join("")
-                  : `<div class="enrich-inline-empty">
-                      还没有台账。
-                      <button type="button" class="ghost" id="btn-goto-lookup">去新建台账</button>
-                    </div>`
-              }
-            </div>
-          </div>
-          <div class="hint" style="margin-top:8px">例：抽取了 <code>sss_ip</code> → 此处填 <code>sss_ip</code> → 描述写 <code>{{labels.device_info_test.主机名}}</code>。</div>
-        </div>
-
-        <div class="enrich-step">
-          <div class="enrich-step-head">
-            <h4>写到告警卡片上</h4>
-            <p>用 <code>{{labels.台账名.列名}}</code> 或截取 <code>{{annotations.summary|between:为：: %}}</code>。点芯片插入，或拖到描述任意位置。</p>
-          </div>
-          <div class="field"><label>告警描述</label>
-            <textarea name="ft_summary" id="summary-tpl" rows="3" class="chip-drop-target">${esc(summaryTpl)}</textarea>
-            <div class="hint" id="chip-hint" style="margin:8px 0 6px">先勾选台账；芯片可点击或拖入上方描述框。</div>
-            <div id="summary-chips" class="chip-groups"></div>
-          </div>
-          <div class="row">
-            <div class="field"><label>告警 IP</label>
-              <input name="ft_ip" value="${esc(
-                ft.ip || ft.alertIp || "{{labels.ip}}"
-              )}" placeholder="{{labels.ip}} 或 {{labels.instance}}" />
-            </div>
-            <div class="field"><label>告警级别</label>
-              <input name="ft_severity" value="${esc(
-                ft.severity || ""
-              )}" placeholder="disaster / 严重 / {{labels.级别}}" />
-            </div>
-          </div>
-          <div class="field"><label>告警名称（可选）</label>
-            <input name="ft_alertname" value="${esc(
-              ft.alertname || ""
-            )}" placeholder="{{labels.主机名}}-不可达，留空则不改" />
-          </div>
-          <div class="hint">级别按 Zabbix：disaster / high / average / warning / information / not_classified（兼容 critical、info；可用中文）。</div>
-        </div>
-
-        <details class="enrich-step enrich-advanced" ${hasAdvanced ? "open" : ""}>
-          <summary>高级选项（内联映射、优先级等）</summary>
-          <div class="enrich-advanced-body">
-            <div class="row">
-              <div class="field" style="flex:1;min-width:160px"><label>内联映射 · 用哪个标签匹配</label>
-                <input name="match_key" value="${esc(
-                  src?.match_key || ""
-                )}" placeholder="留空=各台账用自己的匹配标签" />
-                <div class="hint">只影响下方「内联映射表」，与已选台账无关。</div>
-              </div>
-              <div class="field" style="flex:0.6;min-width:100px"><label>优先级</label>
-                <input name="priority" type="number" value="${src?.priority ?? 100}" />
-                <div class="hint">数字越小越先执行</div>
-              </div>
-            </div>
-            <div class="field"><label>内联映射表（JSON，可选）</label>
-              <textarea name="mappings" rows="4" class="mono" placeholder='{"10.0.0.1":{"owner":"alice"}}'>${esc(
-                Object.keys(src?.mappings || {}).length
-                  ? JSON.stringify(src.mappings, null, 2)
-                  : ""
-              )}</textarea>
-              <div class="hint">无需台账时，可直接在规则里写一小段对照表。</div>
-            </div>
-            <div class="field"><label>其他注解模板（JSON，可选）</label>
-              <textarea name="templates_extra" rows="3" class="mono">${esc(otherTplJson)}</textarea>
-            </div>
-            <label class="check-row"><input type="checkbox" name="write_labels" ${
-              src?.write_labels !== false ? "checked" : ""
-            } /><span>台账 / 映射字段写入 labels（供描述模板引用）</span></label>
-          </div>
-        </details>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button type="button" class="ghost" id="m-goto-preview">试跑预览</button>
-        <button class="primary" type="submit" form="f">保存规则</button>
-      </div>
-    `,
-      { xl: true }
-    );
-
-    document.getElementById("m-cancel").onclick = closeModal;
-
-    const gotoLookup = document.getElementById("btn-goto-lookup");
-    if (gotoLookup) {
-      gotoLookup.onclick = () => {
-        closeModal();
-        localStorage.setItem("eventide_enrich_tab", "lookups");
-        renderPage();
-        setTimeout(() => editLookup(), 50);
       };
     }
-
-    const matcherBox = document.getElementById("matcher-rows");
-    const bindMatcherRm = () => {
-      matcherBox.querySelectorAll("[data-rm-matcher]").forEach((btn) => {
-        btn.onclick = () => {
-          const rowEl = btn.closest(".matcher-row");
-          if (matcherBox.querySelectorAll(".matcher-row").length <= 1) {
-            rowEl.querySelector('[name="mk_key"]').value = "";
-            rowEl.querySelector('[name="mk_val"]').value = "";
-            return;
-          }
-          rowEl.remove();
-        };
-      });
-    };
-    bindMatcherRm();
-    document.getElementById("btn-add-matcher").onclick = () => {
-      if (matcherBox.querySelectorAll(".matcher-row").length >= 5) {
-        toast("最多 5 个条件", true);
-        return;
-      }
-      matcherBox.insertAdjacentHTML(
-        "beforeend",
-        `<div class="matcher-row">
-          <input name="mk_key" placeholder="标签名" value="" />
-          <span class="matcher-eq">=</span>
-          <input name="mk_val" placeholder="值" value="" />
-          <button type="button" class="ghost" data-rm-matcher title="删除">×</button>
-        </div>`
-      );
-      bindMatcherRm();
-    };
-
-    const extractBox = document.getElementById("extract-rows");
-    const extractPairs = Object.entries(src?.label_extracts || {}).map(([k, v]) => ({
-      k,
-      v,
-    }));
-    if (!extractPairs.length) extractPairs.push({ k: "", v: "" });
-    const extractRowHtml = (p) => `<div class="extract-row">
-      <input name="ex_key" placeholder="写入标签名，如 extract_ip" value="${esc(p.k)}" />
-      <input name="ex_tpl" placeholder="{{annotations.summary|before:_}}" value="${esc(p.v)}" />
-      <button type="button" class="ghost" data-rm-extract title="删除">×</button>
-    </div>`;
-    extractBox.innerHTML = extractPairs.map(extractRowHtml).join("");
-    const bindExtractRm = () => {
-      extractBox.querySelectorAll("[data-rm-extract]").forEach((btn) => {
-        btn.onclick = () => {
-          const rowEl = btn.closest(".extract-row");
-          if (extractBox.querySelectorAll(".extract-row").length <= 1) {
-            rowEl.querySelector('[name="ex_key"]').value = "";
-            rowEl.querySelector('[name="ex_tpl"]').value = "";
-            return;
-          }
-          rowEl.remove();
-        };
-      });
-    };
-    bindExtractRm();
-    document.getElementById("btn-add-extract").onclick = () => {
-      if (extractBox.querySelectorAll(".extract-row").length >= 8) {
-        toast("最多 8 条抽取", true);
-        return;
-      }
-      extractBox.insertAdjacentHTML("beforeend", extractRowHtml({ k: "", v: "" }));
-      bindExtractRm();
-    };
-
-    const summaryEl = document.getElementById("summary-tpl");
-    const chipsEl = document.getElementById("summary-chips");
-    const chipHint = document.getElementById("chip-hint");
-
-    const lookupNs = (name) => {
-      const s = String(name || "")
-        .split("")
-        .map((c) => (/[a-zA-Z0-9_\-\u4e00-\u9fff]/.test(c) ? c : "_"))
-        .join("");
-      return s || "lookup";
-    };
-
-    const insertChipInto = (el, chip, at) => {
-      if (!el || !chip) return;
-      const start =
-        at != null ? at : el.selectionStart ?? String(el.value || "").length;
-      const end = at != null ? at : el.selectionEnd ?? start;
-      const v = String(el.value || "");
-      el.value = v.slice(0, start) + chip + v.slice(end);
-      el.focus();
-      const caret = start + chip.length;
-      if (typeof el.setSelectionRange === "function") {
-        el.setSelectionRange(caret, caret);
-      }
-    };
-
-    /** Approximate caret index in a textarea from pointer coordinates. */
-    const textareaIndexFromPoint = (ta, clientX, clientY) => {
-      const text = String(ta.value || "");
-      if (!text.length) return 0;
-      const style = getComputedStyle(ta);
-      const rect = ta.getBoundingClientRect();
-      const mirror = document.createElement("div");
-      mirror.setAttribute("aria-hidden", "true");
-      mirror.style.cssText = [
-        "position:fixed",
-        `left:${rect.left}px`,
-        `top:${rect.top}px`,
-        `width:${ta.clientWidth}px`,
-        `height:${ta.clientHeight}px`,
-        "overflow:hidden",
-        "visibility:hidden",
-        "pointer-events:none",
-        "white-space:pre-wrap",
-        "word-wrap:break-word",
-        `font:${style.font}`,
-        `font-size:${style.fontSize}`,
-        `font-family:${style.fontFamily}`,
-        `font-weight:${style.fontWeight}`,
-        `line-height:${style.lineHeight}`,
-        `letter-spacing:${style.letterSpacing}`,
-        `padding:${style.padding}`,
-        `border:${style.border}`,
-        `box-sizing:${style.boxSizing}`,
-      ].join(";");
-      document.body.appendChild(mirror);
-      mirror.scrollTop = ta.scrollTop;
-      mirror.scrollLeft = ta.scrollLeft;
-
-      let best = text.length;
-      let bestDist = Infinity;
-      const marker = document.createElement("span");
-      marker.textContent = "\u200b";
-      // Templates are short; O(n) probe is fine.
-      for (let i = 0; i <= text.length; i++) {
-        mirror.textContent = "";
-        mirror.appendChild(document.createTextNode(text.slice(0, i)));
-        mirror.appendChild(marker);
-        mirror.appendChild(document.createTextNode(text.slice(i)));
-        mirror.scrollTop = ta.scrollTop;
-        mirror.scrollLeft = ta.scrollLeft;
-        const mr = marker.getBoundingClientRect();
-        const cx = mr.left;
-        const cy = mr.top + mr.height / 2;
-        const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
-        if (d < bestDist) {
-          bestDist = d;
-          best = i;
-        }
-      }
-      mirror.remove();
-      return best;
-    };
-
-    let chipDragActive = false;
-    let suppressChipClick = false;
-
-    const bindChips = () => {
-      chipsEl.querySelectorAll("[data-chip]").forEach((btn) => {
-        btn.draggable = true;
-        btn.ondragstart = (e) => {
-          chipDragActive = true;
-          suppressChipClick = false;
-          const chip = btn.dataset.chip || "";
-          e.dataTransfer.setData("text/plain", chip);
-          e.dataTransfer.setData("application/x-eventide-chip", chip);
-          e.dataTransfer.effectAllowed = "copy";
-          btn.classList.add("is-dragging");
-        };
-        btn.ondragend = () => {
-          chipDragActive = false;
-          btn.classList.remove("is-dragging");
-          // Avoid click-insert after a successful drag.
-          suppressChipClick = true;
-          setTimeout(() => {
-            suppressChipClick = false;
-          }, 0);
-        };
-        btn.onclick = () => {
-          if (suppressChipClick) return;
-          insertChipInto(summaryEl, btn.dataset.chip);
-        };
-      });
-    };
-
-    summaryEl.addEventListener("dragenter", (e) => {
-      const types = e.dataTransfer?.types
-        ? Array.from(e.dataTransfer.types)
-        : [];
-      if (
-        !chipDragActive &&
-        !types.includes("text/plain") &&
-        !types.includes("application/x-eventide-chip")
-      ) {
-        return;
-      }
-      e.preventDefault();
-      summaryEl.classList.add("is-chip-drag-over");
-    });
-    summaryEl.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-      summaryEl.classList.add("is-chip-drag-over");
-      const idx = textareaIndexFromPoint(summaryEl, e.clientX, e.clientY);
-      summaryEl.focus();
-      summaryEl.setSelectionRange(idx, idx);
-    });
-    summaryEl.addEventListener("dragleave", (e) => {
-      if (e.target !== summaryEl) return;
-      summaryEl.classList.remove("is-chip-drag-over");
-    });
-    summaryEl.addEventListener("drop", (e) => {
-      e.preventDefault();
-      summaryEl.classList.remove("is-chip-drag-over");
-      const chip =
-        e.dataTransfer.getData("application/x-eventide-chip") ||
-        e.dataTransfer.getData("text/plain") ||
-        "";
-      if (!chip) return;
-      const idx = textareaIndexFromPoint(summaryEl, e.clientX, e.clientY);
-      insertChipInto(summaryEl, chip, idx);
-    });
-
-    const chipBtn = (labelKey, title, cls = "") =>
-      `<button type="button" class="ghost chip-tag ${cls}" draggable="true" data-chip="{{labels.${esc(
-        labelKey
-      )}}}" title="${esc(title)}（可拖入描述）">{{labels.${esc(labelKey)}}}</button>`;
-
-    const refreshChips = () => {
-      const checked = [
-        ...document.querySelectorAll('input[name="lookup_table_ids"]:checked'),
-      ].map((el) => el.value);
-
-      const parts = [];
-      parts.push(`<div class="chip-group">
-        <div class="chip-group-title">告警自带标签</div>
-        <div class="chip-row">${builtinChipFields
-          .map((k) => chipBtn(k, "告警自带，不依赖台账"))
-          .join("")}</div>
-      </div>`);
-
-      checked.forEach((id) => {
-        const t = lookups.find((x) => x.id === id);
-        if (!t) return;
-        const keyLabel = t.key_label || "ip";
-        const ns = lookupNs(t.name);
-        const cols = colsFromLookup(t);
-        const buttons = cols
-          .map((col) =>
-            chipBtn(
-              `${ns}.${col}`,
-              `台账「${t.name}」列「${col}」。匹配：告警 labels.${keyLabel} → 查本表`,
-              "chip-from-lookup"
-            )
-          )
-          .join("");
-        parts.push(`<div class="chip-group">
-          <div class="chip-group-title"><b>${esc(t.name)}</b> · 匹配键 <code class="mono">labels.${esc(
-            keyLabel
-          )}</code> → 写入 <code class="mono">labels.${esc(ns)}.*</code></div>
-          <div class="chip-row">${
-            buttons || `<span class="hint">该台账没有数据列</span>`
-          }</div>
-        </div>`);
-      });
-
-      chipsEl.innerHTML = parts.join("");
-      if (chipHint) {
-        chipHint.textContent = checked.length
-          ? "台账字段一律为 {{labels.台账名.列名}}；点选或拖入描述框任意位置。"
-          : "先勾选上方台账，才会列出可拖拽的 {{labels.台账名.列名}} 芯片。";
-      }
-      bindChips();
-    };
-
-    document.querySelectorAll('input[name="lookup_table_ids"]').forEach((el) => {
-      const syncKey = () => {
-        const row = el.closest(".lookup-bind-row");
-        const keyInput = row?.querySelector(`input[name="lookup_key_${el.value}"]`);
-        if (!keyInput) return;
-        keyInput.disabled = !el.checked;
-        if (el.checked && !String(keyInput.value || "").trim()) {
-          keyInput.value = el.dataset.defaultKey || "ip";
+    const stormReset = document.getElementById("storm-reset");
+    if (stormReset) {
+      stormReset.onclick = async () => {
+        if (!confirm("清除控制台覆盖，恢复为 eventide.toml [storm]？")) return;
+        try {
+          await api("/api/settings/storm", {
+            method: "PUT",
+            body: JSON.stringify({ reset: true }),
+          });
+          toast("已恢复 toml [storm]");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
         }
       };
-      el.addEventListener("change", () => {
-        syncKey();
-        refreshChips();
-      });
-      syncKey();
-    });
-    refreshChips();
+    }
+  },
 
-    const collectMatchers = (form) => {
-      const matchers = {};
-      form.querySelectorAll(".matcher-row").forEach((rowEl) => {
-        const k = String(rowEl.querySelector('[name="mk_key"]')?.value || "").trim();
-        const v = String(rowEl.querySelector('[name="mk_val"]')?.value || "").trim();
-        if (k && v) matchers[k] = v;
-      });
-      return matchers;
-    };
-
-    const collectExtracts = (form) => {
-      const out = {};
-      form.querySelectorAll(".extract-row").forEach((rowEl) => {
-        const k = String(rowEl.querySelector('[name="ex_key"]')?.value || "").trim();
-        const v = String(rowEl.querySelector('[name="ex_tpl"]')?.value || "").trim();
-        if (k && v) out[k] = v;
-      });
-      return out;
-    };
-
-    const buildDraft = (fd, form) => {
-      let mappings = {};
-      let extra = {};
-      const rawMap = String(fd.get("mappings") || "").trim();
-      if (rawMap) mappings = JSON.parse(rawMap);
-      const rawExtra = String(fd.get("templates_extra") || "").trim();
-      if (rawExtra) extra = JSON.parse(rawExtra);
-      const summary = String(fd.get("ft_summary") || "").trim();
-      const templates = { ...extra };
-      if (summary) templates.summary = summary;
-      const field_templates = {};
-      if (summary) field_templates.summary = summary;
-      const ip = String(fd.get("ft_ip") || "").trim();
-      const severity = String(fd.get("ft_severity") || "").trim();
-      const alertname = String(fd.get("ft_alertname") || "").trim();
-      if (ip) field_templates.ip = ip;
-      if (severity) field_templates.severity = severity;
-      if (alertname) field_templates.alertname = alertname;
-      const lookup_table_ids = [
-        ...form.querySelectorAll('input[name="lookup_table_ids"]:checked'),
-      ].map((el) => el.value);
-      const lookup_match_keys = {};
-      lookup_table_ids.forEach((id) => {
-        const keyInput = form.querySelector(`input[name="lookup_key_${id}"]`);
-        const k = String(keyInput?.value || "").trim();
-        if (k) lookup_match_keys[id] = k;
-      });
-      return {
-        name: fd.get("name") || "preview",
-        kind: "auto",
-        matchers: collectMatchers(form),
-        match_key: String(fd.get("match_key") || "").trim(),
-        templates,
-        mappings,
-        lookup_table_ids,
-        lookup_match_keys,
-        field_templates,
-        label_extracts: collectExtracts(form),
-        write_labels: form.querySelector('[name="write_labels"]')?.checked || false,
-        enabled: form.querySelector('[name="enabled"]')?.checked !== false,
-        priority: Number(fd.get("priority") || 100),
-      };
-    };
-
-    document.getElementById("m-goto-preview").onclick = () => {
-      const form = document.getElementById("f");
-      const fd = new FormData(form);
-      let draftBody;
-      try {
-        draftBody = buildDraft(fd, form);
-        draftBody.name = String(fd.get("name") || "").trim() || draftBody.name;
-        draftBody.enabled = form.querySelector('[name="enabled"]').checked;
-      } catch (e) {
-        toast("高级 JSON 无效：" + e.message, true);
-        return;
-      }
-      openEnrichPreviewModal({
-        draft: draftBody,
-        ruleId: row?.id || null,
-        fromEditor: true,
-      });
-    };
-
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const fd = new FormData(form);
-      let body;
-      try {
-        body = buildDraft(fd, form);
-        body.name = fd.get("name");
-        body.enabled = form.querySelector('[name="enabled"]').checked;
-      } catch (err) {
-        toast("高级 JSON 无效：" + err.message, true);
-        return;
-      }
-      const hasAny =
-        (body.lookup_table_ids || []).length ||
-        Object.keys(body.mappings || {}).length ||
-        Object.keys(body.templates || {}).length ||
-        Object.keys(body.field_templates || {}).length ||
-        Object.keys(body.label_extracts || {}).length;
-      if (!hasAny) {
-        toast("请至少勾选台账，或配置描述 / IP / 级别", true);
-        return;
-      }
-      if (Object.keys(body.mappings || {}).length && !body.match_key) {
-        toast("使用内联映射时，请填写「用哪个标签匹配」", true);
-        return;
-      }
-      try {
-        if (row) {
-          await api(`/api/enrich/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-        } else {
-          await api("/api/enrich", { method: "POST", body: JSON.stringify(body) });
-        }
-      } catch (err) {
-        toast(err.message || String(err), true);
-        return;
-      }
-      sessionStorage.removeItem("eventide_enrich_preview");
-      closeModal();
-      toast("已保存");
-      localStorage.setItem("eventide_enrich_tab", "rules");
-      renderPage();
-    };
-  }
-
-  function editSilence(prefill) {
-    const now = new Date();
-    const end = new Date(now.getTime() + 2 * 3600 * 1000);
-    const toLocal = (d) => {
-      const pad = (n) => String(n).padStart(2, "0");
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-        d.getHours()
-      )}:${pad(d.getMinutes())}`;
-    };
-    const matchersJson = JSON.stringify(prefill?.matchers || {}, null, 2);
-    openModal(`
-      <div class="modal-head">
-        <h3>新建静默</h3>
-        <p class="desc">在时间窗内抑制匹配标签的通知。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="field"><label>注释</label><input name="comment" placeholder="维护窗口" value="${esc(
-          prefill?.comment || ""
-        )}" /></div>
-        <div class="field"><label>规则 ID（可选，留空匹配全部）</label><input name="rule_id" placeholder="uuid" value="${esc(
-          prefill?.rule_id || ""
-        )}" /></div>
-        <div class="field"><label>匹配标签 JSON</label>
-          <textarea name="matchers" rows="4">${esc(matchersJson)}</textarea>
-        </div>
-        <div class="row">
-          <div class="field"><label>开始</label><input name="starts_at" type="datetime-local" required value="${toLocal(
-            now
-          )}" /></div>
-          <div class="field"><label>结束</label><input name="ends_at" type="datetime-local" required value="${toLocal(
-            end
-          )}" /></div>
-        </div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`, { wide: true });
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      let matchers = {};
-      try {
-        matchers = JSON.parse(String(fd.get("matchers") || "{}"));
-      } catch {
-        toast("匹配标签 JSON 无效", true);
-        return;
-      }
-      const ruleId = String(fd.get("rule_id") || "").trim();
-      const body = {
-        comment: fd.get("comment") || "",
-        rule_id: ruleId || null,
-        matchers,
-        starts_at: new Date(fd.get("starts_at")).toISOString(),
-        ends_at: new Date(fd.get("ends_at")).toISOString(),
-      };
-      await api("/api/silences", { method: "POST", body: JSON.stringify(body) });
-      closeModal();
-      toast("已保存");
-      renderPage();
-    };
-  }
-
-  // ---------- IAM editors ----------
-  async function editUser(row) {
-    const [roles, depts] = await Promise.all([
-      state.cache.roles || api("/api/roles"),
-      state.cache.departments || api("/api/departments"),
+  async users(root) {
+    const canWrite = can("users:write");
+    setActions(
+      canWrite ? `<button class="primary" id="btn-add">新建用户</button>` : ""
+    );
+    if (canWrite) document.getElementById("btn-add").onclick = () => editUser();
+    const [rows, roles, depts] = await Promise.all([
+      api("/api/users"),
+      api("/api/roles"),
+      api("/api/departments"),
     ]);
     state.cache.roles = roles;
     state.cache.departments = depts;
-    const selectedRoles = new Set(row?.role_ids || []);
-    openModal(`
-      <div class="modal-head">
-        <h3>${row ? "编辑用户" : "新建用户"}</h3>
-        <p class="desc">分配部门与角色；角色权限在「权限管理」配置。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="row">
-          <div class="field"><label>用户名</label>
-            <input name="username" required value="${esc(row?.username || "")}" ${
-              row ? "readonly" : ""
-            } /></div>
-          <div class="field"><label>显示名</label>
-            <input name="display_name" value="${esc(row?.display_name || "")}" /></div>
-        </div>
-        <div class="field"><label>${row ? "新密码（留空不改）" : "初始密码"}</label>
-          <input name="password" type="password" autocomplete="new-password" ${
-            row ? "" : "required minlength=6"
-          } placeholder="${row ? "留空则不修改" : "至少 6 位"}" /></div>
-        <div class="field"><label>部门</label>
-          <select name="department_id">
-            <option value="">— 未分配 —</option>
-            ${depts
-              .map(
-                (d) =>
-                  `<option value="${esc(d.id)}" ${
-                    row?.department_id === d.id ? "selected" : ""
-                  }>${esc(d.name)}</option>`
-              )
-              .join("")}
-          </select>
-        </div>
-        <div class="field"><label>角色</label>
-          <div class="check-grid">${roles
-            .map(
-              (r) => `<label class="check-row"><input type="checkbox" name="role_ids" value="${esc(
-                r.id
-              )}" ${selectedRoles.has(r.id) ? "checked" : ""}/> <span>${esc(r.name)}${
-                r.is_system ? "（系统）" : ""
-              }</span></label>`
-            )
-            .join("")}</div>
-        </div>
-        <label class="check-row"><input type="checkbox" name="enabled" ${
-          !row || row.enabled ? "checked" : ""
-        }/> <span>启用</span></label>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const fd = new FormData(form);
-      const password = String(fd.get("password") || "").trim();
-      const body = {
-        username: String(fd.get("username") || "").trim(),
-        display_name: String(fd.get("display_name") || "").trim(),
-        department_id: String(fd.get("department_id") || "") || null,
-        role_ids: [...form.querySelectorAll('[name="role_ids"]:checked')].map((x) => x.value),
-        enabled: form.querySelector('[name="enabled"]').checked,
+    const roleMap = Object.fromEntries(roles.map((r) => [r.id, r.name]));
+    const deptMap = Object.fromEntries(depts.map((d) => [d.id, d.name]));
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>用户名</th><th>显示名</th><th>部门</th><th>角色</th><th>状态</th><th></th></tr></thead>
+          <tbody>${rows
+            .map((u) => {
+              const roleNames = (u.role_ids || [])
+                .map((id) => roleMap[id] || id.slice(0, 8))
+                .join("、") || "—";
+              const dept = u.department_id ? deptMap[u.department_id] || "—" : "—";
+              return `<tr>
+            <td class="mono">${esc(u.username)}</td>
+            <td>${esc(u.display_name || "—")}</td>
+            <td>${esc(dept)}</td>
+            <td>${esc(roleNames)}</td>
+            <td><span class="badge ${u.enabled ? "on" : "off"}">${u.enabled ? "启用" : "停用"}</span></td>
+            <td class="actions">${
+              canWrite
+                ? `<button data-edit="${u.id}">编辑</button>
+              <button data-pw="${u.id}">重置密码</button>
+              <button class="danger" data-del="${u.id}">删除</button>`
+                : ""
+            }</td></tr>`;
+            })
+            .join("")}</tbody></table>`
+        : `<div class="empty">暂无用户。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editUser(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-pw]").forEach((b) => {
+      b.onclick = () => resetUserPassword(b.dataset.pw);
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该用户？")) return;
+        try {
+          await api(`/api/users/${b.dataset.del}`, { method: "DELETE" });
+          toast("已删除");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
       };
-      if (password) body.password = password;
+    });
+  },
+
+  async roles(root) {
+    const canWrite = can("roles:write");
+    setActions(canWrite ? `<button class="primary" id="btn-add">新建角色</button>` : "");
+    if (canWrite) document.getElementById("btn-add").onclick = () => editRole();
+    const [rows, catalog] = await Promise.all([api("/api/roles"), api("/api/permissions")]);
+    state.cache.permCatalog = catalog;
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>名称</th><th>说明</th><th>权限</th><th></th></tr></thead>
+          <tbody>${rows
+            .map((r) => {
+              const perms = (r.permissions || []).join(", ") || "—";
+              return `<tr>
+            <td>${esc(r.name)}${r.is_system ? ' <span class="badge on">系统</span>' : ""}</td>
+            <td>${esc(r.description || "—")}</td>
+            <td class="mono" style="font-size:12px;max-width:360px;word-break:break-all">${esc(
+              perms
+            )}</td>
+            <td class="actions">${
+              canWrite
+                ? `<button data-edit="${r.id}">编辑</button>
+              ${
+                r.is_system
+                  ? ""
+                  : `<button class="danger" data-del="${r.id}">删除</button>`
+              }`
+                : ""
+            }</td></tr>`;
+            })
+            .join("")}</tbody></table>`
+        : `<div class="empty">暂无角色。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editRole(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该角色？")) return;
+        try {
+          await api(`/api/roles/${b.dataset.del}`, { method: "DELETE" });
+          toast("已删除");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    });
+  },
+
+  async departments(root) {
+    const canWrite = can("departments:write");
+    setActions(canWrite ? `<button class="primary" id="btn-add">新建部门</button>` : "");
+    if (canWrite) document.getElementById("btn-add").onclick = () => editDepartment();
+    const rows = await api("/api/departments");
+    state.cache.departments = rows;
+    const byId = Object.fromEntries(rows.map((d) => [d.id, d]));
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr><th>名称</th><th>上级</th><th>排序</th><th>状态</th><th></th></tr></thead>
+          <tbody>${rows
+            .map((d) => {
+              const parent = d.parent_id
+                ? (byId[d.parent_id] && byId[d.parent_id].name) || "—"
+                : "—";
+              return `<tr>
+            <td>${esc(d.name)}</td>
+            <td>${esc(parent)}</td>
+            <td>${d.sort_order}</td>
+            <td><span class="badge ${d.enabled ? "on" : "off"}">${d.enabled ? "启用" : "停用"}</span></td>
+            <td class="actions">${
+              canWrite
+                ? `<button data-edit="${d.id}">编辑</button>
+              <button class="danger" data-del="${d.id}">删除</button>`
+                : ""
+            }</td></tr>`;
+            })
+            .join("")}</tbody></table>`
+        : `<div class="empty">暂无部门。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => editDepartment(rows.find((x) => x.id === b.dataset.edit));
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该部门？")) return;
+        try {
+          await api(`/api/departments/${b.dataset.del}`, { method: "DELETE" });
+          toast("已删除");
+          renderPage();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    });
+  },
+};
+
+function openIngressTest(row) {
+  if (!row) return;
+  const isProbeFriendly = row.kind === "generic" || row.kind === "kafka";
+  openModal(`
+    <div class="modal-head">
+      <h3>试推送 · ${esc(row.name)}</h3>
+      <p class="desc">写入一条样例告警，走完整接入 → 去重 → 通知链路，用于验证配置。</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>场景</label>
+        <div class="type-list">
+          <label class="type-row"><input type="radio" name="scenario" value="fire" checked />
+            <span class="t-main"><span class="t-name">触发告警</span><span class="t-desc">Generic firing 样例</span></span></label>
+          <label class="type-row"><input type="radio" name="scenario" value="recover" />
+            <span class="t-main"><span class="t-name">恢复告警</span><span class="t-desc">同一告警标识的 resolved</span></span></label>
+          ${
+            isProbeFriendly
+              ? `<label class="type-row"><input type="radio" name="scenario" value="probe_fire" />
+            <span class="t-main"><span class="t-name">拨测失败</span><span class="t-desc">Jeecg probe-alert fire</span></span></label>
+          <label class="type-row"><input type="radio" name="scenario" value="probe_recover" />
+            <span class="t-main"><span class="t-name">拨测恢复</span><span class="t-desc">Jeecg probe-alert recover</span></span></label>`
+              : ""
+          }
+        </div>
+      </div>
+      <div class="hint">试推送使用控制台登录态，不经过接入 Token 校验。</div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button type="button" class="primary" id="m-run">推送</button>
+    </div>`, { wide: true });
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("m-run").onclick = async () => {
+    const scenario =
+      document.querySelector('input[name="scenario"]:checked')?.value || "fire";
+    try {
+      const res = await api(`/api/ingress/${row.id}/test`, {
+        method: "POST",
+        body: JSON.stringify({ scenario }),
+      });
+      closeModal();
+      toast(res.hint || `已接受 ${res.accepted} 条`);
+      state.alertFilters = {
+        source: "ingress",
+        status: "",
+        severity: "",
+        q: "",
+        ip: "",
+        page: 1,
+      };
+      navigate("alerts");
+    } catch (e) {
+      toast(e.message || "试推送失败", true);
+    }
+  };
+}
+
+// ---------- Editors ----------
+const DATASOURCE_TYPES = [
+  {
+    id: "prometheus",
+    name: "Prometheus",
+    desc: "PromQL 指标查询",
+    icon: "PM",
+    tone: "orange",
+  },
+  {
+    id: "victoriametrics",
+    name: "VictoriaMetrics",
+    desc: "兼容 PromQL",
+    icon: "VM",
+    tone: "blue",
+  },
+  {
+    id: "kafka",
+    name: "Kafka",
+    desc: "消息管道 · JSON 字段告警",
+    icon: "K",
+    tone: "amber",
+  },
+  {
+    id: "log",
+    name: "Loki 日志",
+    desc: "LogQL 日志统计",
+    icon: "Lo",
+    tone: "teal",
+  },
+];
+
+function pickDatasourceKind() {
+  openModal(`
+    <div class="modal-head">
+      <h3>选择数据源类型</h3>
+      <p class="desc">先选类型，再填写连接信息；规则评估会按类型自动拉数。</p>
+    </div>
+    <div class="modal-body">
+      <div class="type-pick-grid">
+        ${DATASOURCE_TYPES.map(
+          (t) => `<button type="button" class="type-pick-card" data-kind="${esc(t.id)}">
+            <span class="type-pick-ico tone-${esc(t.tone)}" aria-hidden="true">${esc(t.icon)}</span>
+            <span class="type-pick-name">${esc(t.name)}</span>
+            <span class="type-pick-desc">${esc(t.desc)}</span>
+          </button>`
+        ).join("")}
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+    </div>`);
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.querySelectorAll(".type-pick-card").forEach((btn) => {
+    btn.onclick = () => editDatasource(null, { kind: btn.dataset.kind });
+  });
+}
+
+function editDatasource(row, opts = {}) {
+  if (!row && !opts.kind) {
+    pickDatasourceKind();
+    return;
+  }
+  const kind = row?.kind || opts.kind || "prometheus";
+  const typeMeta = DATASOURCE_TYPES.find((t) => t.id === kind) || DATASOURCE_TYPES[0];
+  const opt = row?.options || {};
+  openModal(`
+    <div class="modal-head">
+      <h3>${row ? "编辑数据源" : "新建数据源"}</h3>
+      <p class="desc">填写连接信息，规则评估会按类型自动拉数。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field">
+        <label>名称</label>
+        <input name="name" required placeholder="例如：生产 Prometheus" value="${esc(row?.name || "")}" />
+      </div>
+      <div class="field">
+        <label>类型</label>
+        <input type="hidden" name="kind" value="${esc(kind)}" />
+        <div class="type-picked">
+          <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
+            typeMeta.icon
+          )}</span>
+          <div class="type-picked-text">
+            <div class="t-name">${esc(typeMeta.name)}</div>
+            <div class="t-desc">${esc(typeMeta.desc)}</div>
+          </div>
+          ${
+            row
+              ? ""
+              : `<button type="button" class="ghost" id="ds-repick">重选类型</button>`
+          }
+        </div>
+      </div>
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
+          <span>启用此数据源；停用后关联规则将跳过评估</span>
+        </label>
+      </div>
+
+      <div class="kind-panel" data-kinds="prometheus,victoriametrics,log" id="panel-http">
+        <div class="field">
+          <label id="url-label">HTTP 地址</label>
+          <input name="url_http" placeholder="http://127.0.0.1:9090" value="${esc(
+            kind === "kafka" ? "" : row?.url || ""
+          )}" />
+          <div class="hint" id="url-hint">填写查询 API 根地址。</div>
+        </div>
+      </div>
+
+      <div class="kind-panel" data-kinds="kafka" id="panel-kafka" hidden>
+        <div class="field">
+          <label>Brokers</label>
+          <input name="url_kafka" placeholder="127.0.0.1:9092" value="${esc(
+            kind === "kafka" ? row?.url || "" : ""
+          )}" />
+          <div class="hint">多个 broker 用英文逗号分隔。消息按 JSON 解析字段后走阈值规则。</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Topic</label>
+            <input name="topic" placeholder="orders" value="${esc(opt.topic || "")}" />
+          </div>
+          <div class="field">
+            <label>数值字段（JSON 路径）</label>
+            <input name="field" placeholder="latency_ms 或 metrics.p99" value="${esc(opt.field || "")}" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>标签字段（可选）</label>
+            <input name="label_fields" placeholder="service,instance" value="${esc(opt.label_fields || "")}" />
+            <div class="hint">从消息中取出作为标签，用于分组与告警标识。</div>
+          </div>
+          <div class="field">
+            <label>每次拉取条数</label>
+            <input name="max_records" type="number" min="1" placeholder="100" value="${esc(opt.max_records || "100")}" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>评估模式</label>
+            <select name="mode">
+              <option value="field" ${!opt.mode || opt.mode === "field" ? "selected" : ""}>字段解析 field（推荐）</option>
+              <option value="depth" ${opt.mode === "depth" ? "selected" : ""}>堆积深度 depth</option>
+              <option value="count" ${opt.mode === "count" ? "selected" : ""}>近期消息数 count</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>扫描分区数</label>
+            <input name="partitions" type="number" min="1" placeholder="8" value="${esc(opt.partitions || "8")}" />
+          </div>
+        </div>
+        <div class="hint">规则表达式可覆盖数值字段路径；例如消息 {"latency_ms":820,"service":"api"}，字段填 latency_ms，阈值 &gt; 500。</div>
+      </div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`, { wide: true });
+
+  const form = document.getElementById("f");
+  const syncKind = () => {
+    form.querySelectorAll(".kind-panel").forEach((p) => {
+      const kinds = (p.dataset.kinds || "").split(",");
+      p.hidden = !kinds.includes(kind);
+    });
+    const urlLabel = document.getElementById("url-label");
+    const urlHint = document.getElementById("url-hint");
+    const httpInput = form.querySelector('[name="url_http"]');
+    if (!urlLabel || !httpInput) return;
+    if (kind === "log") {
+      urlLabel.textContent = "Loki 地址";
+      httpInput.placeholder = "http://127.0.0.1:3100";
+      urlHint.textContent = "填写 Loki 根地址。规则表达式使用 LogQL。";
+    } else if (kind === "victoriametrics") {
+      urlLabel.textContent = "VictoriaMetrics 地址";
+      httpInput.placeholder = "http://127.0.0.1:8428";
+      urlHint.textContent = "兼容 PromQL 的查询入口。";
+    } else {
+      urlLabel.textContent = "Prometheus 地址";
+      httpInput.placeholder = "http://127.0.0.1:9090";
+      urlHint.textContent = "填写 Prometheus 查询 API 根地址。";
+    }
+  };
+  syncKind();
+
+  document.getElementById("m-cancel").onclick = closeModal;
+  const repick = document.getElementById("ds-repick");
+  if (repick) repick.onclick = () => pickDatasourceKind();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const k = String(fd.get("kind") || kind || "prometheus");
+    const options = {};
+    let url = "";
+    if (k === "kafka") {
+      url = String(fd.get("url_kafka") || "").trim();
+      const topic = String(fd.get("topic") || "").trim();
+      if (!topic) {
+        toast("请填写 Kafka Topic", true);
+        return;
+      }
+      options.topic = topic;
+      options.mode = String(fd.get("mode") || "field");
+      const field = String(fd.get("field") || "").trim();
+      if (field) options.field = field;
+      const labelFields = String(fd.get("label_fields") || "").trim();
+      if (labelFields) options.label_fields = labelFields;
+      const maxRecords = String(fd.get("max_records") || "").trim();
+      if (maxRecords) options.max_records = maxRecords;
+      const partitions = String(fd.get("partitions") || "").trim();
+      if (partitions) options.partitions = partitions;
+    } else {
+      url = String(fd.get("url_http") || "").trim();
+    }
+    if (!url) {
+      toast("请填写连接地址", true);
+      return;
+    }
+    const body = {
+      name: fd.get("name"),
+      kind: k,
+      url,
+      options,
+      enabled: form.querySelector('[name="enabled"]').checked,
+    };
+    if (row) await api(`/api/datasources/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+    else await api("/api/datasources", { method: "POST", body: JSON.stringify(body) });
+    closeModal();
+    toast("已保存");
+    renderPage();
+  };
+}
+
+function showNotifyLogDetail(n) {
+  if (!n) return;
+  const edge =
+    n.transition === "became_firing"
+      ? "触发通知"
+      : n.transition === "became_resolved"
+      ? "恢复通知"
+      : n.error === "test"
+      ? "渠道测试"
+      : n.transition || "其他";
+  openModal(`
+    <div class="modal-head">
+      <h3>通知内容</h3>
+      <p class="desc">
+        <span class="badge ${n.success ? "on" : "firing"}">${n.success ? "成功" : "失败"}</span>
+        <span style="margin-left:8px">${esc(edge)}</span>
+        <span style="margin-left:8px">${esc(n.channel_name || "")}</span>
+        <span class="hint" style="margin-left:8px">${esc(fmtTime(n.created_at))}</span>
+      </p>
+    </div>
+    <div class="modal-body">
+      ${
+        n.error
+          ? `<div class="field"><label>状态 / 错误</label><div class="summary-box mono">${esc(
+              n.error
+            )}</div></div>`
+          : ""
+      }
+      <div class="field">
+        <label>告警 ID</label>
+        <div class="summary-box mono">${esc(
+          n.alert_id && n.alert_id !== "00000000-0000-0000-0000-000000000000"
+            ? n.alert_id
+            : "—"
+        )}</div>
+      </div>
+      <div class="field">
+        <label>发送正文</label>
+        <pre class="summary-box mono">${esc(n.body || "(无正文)")}</pre>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="primary" id="m-close">关闭</button>
+    </div>`);
+  document.getElementById("m-close").onclick = closeModal;
+}
+
+function prettyJson(v) {
+  try {
+    if (typeof v === "string") {
+      const t = v.trim();
+      if (!t) return "(空)";
       try {
-        if (row) {
-          await api(`/api/users/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-        } else {
-          if (!password) {
-            toast("请设置初始密码", true);
+        return JSON.stringify(JSON.parse(t), null, 2);
+      } catch {
+        return v;
+      }
+    }
+    return JSON.stringify(v ?? null, null, 2);
+  } catch {
+    return String(v ?? "");
+  }
+}
+
+function showChannelTestResult(res) {
+  const ok = !!res.ok;
+  openModal(`
+    <div class="modal-head">
+      <h3>渠道测试${ok ? "成功" : "失败"}</h3>
+      <p class="desc">${esc(res.hint || "")}</p>
+    </div>
+    <div class="modal-body">
+      ${
+        res.error
+          ? `<div class="field"><label>错误</label><div class="summary-box" style="color:var(--crit)">${esc(
+              res.error
+            )}</div></div>`
+          : ""
+      }
+      <div class="field">
+        <label>发送正文</label>
+        <pre class="summary-box mono">${esc(res.text || "")}</pre>
+      </div>
+      <div class="field">
+        <label>请求 URL</label>
+        <pre class="summary-box mono">${esc(res.request_url || "")}</pre>
+      </div>
+      <div class="field">
+        <label>请求报文</label>
+        <pre class="summary-box mono">${esc(prettyJson(res.request_body))}</pre>
+      </div>
+      <div class="field">
+        <label>HTTP 状态</label>
+        <div class="summary-box mono">${esc(
+          res.http_status != null ? String(res.http_status) : "(无响应)"
+        )}</div>
+      </div>
+      <div class="field">
+        <label>返回内容</label>
+        <pre class="summary-box mono">${esc(prettyJson(res.response_body))}</pre>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="primary" id="m-close">关闭</button>
+    </div>`);
+  document.getElementById("m-close").onclick = closeModal;
+}
+
+async function testChannel(id, btn) {
+  if (!id) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api(`/api/channels/${id}/test`, { method: "POST" });
+    toast(res.ok ? res.hint || "测试成功" : res.error || "测试失败", !res.ok);
+    showChannelTestResult(res);
+  } catch (e) {
+    toast(e.message || "测试失败", true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function editChannel(row) {
+  const opt = row?.options || {};
+  const tplFire = opt.template_firing || "";
+  const tplResolve = opt.template_resolved || "";
+  const jsonFire = opt.json_firing || "";
+  const jsonResolve = opt.json_resolved || "";
+  const kindOpts = [
+    { id: "webhook", label: "Webhook（固定 Eventide JSON）" },
+    { id: "http", label: "自定义 HTTP JSON" },
+    { id: "dingtalk", label: "钉钉" },
+    { id: "wecom", label: "企业微信" },
+    { id: "feishu", label: "飞书" },
+    { id: "slack", label: "Slack" },
+    { id: "telegram", label: "Telegram" },
+  ];
+  const chips = [
+    "title",
+    "transition",
+    "severity",
+    "status",
+    "value",
+    "rule.name",
+    "fingerprint",
+    "labels",
+    "annotations",
+    "annotations.summary",
+    "annotations.summary|json",
+    "labels.instance",
+    "labels.alertname",
+  ];
+  openModal(`
+    <div class="modal-head">
+      <h3>${row ? "编辑渠道" : "新建通知渠道"}</h3>
+      <p class="desc">告警边沿触发时，向所选渠道发送通知。可自定义正文模板与消息格式。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>名称</label><input name="name" required placeholder="例如：值班钉钉群" value="${esc(
+        row?.name || ""
+      )}" /></div>
+      <div class="field"><label>类型</label>
+        <select name="kind" id="ch-kind">
+          ${kindOpts
+            .map(
+              (k) =>
+                `<option value="${k.id}" ${
+                  row?.kind === k.id || (!row && k.id === "webhook") ? "selected" : ""
+                }>${k.label}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="field" id="ch-url-field">
+        <label id="ch-url-label">Webhook / 机器人 URL</label>
+        <input name="url" required value="${esc(row?.url || "")}" placeholder="https://..." />
+        <div class="hint" id="ch-url-hint"></div>
+      </div>
+      <div class="field" id="ch-method-field" hidden>
+        <label>HTTP 方法</label>
+        <select name="http_method">
+          ${["POST", "PUT", "PATCH"]
+            .map(
+              (m) =>
+                `<option value="${m}" ${
+                  (opt.http_method || "POST").toUpperCase() === m ? "selected" : ""
+                }>${m}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="field" id="ch-secret-field">
+        <label id="ch-secret-label">签名密钥（可选）</label>
+        <input name="secret" value="${esc(row?.secret || "")}" placeholder="钉钉 / 飞书 secret" />
+        <div class="hint" id="ch-secret-hint"></div>
+      </div>
+      <div class="field" id="ch-headers-field" hidden>
+        <label>自定义请求头（JSON 对象）</label>
+        <textarea name="headers_json" rows="3" placeholder='{"X-Token":"xxx","Content-Type":"application/json"}'>${esc(
+          opt.headers_json || ""
+        )}</textarea>
+      </div>
+      <div class="field" id="ch-chat-field" hidden>
+        <label>Telegram chat_id</label>
+        <input name="chat_id" value="${esc(opt.chat_id || "")}" placeholder="群/用户 ID，如 -100123... 或 123456" />
+      </div>
+      <div class="field" id="ch-msg-field">
+        <label>消息格式</label>
+        <select name="msg_type" id="ch-msg-type">
+          <option value="text" ${!opt.msg_type || opt.msg_type === "text" ? "selected" : ""}>纯文本 text</option>
+          <option value="markdown" ${opt.msg_type === "markdown" ? "selected" : ""}>Markdown（钉钉/企微/飞书卡片/Slack）</option>
+        </select>
+        <div class="hint">企微 Markdown 可用 <code>&lt;font&gt;</code>；飞书为卡片 lark_md；Telegram Markdown 按 HTML 解析。</div>
+      </div>
+      <div class="field" id="ch-at-field">
+        <label class="check-row">
+          <input type="checkbox" name="at_all" ${
+            opt.at_all === "1" || opt.at_all === "true" ? "checked" : ""
+          } />
+          <span>@所有人（钉钉 / 企微 text）</span>
+        </label>
+        <input name="at_mobiles" style="margin-top:8px" value="${esc(
+          opt.at_mobiles || ""
+        )}" placeholder="艾特手机号，逗号分隔（钉钉 / 企微 text）" />
+      </div>
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
+          <span>启用此渠道</span>
+        </label>
+      </div>
+      <div class="seg" id="seg-text-tpl">
+        <div class="seg-title">通知模板</div>
+        <div class="hint" style="margin-bottom:10px">留空则用默认正文。语法与丰富规则相同。点芯片可插入到当前模板框。</div>
+        <div class="chip-row tpl-chips" style="margin-bottom:12px">
+          ${chips
+            .map(
+              (c) =>
+                `<button type="button" class="chip-tag" data-chip="${esc(c)}">{{${esc(
+                  c
+                )}}}</button>`
+            )
+            .join("")}
+        </div>
+        <div class="field">
+          <label>触发通知模板（firing）</label>
+          <textarea name="template_firing" rows="6" placeholder="[{{severity}}] {{rule.name}}&#10;状态: {{transition}}&#10;{{annotations.summary}}&#10;值: {{value}}">${esc(
+            tplFire
+          )}</textarea>
+        </div>
+        <div class="field">
+          <label>恢复通知模板（resolved）</label>
+          <textarea name="template_resolved" rows="5" placeholder="[恢复] {{rule.name}}&#10;{{annotations.summary}}">${esc(
+            tplResolve
+          )}</textarea>
+        </div>
+      </div>
+      <div class="seg" id="seg-json-tpl" hidden>
+        <div class="seg-title">自定义 JSON 报文</div>
+        <div class="hint" style="margin-bottom:10px">
+          必须是合法 JSON。字符串字段请用 <code>{{annotations.summary|json}}</code>（自带引号与转义）；
+          对象可用 <code>{{labels}}</code> / <code>{{annotations}}</code>。留空则发送默认 Eventide 结构。
+        </div>
+        <div class="chip-row tpl-chips" style="margin-bottom:12px">
+          ${chips
+            .map(
+              (c) =>
+                `<button type="button" class="chip-tag" data-chip="${esc(c)}">{{${esc(
+                  c
+                )}}}</button>`
+            )
+            .join("")}
+        </div>
+        <div class="field">
+          <label>触发 JSON（firing）</label>
+          <textarea name="json_firing" rows="8" class="mono" placeholder='{"msg": {{annotations.summary|json}}, "severity": {{severity|json}}, "labels": {{labels}}}'>${esc(
+            jsonFire
+          )}</textarea>
+        </div>
+        <div class="field">
+          <label>恢复 JSON（resolved）</label>
+          <textarea name="json_resolved" rows="6" class="mono" placeholder='{"msg": {{annotations.summary|json}}, "status": "resolved"}'>${esc(
+            jsonResolve
+          )}</textarea>
+        </div>
+      </div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      ${
+        row
+          ? `<button type="button" class="ghost" id="m-test">测试发送</button>`
+          : ""
+      }
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`, { wide: true });
+  document.getElementById("m-cancel").onclick = closeModal;
+  const testBtn = document.getElementById("m-test");
+  if (testBtn) testBtn.onclick = () => testChannel(row.id, testBtn);
+
+  const syncKindUi = () => {
+    const k = document.getElementById("ch-kind")?.value || "webhook";
+    const urlLabel = document.getElementById("ch-url-label");
+    const urlHint = document.getElementById("ch-url-hint");
+    const urlInput = document.querySelector('[name="url"]');
+    const secretField = document.getElementById("ch-secret-field");
+    const secretLabel = document.getElementById("ch-secret-label");
+    const secretHint = document.getElementById("ch-secret-hint");
+    const chatField = document.getElementById("ch-chat-field");
+    const msgField = document.getElementById("ch-msg-field");
+    const atField = document.getElementById("ch-at-field");
+    const methodField = document.getElementById("ch-method-field");
+    const headersField = document.getElementById("ch-headers-field");
+    const textSeg = document.getElementById("seg-text-tpl");
+    const jsonSeg = document.getElementById("seg-json-tpl");
+
+    const isHttp = k === "http";
+    secretField.hidden = !(k === "dingtalk" || k === "feishu" || isHttp);
+    chatField.hidden = k !== "telegram";
+    msgField.hidden = k === "webhook" || isHttp;
+    atField.hidden = !(k === "dingtalk" || k === "wecom");
+    methodField.hidden = !isHttp;
+    headersField.hidden = !isHttp;
+    textSeg.hidden = isHttp;
+    jsonSeg.hidden = !isHttp;
+
+    if (k === "telegram") {
+      urlLabel.textContent = "Bot API 基址";
+      urlInput.placeholder = "https://api.telegram.org/bot<token>";
+      urlHint.textContent = "填 Bot Token 基址即可，会自动追加 /sendMessage；chat_id 必填。";
+    } else if (k === "slack") {
+      urlLabel.textContent = "Slack Incoming Webhook";
+      urlInput.placeholder = "https://hooks.slack.com/services/...";
+      urlHint.textContent = "Slack 应用 Incoming Webhooks 生成的 URL。";
+    } else if (isHttp) {
+      urlLabel.textContent = "HTTP 接口地址";
+      urlInput.placeholder = "https://example.com/hooks/alert";
+      urlHint.textContent = "向该地址发送 JSON；可用自定义请求头与 Bearer Token。";
+      secretLabel.textContent = "Bearer Token（可选）";
+      document.querySelector('[name="secret"]').placeholder = "Authorization: Bearer …";
+      secretHint.textContent = "若填写，将自动加 Authorization: Bearer &lt;secret&gt;。";
+    } else {
+      urlLabel.textContent = "Webhook / 机器人 URL";
+      urlInput.placeholder = "https://...";
+      urlHint.textContent = "";
+      secretLabel.textContent = "签名密钥（可选）";
+      document.querySelector('[name="secret"]').placeholder = "钉钉 / 飞书 secret";
+      secretHint.textContent = "";
+    }
+  };
+  document.getElementById("ch-kind").onchange = syncKindUi;
+  syncKindUi();
+
+  let lastTpl = document.querySelector('[name="template_firing"],[name="json_firing"]');
+  document
+    .querySelectorAll(
+      '[name="template_firing"],[name="template_resolved"],[name="json_firing"],[name="json_resolved"]'
+    )
+    .forEach((el) => {
+      el.addEventListener("focus", () => {
+        lastTpl = el;
+      });
+    });
+  document.querySelectorAll(".tpl-chips [data-chip]").forEach((b) => {
+    b.onclick = () => {
+      const el =
+        lastTpl ||
+        document.querySelector(
+          document.getElementById("seg-json-tpl")?.hidden
+            ? '[name="template_firing"]'
+            : '[name="json_firing"]'
+        );
+      if (!el) return;
+      const token = `{{${b.dataset.chip}}}`;
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? start;
+      el.value = el.value.slice(0, start) + token + el.value.slice(end);
+      el.focus();
+      const pos = start + token.length;
+      el.setSelectionRange(pos, pos);
+    };
+  });
+
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const secret = String(fd.get("secret") || "").trim();
+    const kind = String(fd.get("kind") || "webhook");
+    const options = { ...(row?.options || {}) };
+    const fire = String(fd.get("template_firing") || "");
+    const resolved = String(fd.get("template_resolved") || "");
+    if (kind !== "http") {
+      if (fire.trim()) options.template_firing = fire;
+      else delete options.template_firing;
+      if (resolved.trim()) options.template_resolved = resolved;
+      else delete options.template_resolved;
+      delete options.json_firing;
+      delete options.json_resolved;
+      delete options.http_method;
+      delete options.headers_json;
+    } else {
+      delete options.template_firing;
+      delete options.template_resolved;
+      const jf = String(fd.get("json_firing") || "");
+      const jr = String(fd.get("json_resolved") || "");
+      if (jf.trim()) {
+        try {
+          JSON.parse(jf.replace(/\{\{[^}]+\}\}/g, "null"));
+        } catch {
+          // allow templates that aren't valid until rendered; only warn soft
+        }
+        options.json_firing = jf;
+      } else delete options.json_firing;
+      if (jr.trim()) options.json_resolved = jr;
+      else delete options.json_resolved;
+      const method = String(fd.get("http_method") || "POST").toUpperCase();
+      if (method && method !== "POST") options.http_method = method;
+      else delete options.http_method;
+      const headers = String(fd.get("headers_json") || "").trim();
+      if (headers) {
+        try {
+          const obj = JSON.parse(headers);
+          if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+            toast("请求头必须是 JSON 对象", true);
             return;
           }
-          await api("/api/users", { method: "POST", body: JSON.stringify(body) });
+          options.headers_json = JSON.stringify(obj);
+        } catch {
+          toast("请求头 JSON 无效", true);
+          return;
         }
-        closeModal();
-        toast("已保存");
-        renderPage();
-      } catch (err) {
-        toast(err.message, true);
-      }
-    };
-  }
+      } else delete options.headers_json;
+    }
 
-  function resetUserPassword(id) {
-    openModal(`
-      <div class="modal-head"><h3>重置密码</h3></div>
-      <form id="f" class="modal-body">
-        <div class="field"><label>新密码</label>
-          <input name="password" type="password" required minlength="6" autocomplete="new-password" /></div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">确定</button>
-      </div>`);
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const pw = new FormData(e.target).get("password");
-      try {
-        await api(`/api/users/${id}/reset-password`, {
-          method: "POST",
-          body: JSON.stringify({ password: pw }),
-        });
-        closeModal();
-        toast("密码已重置");
-      } catch (err) {
-        toast(err.message, true);
-      }
-    };
-  }
+    const msgType = String(fd.get("msg_type") || "text");
+    if (kind !== "webhook" && kind !== "http" && msgType && msgType !== "text")
+      options.msg_type = msgType;
+    else delete options.msg_type;
 
-  async function editRole(row) {
-    let catalog = state.cache.permCatalog;
-    if (!catalog) catalog = await api("/api/permissions");
-    state.cache.permCatalog = catalog;
-    const selected = new Set(row?.permissions || []);
-    const groups = {};
-    (catalog || []).forEach((p) => {
-      (groups[p.group] || (groups[p.group] = [])).push(p);
-    });
-    const starOn = selected.has("*");
-    openModal(
-      `
-      <div class="modal-head">
-        <h3>${row ? "编辑角色" : "新建角色"}</h3>
-        <p class="desc">勾选权限码；含 <code>*</code> 表示全部权限。</p>
-      </div>
-      <form id="f" class="modal-body">
-        <div class="row">
-          <div class="field"><label>名称</label>
-            <input name="name" required value="${esc(row?.name || "")}" ${
-              row?.is_system ? "readonly" : ""
-            } /></div>
-          <div class="field"><label>说明</label>
-            <input name="description" value="${esc(row?.description || "")}" /></div>
+    if (kind === "dingtalk" || kind === "wecom") {
+      if (form.querySelector('[name="at_all"]')?.checked) options.at_all = "1";
+      else delete options.at_all;
+      const mobiles = String(fd.get("at_mobiles") || "").trim();
+      if (mobiles) options.at_mobiles = mobiles;
+      else delete options.at_mobiles;
+    } else {
+      delete options.at_all;
+      delete options.at_mobiles;
+    }
+
+    if (kind === "telegram") {
+      const chatId = String(fd.get("chat_id") || "").trim();
+      if (!chatId) {
+        toast("Telegram 请填写 chat_id", true);
+        return;
+      }
+      options.chat_id = chatId;
+    } else {
+      delete options.chat_id;
+    }
+
+    const body = {
+      name: fd.get("name"),
+      kind,
+      url: fd.get("url"),
+      secret: secret || null,
+      options,
+      enabled: form.querySelector('[name="enabled"]').checked,
+    };
+    if (row) await api(`/api/channels/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+    else await api("/api/channels", { method: "POST", body: JSON.stringify(body) });
+    closeModal();
+    toast("已保存");
+    renderPage();
+  };
+}
+
+async function editRule(row) {
+  const dss = state.cache.datasources || (await api("/api/datasources"));
+  const chs = state.cache.channels || (await api("/api/channels"));
+  if (!dss.length) {
+    toast("请先创建数据源", true);
+    return;
+  }
+  openModal(`
+    <div class="modal-head">
+      <h3>${row ? "编辑规则" : "新建告警规则"}</h3>
+      <p class="desc">绑定数据源，配置阈值条件与通知渠道。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="seg">
+        <div class="seg-title">规则</div>
+        <div class="field"><label>名称</label><input name="name" required placeholder="例如：API 不可用" value="${esc(
+          row?.name || ""
+        )}" /></div>
+        <div class="field"><label>数据源</label>
+          <select name="datasource_id">${dss
+            .map(
+              (d) =>
+                `<option value="${d.id}" ${
+                  row?.datasource_id === d.id || (!row && d === dss[0]) ? "selected" : ""
+                }>${esc(d.name)} · ${esc(d.kind)}</option>`
+            )
+            .join("")}</select>
         </div>
-        <label class="check-row" style="margin-bottom:12px">
-          <input type="checkbox" name="perm_star" id="perm-star" ${starOn ? "checked" : ""}/>
-          <span><strong>全部权限 (*)</strong></span>
+        <div class="field"><label>查询表达式</label><input name="expr" required value="${esc(
+          row?.expr || ""
+        )}" placeholder="PromQL / LogQL / JSON 字段路径" />
+          <div class="hint">Prometheus/VM 用 PromQL；Loki 用 LogQL；Kafka 填数值字段路径（可覆盖数据源 field，如 latency_ms）。</div>
+        </div>
+      </div>
+      <div class="seg">
+        <div class="seg-title">阈值条件</div>
+        <div class="row">
+          <div class="field"><label>比较符</label>
+            <select name="comparator">
+              ${[">", ">=", "<", "<=", "==", "!="]
+                .map(
+                  (c) =>
+                    `<option value="${c}" ${
+                      (row && String(row.comparator) === c) ||
+                      (!row && c === ">") ||
+                      (row &&
+                        { gt: ">", gte: ">=", lt: "<", lte: "<=", eq: "==", neq: "!=" }[
+                          row.comparator
+                        ] === c)
+                        ? "selected"
+                        : ""
+                    }>${c}</option>`
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="field"><label>阈值</label><input name="threshold" type="number" step="any" required value="${
+            row?.threshold ?? 0
+          }" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>持续 for（秒）</label><input name="for_seconds" type="number" min="0" value="${
+            row?.for_seconds ?? 0
+          }" /></div>
+          <div class="field"><label>评估间隔（秒）</label><input name="interval_seconds" type="number" min="5" value="${
+            row?.interval_seconds ?? 30
+          }" /></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>严重级别</label>
+            <select name="severity">
+              ${severityOptions(row?.severity || "warning")}
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label class="check-row">
+            <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
+            <span>启用此规则</span>
+          </label>
+        </div>
+      </div>
+      <div class="seg">
+        <div class="seg-title">通知与标签</div>
+        <div class="field"><label>通知渠道</label>
+          ${multiSelect(
+            "channel_ids",
+            chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
+            row?.channel_ids || []
+          )}
+        </div>
+        <div class="field"><label>附加标签（可选，JSON）</label>
+          <textarea name="labels" rows="2" placeholder='{"team":"sre"}'>${esc(
+            Object.keys(row?.labels || {}).length ? JSON.stringify(row.labels, null, 0) : ""
+          )}</textarea>
+        </div>
+        <div class="field"><label>注解 annotations（可选，JSON，支持模板）</label>
+          <textarea name="annotations" rows="3" placeholder='{"summary":"{{labels.instance}} 超阈值 {{value}}"}'>${esc(
+            Object.keys(row?.annotations || {}).length
+              ? JSON.stringify(row.annotations, null, 2)
+              : ""
+          )}</textarea>
+          <div class="hint">通知前自动渲染 {{labels.x}} / {{value}} / {{severity}} 等变量。</div>
+        </div>
+      </div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`, { wide: true });
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    let labels = {};
+    let annotations = {};
+    const rawLabels = String(fd.get("labels") || "").trim();
+    if (rawLabels) {
+      try {
+        labels = JSON.parse(rawLabels);
+      } catch {
+        toast("标签 JSON 无效", true);
+        return;
+      }
+    }
+    const rawAnn = String(fd.get("annotations") || "").trim();
+    if (rawAnn) {
+      try {
+        annotations = JSON.parse(rawAnn);
+      } catch {
+        toast("注解 JSON 无效", true);
+        return;
+      }
+    }
+    const body = {
+      name: fd.get("name"),
+      datasource_id: fd.get("datasource_id"),
+      expr: fd.get("expr"),
+      comparator: fd.get("comparator"),
+      threshold: Number(fd.get("threshold")),
+      for_seconds: Number(fd.get("for_seconds") || 0),
+      interval_seconds: Number(fd.get("interval_seconds") || 30),
+      severity: fd.get("severity"),
+      labels,
+      annotations,
+      channel_ids: selectedValues(form, "channel_ids"),
+      enabled: form.querySelector('[name="enabled"]').checked,
+    };
+    if (row) await api(`/api/rules/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+    else await api("/api/rules", { method: "POST", body: JSON.stringify(body) });
+    closeModal();
+    toast("已保存");
+    renderPage();
+  };
+}
+
+const INGRESS_TYPES = [
+  {
+    id: "alertmanager",
+    name: "Alertmanager",
+    desc: "Prometheus 告警 Webhook",
+    icon: "AM",
+    tone: "orange",
+  },
+  {
+    id: "generic",
+    name: "Generic / 拨测",
+    desc: "通用 JSON · 自定义字段映射",
+    icon: "{}",
+    tone: "blue",
+  },
+  {
+    id: "kafka",
+    name: "Kafka",
+    desc: "告警总线 Topic 消费",
+    icon: "K",
+    tone: "amber",
+  },
+  {
+    id: "snmptrap",
+    name: "SNMP Trap",
+    desc: "Trap→Kafka 样例（字段已对齐）",
+    icon: "⌁",
+    tone: "blue",
+  },
+];
+
+function snmpTrapIngressDefaults() {
+  const brokers =
+    localStorage.getItem("eventide_kafka_brokers") || "120.26.105.115:9092";
+  const topic =
+    localStorage.getItem("eventide_kafka_topic") || "eventide.snmptrap";
+  return {
+    name: "SNMP Trap (Kafka)",
+    kind: "kafka",
+    endpoint: brokers,
+    enabled: true,
+    options: {
+      topic,
+      start: "latest",
+      partitions: "6",
+      // Trap 已写出 Generic 兼容 JSON，一般无需 map_*；下列仅作文档/对照
+      _preset: "snmptrap",
+    },
+    channel_ids: [],
+  };
+}
+
+function editIngressSnmpTrapSample() {
+  editIngress(snmpTrapIngressDefaults(), { kind: "kafka", preset: "snmptrap" });
+}
+
+function pickIngressKind() {
+  openModal(`
+    <div class="modal-head">
+      <h3>选择接入类型</h3>
+      <p class="desc">先选来源类型，再填写连接与字段映射。SNMP Trap 请选样例，字段已与 Trap 写出对齐。</p>
+    </div>
+    <div class="modal-body">
+      <div class="type-pick-grid">
+        ${INGRESS_TYPES.map(
+          (t) => `<button type="button" class="type-pick-card" data-kind="${esc(t.id)}">
+            <span class="type-pick-ico tone-${esc(t.tone)}" aria-hidden="true">${esc(t.icon)}</span>
+            <span class="type-pick-name">${esc(t.name)}</span>
+            <span class="type-pick-desc">${esc(t.desc)}</span>
+          </button>`
+        ).join("")}
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+    </div>`);
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.querySelectorAll(".type-pick-card").forEach((btn) => {
+    btn.onclick = () => {
+      if (btn.dataset.kind === "snmptrap") {
+        editIngressSnmpTrapSample();
+        return;
+      }
+      editIngress(null, { kind: btn.dataset.kind });
+    };
+  });
+}
+
+async function editIngress(row, opts = {}) {
+  if (!row && !opts.kind) {
+    pickIngressKind();
+    return;
+  }
+  const chs = state.cache.channels || (await api("/api/channels"));
+  const preset = opts.preset || (row?.options && row.options._preset) || "";
+  const kind = row?.kind || opts.kind || "alertmanager";
+  const typeMeta =
+    preset === "snmptrap"
+      ? INGRESS_TYPES.find((t) => t.id === "snmptrap")
+      : INGRESS_TYPES.find((t) => t.id === kind) || INGRESS_TYPES[0];
+  const opt = { ...(row?.options || {}) };
+  // Don't persist internal preset marker into form as a map field
+  const snmpPreset = preset === "snmptrap" || opt._preset === "snmptrap";
+  const mapOn = !!(
+    opt.map_status ||
+    opt.map_name ||
+    opt.map_description ||
+    opt.map_ip ||
+    opt.map_value ||
+    opt.map_fingerprint ||
+    opt.map_list ||
+    opt.map_enabled === "1"
+  );
+  const sampleJson = `{
+"status": "firing",
+"fingerprint": "10.0.0.1|1.3.6.1.6.3.1.1.5.3|…",
+"severity": "warning",
+"labels": {
+  "alertname": "linkDown",
+  "ip": "10.0.0.1",
+  "trap_oid": "1.3.6.1.6.3.1.1.5.3",
+  "source": "ingress:snmptrap",
+  "snmp_version": "v2c"
+},
+"annotations": {
+  "summary": "SNMP Trap … from 10.0.0.1",
+  "varbinds": "{…}"
+},
+"startsAt": "2026-07-31T08:00:00Z"
+}`;
+  openModal(`
+    <div class="modal-head">
+      <h3>${row && row.id ? "编辑告警接入" : snmpPreset ? "新建 SNMP Trap 接入样例" : "新建告警接入"}</h3>
+      <p class="desc">${
+        snmpPreset
+          ? "Trap 服务已归一化为下方 JSON；本接入直接消费，一般无需字段映射。"
+          : "接入外部已判定的告警。非标准格式可配置字段映射。"
+      }</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field">
+        <label>名称</label>
+        <input name="name" required placeholder="例如：生产 AM" value="${esc(
+          row?.name || (snmpPreset ? "SNMP Trap (Kafka)" : "")
+        )}" />
+      </div>
+      <div class="field">
+        <label>类型</label>
+        <input type="hidden" name="kind" value="${esc(kind === "snmptrap" ? "kafka" : kind)}" />
+        <input type="hidden" name="_preset" value="${esc(snmpPreset ? "snmptrap" : "")}" />
+        <div class="type-picked">
+          <span class="type-pick-ico tone-${esc(typeMeta.tone)}" aria-hidden="true">${esc(
+            typeMeta.icon
+          )}</span>
+          <div class="type-picked-text">
+            <div class="t-name">${esc(typeMeta.name)}</div>
+            <div class="t-desc">${esc(typeMeta.desc)}</div>
+          </div>
+          ${
+            row && row.id
+              ? ""
+              : `<button type="button" class="ghost" id="ing-repick">重选类型</button>`
+          }
+        </div>
+      </div>
+      <div class="field">
+        <label class="check-row">
+          <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
+          <span>启用此接入路由</span>
         </label>
-        <div id="perm-list">${Object.keys(groups)
+      </div>
+
+      ${
+        snmpPreset
+          ? `<div class="panel" style="margin:0 0 14px;padding:12px;background:var(--surface-2,rgba(0,0,0,.04))">
+        <div class="seg-title" style="margin:0 0 8px">Trap → Kafka 字段对照（无需再 map）</div>
+        <table class="map-help-table" style="width:100%;font-size:12px">
+          <thead><tr><th>Trap JSON</th><th>告警含义</th></tr></thead>
+          <tbody>
+            <tr><td><code>status</code></td><td>firing / resolved（策略可恢复）</td></tr>
+            <tr><td><code>fingerprint</code></td><td>去重键（IP + OID + …）</td></tr>
+            <tr><td><code>severity</code></td><td>级别（策略 / 默认 warning）</td></tr>
+            <tr><td><code>labels.alertname</code></td><td>告警名（策略名或 OID 名）</td></tr>
+            <tr><td><code>labels.ip</code></td><td>设备 IP（peer）</td></tr>
+            <tr><td><code>labels.trap_oid</code></td><td>Trap OID</td></tr>
+            <tr><td><code>labels.source</code></td><td>固定 <code>ingress:snmptrap</code></td></tr>
+            <tr><td><code>annotations.summary</code></td><td>摘要（策略模板）</td></tr>
+            <tr><td><code>annotations.varbinds</code></td><td>变量绑定 JSON</td></tr>
+          </tbody>
+        </table>
+        <details style="margin-top:10px">
+          <summary style="cursor:pointer">样例报文（Trap 写出）</summary>
+          <pre class="mono" style="white-space:pre-wrap;font-size:11px;max-height:200px;overflow:auto;margin:8px 0 0">${esc(
+            sampleJson
+          )}</pre>
+        </details>
+      </div>`
+          : ""
+      }
+
+      <div class="kind-panel" data-kinds="alertmanager,generic" id="ing-http">
+        <div class="field">
+          <label>鉴权 Token（可选）</label>
+          <input name="token" value="${esc(row?.token || "")}" placeholder="请求头 Bearer / X-Eventide-Token" />
+          <div class="hint">留空则不校验。保存后在卡片上复制 Webhook，或使用「试推送」验证。</div>
+        </div>
+        <div class="hint sample-hint" id="ing-format-hint"></div>
+      </div>
+
+      <div class="kind-panel" data-kinds="kafka" id="ing-kafka" hidden>
+        <div class="field">
+          <label>Brokers</label>
+          <input name="endpoint" placeholder="127.0.0.1:9092" value="${esc(row?.endpoint || "")}" />
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Topic</label>
+            <input name="topic" placeholder="alerts" value="${esc(opt.topic || "")}" />
+          </div>
+          <div class="field">
+            <label>起始位点</label>
+            <select name="start">
+              <option value="latest" ${!opt.start || opt.start === "latest" ? "selected" : ""}>latest 仅新消息</option>
+              <option value="earliest" ${opt.start === "earliest" ? "selected" : ""}>earliest 从头消费</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Consumer Group ID（可选）</label>
+          <input name="group_id" placeholder="默认 eventide-ingress-{route_id}" value="${esc(opt.group_id || "")}" />
+          <div class="hint">多实例共用同一 group_id 自动分摊分区；改 group_id 会按「起始位点」重新消费。</div>
+        </div>
+        <div class="field">
+          <label>分区数（订阅范围）</label>
+          <div class="row" style="align-items:center;gap:8px">
+            <input name="partitions" type="number" min="1" placeholder="自动探测" value="${esc(opt.partitions || "")}" style="flex:1" />
+            <button type="button" class="btn ghost" id="ing-probe-parts">自动获取</button>
+          </div>
+          <div class="hint" id="ing-parts-hint">须覆盖 Topic 全部分区（优先 metadata 探测）。消费位点由 Kafka consumer group 管理，不再依赖 Redis 租约。</div>
+        </div>
+      </div>
+
+      <div class="kind-panel" data-kinds="generic,kafka" id="ing-mapping" hidden>
+        <div class="seg">
+          <div class="seg-title">字段映射（可选）</div>
+          <div class="hint" style="margin-bottom:12px">
+            ${
+              snmpPreset
+                ? "SNMP Trap 样例<strong>不需要</strong>填写映射（Trap 已是 Eventide Generic JSON）。仅当改了 Trap 输出格式时才需要。"
+                : `填写对方 JSON 的点分路径（如 <code>data.title</code>）。可用变换截取字符串，例如
+            <code>sourceciname|before:_</code> → <code>82.12.161.32</code>。
+            任一路径非空即启用映射，并优先于内置 Generic/拨测解析。`
+            }
+          </div>
+          <details class="map-help">
+            <summary>字段说明（点开查看）</summary>
+            <div class="map-help-body">
+              <p>路径填原始 JSON 字段；可用 <code>|before:</code> / <code>|after:</code> / <code>|split:SEP:INDEX</code> / <code>|between:起点:终点</code> 截取。</p>
+              <table class="map-help-table">
+                <thead>
+                  <tr><th>配置项</th><th>作用</th><th>写入结果</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td><code>map_list</code></td><td>告警数组路径，空=整条消息当一条</td><td>—</td></tr>
+                  <tr><td><code>map_status</code></td><td>状态字段</td><td>firing / resolved</td></tr>
+                  <tr><td><code>map_fire</code></td><td>视为触发的取值（逗号分隔）</td><td>—</td></tr>
+                  <tr><td><code>map_resolve</code></td><td>视为恢复的取值</td><td>—</td></tr>
+                  <tr><td><code>map_name</code></td><td>告警名称</td><td><code>labels.alertname</code></td></tr>
+                  <tr><td><code>map_description</code></td><td>告警描述</td><td><code>annotations.summary</code> / <code>description</code></td></tr>
+                  <tr><td><code>map_ip</code></td><td>告警 IP</td><td><code>labels.ip</code> / <code>alertIp</code> / <code>instance</code></td></tr>
+                  <tr><td><code>map_value</code></td><td>当前值</td><td><code>value</code></td></tr>
+                  <tr><td><code>map_fingerprint</code></td><td>去重标识</td><td><code>fingerprint</code></td></tr>
+                  <tr><td><code>map_severity</code></td><td>级别原始值</td><td><code>labels.severity</code> + 引擎级别</td></tr>
+                  <tr><td><code>map_critical</code></td><td>哪些取值算 Disaster/High</td><td>→ disaster</td></tr>
+                  <tr><td><code>map_labels</code></td><td>额外标签，<code>目标标签:源路径,...</code></td><td>对应 <code>labels.*</code></td></tr>
+                  <tr><td><code>map_enabled</code></td><td>强制开启映射</td><td>—</td></tr>
+                </tbody>
+              </table>
+              <p class="hint" style="margin:10px 0 0">引擎另支持 <code>map_warning</code>（警告取值列表），可在高级 options 中配置；控制台暂无单独输入框。</p>
+            </div>
+          </details>
+          <div class="field">
+            <label class="check-row">
+              <input type="checkbox" name="map_enabled" ${mapOn ? "checked" : ""} />
+              <span>启用自定义字段映射</span>
+            </label>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>告警列表路径 map_list</label>
+              <input name="map_list" placeholder="空=整条；或 data.items" value="${esc(opt.map_list || "")}" />
+            </div>
+            <div class="field">
+              <label>状态字段 map_status</label>
+              <input name="map_status" placeholder="state / status / eventType" value="${esc(
+                opt.map_status || ""
+              )}" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>触发取值 map_fire</label>
+              <input name="map_fire" placeholder="默认 fire,firing,ALARM…" value="${esc(opt.map_fire || "")}" />
+            </div>
+            <div class="field">
+              <label>恢复取值 map_resolve</label>
+              <input name="map_resolve" placeholder="默认 recover,resolved,OK…" value="${esc(
+                opt.map_resolve || ""
+              )}" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>告警名称 map_name</label>
+              <input name="map_name" placeholder="title / alertName" value="${esc(opt.map_name || "")}" />
+            </div>
+            <div class="field">
+              <label>告警描述 map_description</label>
+              <input name="map_description" placeholder="msg / content" value="${esc(
+                opt.map_description || ""
+              )}" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>告警 IP map_ip</label>
+              <input name="map_ip" placeholder="sourceciname|before:_" value="${esc(opt.map_ip || "")}" />
+              <div class="hint"><code>before:_</code> / <code>after:_</code> / <code>split:_:0</code> / <code>between:起点:终点</code></div>
+            </div>
+            <div class="field">
+              <label>当前值 map_value</label>
+              <input name="map_value" placeholder="metric / value" value="${esc(opt.map_value || "")}" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>告警标识 map_fingerprint</label>
+              <input name="map_fingerprint" placeholder="id / alertId" value="${esc(
+                opt.map_fingerprint || ""
+              )}" />
+            </div>
+            <div class="field">
+              <label>级别 map_severity</label>
+              <input name="map_severity" placeholder="level / severity" value="${esc(
+                opt.map_severity || ""
+              )}" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>critical 取值</label>
+              <input name="map_critical" placeholder="Disaster,High,5,4" value="${esc(opt.map_critical || "")}" />
+            </div>
+            <div class="field">
+              <label>额外标签 map_labels</label>
+              <input name="map_labels" placeholder="region:zone,app:appName" value="${esc(
+                opt.map_labels || ""
+              )}" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>通知渠道</label>
+        <select name="channel_id">
+          <option value="">不绑定渠道</option>
+          ${chs
+            .map((c) => {
+              const selected = (row?.channel_ids || [])[0] === c.id ? "selected" : "";
+              return `<option value="${esc(c.id)}" ${selected}>${esc(c.name)}（${esc(
+                c.kind
+              )}）</option>`;
+            })
+            .join("")}
+        </select>
+        <div class="hint">未绑定渠道时告警仍会入库，但不会发送通知。</div>
+      </div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`, { wide: true });
+
+  const form = document.getElementById("f");
+  const syncKind = () => {
+    const k = form.querySelector('input[name="kind"]')?.value || "alertmanager";
+    form.querySelectorAll(".kind-panel").forEach((p) => {
+      const kinds = (p.dataset.kinds || "").split(",");
+      p.hidden = !kinds.includes(k);
+    });
+    const hint = document.getElementById("ing-format-hint");
+    if (!hint) return;
+    if (k === "alertmanager") {
+      hint.innerHTML =
+        "载荷示例：Alertmanager <code>{\"alerts\":[{\"status\":\"firing\",\"labels\":{...}}]}</code>";
+    } else if (k === "generic") {
+      hint.innerHTML =
+        "默认支持 Generic / 拨测 JSON；其他格式请展开下方「字段映射」配置路径。";
+    } else {
+      hint.textContent = "";
+    }
+  };
+  syncKind();
+  const repick = document.getElementById("ing-repick");
+  if (repick) repick.onclick = () => pickIngressKind();
+
+  const probeParts = async (quiet = false) => {
+    const brokers = String(form.querySelector('[name="endpoint"]')?.value || "").trim();
+    const topic = String(form.querySelector('[name="topic"]')?.value || "").trim();
+    const hint = document.getElementById("ing-parts-hint");
+    if (!brokers || !topic) {
+      if (!quiet) toast("请先填写 Brokers 与 Topic", true);
+      return null;
+    }
+    try {
+      if (hint) hint.textContent = "正在从 Kafka 探测分区数…";
+      const data = await api("/api/ingress/kafka/partitions", {
+        method: "POST",
+        body: JSON.stringify({ brokers, topic }),
+      });
+      const n = data && data.partitions;
+      if (!n) throw new Error("未返回分区数");
+      const input = form.querySelector('[name="partitions"]');
+      if (input) input.value = String(n);
+      if (hint) {
+        hint.innerHTML = `已探测到 Topic <code>${esc(topic)}</code> 共 <strong>${esc(n)}</strong> 个分区（消费时也会再查 metadata）。`;
+      }
+      if (!quiet) toast(`已获取分区数：${n}`);
+      return n;
+    } catch (e) {
+      if (hint) {
+        hint.textContent = `自动获取失败：${e.message || e}（可手填；消费时也会尝试探测）`;
+      }
+      if (!quiet) toast(e.message || String(e), true);
+      return null;
+    }
+  };
+  const probeBtn = document.getElementById("ing-probe-parts");
+  if (probeBtn) probeBtn.onclick = () => probeParts(false);
+  const topicEl = form.querySelector('[name="topic"]');
+  const endpointEl = form.querySelector('[name="endpoint"]');
+  let probeTimer = null;
+  const scheduleProbe = () => {
+    clearTimeout(probeTimer);
+    probeTimer = setTimeout(() => probeParts(true), 500);
+  };
+  if (topicEl) topicEl.addEventListener("change", scheduleProbe);
+  if (endpointEl) endpointEl.addEventListener("change", scheduleProbe);
+  // Open existing kafka route: refresh partition count in background
+  if ((form.querySelector('input[name="kind"]')?.value || "") === "kafka") {
+    const cur = String(form.querySelector('[name="partitions"]')?.value || "").trim();
+    if (!cur) scheduleProbe();
+  }
+
+  document.getElementById("m-cancel").onclick = closeModal;
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const k = String(fd.get("kind") || "alertmanager");
+    const options = {};
+    let endpoint = "";
+    let token = String(fd.get("token") || "").trim();
+    const channelId = String(fd.get("channel_id") || "").trim();
+    const channelIds = channelId ? [channelId] : [];
+    if (!channelIds.length && !confirm("尚未绑定通知渠道，告警只会入库不会通知。仍要保存吗？")) {
+      return;
+    }
+    if (k === "kafka") {
+      endpoint = String(fd.get("endpoint") || "").trim();
+      const topic = String(fd.get("topic") || "").trim();
+      if (!endpoint || !topic) {
+        toast("请填写 Brokers 与 Topic", true);
+        return;
+      }
+      options.topic = topic;
+      options.start = String(fd.get("start") || "latest");
+      const groupId = String(fd.get("group_id") || "").trim();
+      if (groupId) options.group_id = groupId;
+      let parts = String(fd.get("partitions") || "").trim();
+      if (!parts) {
+        const n = await probeParts(true);
+        if (n) parts = String(n);
+      }
+      if (parts) options.partitions = parts;
+      const preset = String(fd.get("_preset") || "").trim();
+      if (preset) options._preset = preset;
+      token = "";
+    }
+    if (k === "generic" || k === "kafka") {
+      const mapKeys = [
+        "map_list",
+        "map_status",
+        "map_fire",
+        "map_resolve",
+        "map_name",
+        "map_description",
+        "map_ip",
+        "map_value",
+        "map_fingerprint",
+        "map_severity",
+        "map_critical",
+        "map_labels",
+      ];
+      let anyMap = false;
+      for (const key of mapKeys) {
+        const v = String(fd.get(key) || "").trim();
+        if (v) {
+          options[key] = v;
+          anyMap = true;
+        }
+      }
+      if (anyMap) {
+        options.map_enabled = form.querySelector('[name="map_enabled"]')?.checked
+          ? "1"
+          : "0";
+      }
+    }
+    const body = {
+      name: fd.get("name"),
+      kind: k,
+      token: token || null,
+      endpoint,
+      options,
+      channel_ids: channelIds,
+      enabled: form.querySelector('[name="enabled"]').checked,
+    };
+    let saved;
+    if (row) {
+      saved = await api(`/api/ingress/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+    } else {
+      saved = await api("/api/ingress", { method: "POST", body: JSON.stringify(body) });
+    }
+    closeModal();
+    showIngressSaved(saved || { ...body, id: row?.id });
+  };
+}
+
+function showIngressSaved(route) {
+  if (!route?.id) {
+    toast("已保存");
+    renderPage();
+    return;
+  }
+  const origin = location.origin;
+  const mainUrl =
+    route.kind === "kafka"
+      ? `kafka://${route.endpoint || ""}/${(route.options && route.options.topic) || ""}`
+      : route.kind === "alertmanager"
+      ? `${origin}/api/ingress/${route.id}/alertmanager`
+      : `${origin}/api/ingress/${route.id}/generic`;
+  const pushUrl = `${origin}/api/ingress/${route.id}/push`;
+  const tokenHint = route.token
+    ? `-H "Authorization: Bearer <token>"`
+    : "# 未配置 Token，可直接推送";
+  openModal(`
+    <div class="modal-head">
+      <h3>告警接入已保存</h3>
+      <p class="desc">${esc(route.name)} · ${esc(route.kind)}。复制地址或试推送验证。</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>主接入地址</label>
+        <div class="url-row">
+          <code class="mono url-box">${esc(mainUrl)}</code>
+          <button type="button" data-copy="${esc(mainUrl)}">复制</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>自动识别 / 测推</label>
+        <div class="url-row">
+          <code class="mono url-box">${esc(pushUrl)}</code>
+          <button type="button" data-copy="${esc(pushUrl)}">复制</button>
+        </div>
+        <div class="hint">curl 示例：<code class="mono">curl -X POST ${esc(pushUrl)} ${esc(
+          tokenHint
+        )} -H "Content-Type: application/json" -d "{...}"</code></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-test">试推送</button>
+      <button type="button" class="primary" id="m-close">完成</button>
+    </div>`, { wide: true });
+  document.querySelectorAll("#modal [data-copy]").forEach((b) => {
+    b.onclick = async () => {
+      await navigator.clipboard.writeText(b.dataset.copy);
+      toast("已复制");
+    };
+  });
+  document.getElementById("m-close").onclick = () => {
+    closeModal();
+    renderPage();
+  };
+  document.getElementById("m-test").onclick = () => {
+    closeModal();
+    openIngressTest(route);
+  };
+}
+
+async function editLookup(row) {
+  const initialText =
+    row && Object.keys(row.rows || {}).length
+      ? formatLookupText(row.key_label || "ip", row.rows)
+      : "";
+  openModal(`
+    <div class="modal-head">
+      <h3>${row ? "编辑台账数据" : "新建台账数据"}</h3>
+      <p class="desc">第一列是匹配键（如 IP），后面各列会补到告警上。表头可用 <code>$列名</code>，键列前加 <code>#</code>；列用 Tab 或空格分隔。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>名称</label>
+        <input name="name" required value="${esc(row?.name || "")}" placeholder="例如 主机台账" />
+      </div>
+      <div class="field"><label>说明（可选）</label>
+        <input name="description" value="${esc(row?.description || "")}" placeholder="来源、用途" />
+      </div>
+      <div class="field"><label>用告警的哪个标签来匹配</label>
+        <input name="key_label" id="lookup-key-label" required value="${esc(
+          row?.key_label || "ip"
+        )}" placeholder="ip" />
+        <div class="hint">从告警 labels 取这个键去查表。告警 IP 在 <code>instance</code> 里就填 instance；表头是 <code>$ip</code> 时通常填 ip。</div>
+      </div>
+      <div class="field"><label>台账内容</label>
+        <div style="display:flex;gap:0.5rem;margin-bottom:0.4rem;flex-wrap:wrap">
+          <label class="ghost" style="display:inline-flex;align-items:center;gap:0.35rem;cursor:pointer;padding:0.35rem 0.7rem;border:1px solid var(--line);border-radius:6px">
+            导入文件
+            <input type="file" id="lookup-file" accept=".lookup,.txt,.tsv,text/plain" style="display:none" />
+          </label>
+          <button type="button" class="ghost" id="lookup-to-json">转为 JSON 预览</button>
+        </div>
+        <textarea name="text" id="lookup-text" rows="12" required spellcheck="false" placeholder="#$ip&#9;$cabinet&#9;$brand&#9;$usagedesc&#10;21.13.0.32&#9;生产中心机房SC-T06&#9;华为&#9;电子渠道综合前置">${esc(
+          initialText
+        )}</textarea>
+        <div class="hint">也支持 JSON：<code>{"21.1.11.11":{"主机名":"DX-AAM"}}</code></div>
+        <pre id="lookup-parse-hint" class="mono" style="margin:0.4rem 0 0;font-size:0.78rem;color:var(--muted);white-space:pre-wrap"></pre>
+      </div>
+      <label class="check-row"><input type="checkbox" name="enabled" ${
+        row?.enabled !== false ? "checked" : ""
+      } /> <span>启用</span></label>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存台账</button>
+    </div>`, { wide: true });
+  document.getElementById("m-cancel").onclick = closeModal;
+
+  const textEl = document.getElementById("lookup-text");
+  const keyEl = document.getElementById("lookup-key-label");
+  const hintEl = document.getElementById("lookup-parse-hint");
+
+  const refreshHint = () => {
+    try {
+      const parsed = parseLookupClient(textEl.value);
+      hintEl.textContent = `已识别 ${parsed.count} 行 · 键列 ${
+        parsed.keyHint || "—"
+      } · 共 ${(parsed.columns || []).length || "?"} 列`;
+      hintEl.style.color = "var(--muted)";
+    } catch (err) {
+      hintEl.textContent = String(err.message || err);
+      hintEl.style.color = "var(--crit-soft, #c44)";
+    }
+  };
+  textEl.addEventListener("input", refreshHint);
+  refreshHint();
+
+  document.getElementById("lookup-file").onchange = async (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    textEl.value = text;
+    try {
+      const parsed = parseLookupClient(text);
+      if (parsed.keyHint) keyEl.value = parsed.keyHint;
+      if (!document.querySelector('#f [name="name"]').value) {
+        document.querySelector('#f [name="name"]').value = file.name.replace(
+          /\.(lookup|txt|tsv)$/i,
+          ""
+        );
+      }
+      refreshHint();
+      toast(`已导入 ${parsed.count} 行`);
+    } catch (err) {
+      refreshHint();
+      toast(err.message || String(err), true);
+    }
+  };
+
+  document.getElementById("lookup-to-json").onclick = () => {
+    try {
+      const parsed = parseLookupClient(textEl.value);
+      textEl.value = JSON.stringify(parsed.rows, null, 2);
+      refreshHint();
+    } catch (err) {
+      toast(err.message || String(err), true);
+    }
+  };
+
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const text = String(fd.get("text") || "");
+    let parsed;
+    try {
+      parsed = parseLookupClient(text);
+    } catch (err) {
+      toast(err.message || String(err), true);
+      return;
+    }
+    if (!parsed.count) {
+      toast("未识别到数据行，请检查表头与分隔符", true);
+      return;
+    }
+    const body = {
+      name: fd.get("name"),
+      description: fd.get("description") || "",
+      key_label: fd.get("key_label") || parsed.keyHint || "ip",
+      rows: parsed.rows,
+      text,
+      sync_key_from_text: false,
+      enabled: e.target.querySelector('[name="enabled"]').checked,
+    };
+    try {
+      if (row) {
+        await api(`/api/lookups/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        await api("/api/lookups", { method: "POST", body: JSON.stringify(body) });
+      }
+    } catch (err) {
+      toast(err.message || String(err), true);
+      return;
+    }
+    closeModal();
+    toast(`已保存 ${parsed.count} 行`);
+    localStorage.setItem("eventide_enrich_tab", "lookups");
+    renderPage();
+  };
+}
+
+/** Client-side parse for Omnibus .lookup or JSON rows. */
+function parseLookupClient(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) throw new Error("外表内容为空");
+  if (trimmed.startsWith("{")) {
+    const rows = JSON.parse(trimmed);
+    return { keyHint: null, rows, count: Object.keys(rows).length };
+  }
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+$/, ""))
+    .filter((l) => {
+      const t = l.trim();
+      return t && !t.startsWith("//") && !t.startsWith(";");
+    });
+  if (!lines.length) throw new Error("lookup 文件为空");
+
+  const splitFields = (line) => {
+    const s = String(line || "").trim();
+    if (!s) return [];
+    if (s.includes("\t")) return s.split("\t").map((x) => x.trim());
+    return s.split(/\s+/).filter(Boolean);
+  };
+
+  const splitRow = (line, ncols) => {
+    let fields = splitFields(line);
+    if (!ncols) return fields;
+    if (fields.length === ncols) return fields;
+    if (String(line).includes("\t") || fields.length < ncols) {
+      while (fields.length < ncols) fields.push("");
+      return fields.slice(0, ncols);
+    }
+    if (ncols === 1) return [fields.join(" ")];
+    if (ncols === 2) return [fields[0], fields.slice(1).join(" ")];
+    const last = fields[fields.length - 1];
+    const midCols = ncols - 2;
+    const midTokens = fields.slice(1, -1);
+    const out = [fields[0]];
+    if (midTokens.length <= midCols) {
+      out.push(...midTokens);
+      while (out.length < ncols - 1) out.push("");
+    } else {
+      const keep = midCols - 1;
+      out.push(...midTokens.slice(0, keep));
+      out.push(midTokens.slice(keep).join(" "));
+    }
+    out.push(last);
+    return out;
+  };
+
+  const header = splitFields(lines[0]);
+  let keyIdx = 0;
+  let foundKey = false;
+  const names = header.map((raw, i) => {
+    let s = String(raw).trim();
+    const isKey = s.startsWith("#");
+    if (isKey) {
+      keyIdx = i;
+      foundKey = true;
+    }
+    s = s.replace(/^#/, "").replace(/^\$/, "").trim();
+    if (!s) throw new Error(`第 ${i + 1} 列表头无效`);
+    return s;
+  });
+  if (!foundKey) keyIdx = 0;
+  const keyHint = names[keyIdx];
+  const rows = {};
+  for (let li = 1; li < lines.length; li++) {
+    const fields = splitRow(lines[li], names.length);
+    if (fields.every((f) => !String(f).trim())) continue;
+    if (fields.length <= keyIdx) {
+      throw new Error(
+        `第 ${li + 1} 行字段不足（表头 ${names.length} 列）。请用空格或 Tab 分隔列。`
+      );
+    }
+    const key = String(fields[keyIdx] || "").trim();
+    if (!key) continue;
+    const attrs = {};
+    names.forEach((name, i) => {
+      if (i === keyIdx) return;
+      const val = String(fields[i] || "").trim();
+      if (val) attrs[name] = val;
+    });
+    rows[key] = attrs;
+  }
+  return { keyHint, rows, count: Object.keys(rows).length, columns: names };
+}
+
+function formatLookupText(keyLabel, rows) {
+  const attrKeys = new Set();
+  Object.values(rows || {}).forEach((attrs) => {
+    Object.keys(attrs || {}).forEach((k) => attrKeys.add(k));
+  });
+  const cols = [...attrKeys].sort();
+  const header = [`#$${keyLabel}`, ...cols.map((k) => `$${k}`)].join("\t");
+  const body = Object.entries(rows || {})
+    .map(([key, attrs]) => [key, ...cols.map((c) => attrs[c] || "")].join("\t"))
+    .join("\n");
+  return body ? `${header}\n${body}\n` : `${header}\n`;
+}
+
+
+async function openEnrichPreviewModal(opts = {}) {
+  const draft = opts.draft || null;
+  const ruleId = opts.ruleId || null;
+  const fromEditor = !!opts.fromEditor;
+  const samplePayload = `{
+"severity": 4,
+"summary": "麒麟主机当前系统磁盘[vdb] IO使用百分比为: 97.49 %, 已超过90%阈值",
+"lastoccurrence": "2026-07-18 08:39:33",
+"status": 2,
+"sourceid": 1,
+"sourceeventid": "71978",
+"sourceciname": "82.12.161.32_kylin",
+"sourcealertkey": "vfs.dev.util[vdb]",
+"sourceseverity": "High",
+"sourceidentifier": "82.12.161.32_kylin_vfs.dev.util[vdb]_Application:Disk vdb",
+"ciinstance": "Application:Disk vdb",
+"eventtypeid": "*UNKNOWN*"
+}`;
+  let savedPayload = "";
+  try {
+    const stash = JSON.parse(sessionStorage.getItem("eventide_enrich_preview") || "{}");
+    savedPayload = stash.payload || "";
+  } catch (_) {}
+
+  const [rules, ingressRoutes] = await Promise.all([
+    api("/api/enrich"),
+    api("/api/ingress").catch(() => []),
+  ]);
+  const mappedIngress = (ingressRoutes || []).filter((r) => {
+    const o = r.options || {};
+    return !!(
+      o.map_status ||
+      o.map_name ||
+      o.map_description ||
+      o.map_ip ||
+      o.map_fingerprint ||
+      o.map_enabled === "1"
+    );
+  });
+  const defaultIngress =
+    mappedIngress.find((r) => /zabbix/i.test(r.name || "")) || mappedIngress[0] || null;
+
+  openModal(
+    `
+    <div class="modal-head">
+      <h3>试跑预览</h3>
+      <p class="desc">粘贴原始告警 JSON，先按接入字段映射解析，再套丰富规则看结果。</p>
+    </div>
+    <div class="modal-body">
+      ${
+        draft
+          ? `<div class="enrich-preview-banner panel" style="margin-bottom:12px">
+              使用<strong>当前编辑草稿</strong>${
+                draft.name ? `「${esc(draft.name)}」` : ""
+              }（未保存）
+            </div>`
+          : ""
+      }
+      <div class="enrich-preview-layout">
+        <div>
+          <div class="field">
+            <label>字段映射接入</label>
+            <select id="pv-ingress">
+              <option value="">自动 / 仅 labels 对象</option>
+              ${mappedIngress
+                .map(
+                  (r) =>
+                    `<option value="${esc(r.id)}" ${
+                      defaultIngress && r.id === defaultIngress.id ? "selected" : ""
+                    }>${esc(r.name)}（${esc(r.kind)}）</option>`
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="field" ${draft ? "hidden" : ""}>
+            <label>丰富规则</label>
+            <select id="pv-rule">
+              <option value="__all__">全部已启用规则（按优先级）</option>
+              ${rules
+                .map(
+                  (r) =>
+                    `<option value="${esc(r.id)}" ${
+                      ruleId && r.id === ruleId ? "selected" : ""
+                    }>${esc(r.name)}${r.enabled === false ? "（已停用）" : ""}</option>`
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="field">
+            <label>原始告警 JSON</label>
+            <textarea id="pv-payload" rows="14" class="mono">${esc(
+              savedPayload || samplePayload
+            )}</textarea>
+          </div>
+        </div>
+        <div>
+          <div id="preview-summary" class="summary-box">点「预览丰富结果」查看</div>
+          <div class="preview-metrics">
+            <div class="box"><div class="hint">告警 IP</div><div id="preview-ip" class="mono">—</div></div>
+            <div class="box"><div class="hint">级别</div><div id="preview-sev" class="mono">—</div></div>
+            <div class="box"><div class="hint">名称</div><div id="preview-name" class="mono">—</div></div>
+          </div>
+          <pre id="preview-out" class="mono enrich-preview-json"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      ${
+        fromEditor
+          ? `<button type="button" class="ghost" id="pv-back-edit">返回编辑</button>`
+          : `<button type="button" class="ghost" id="pv-close">关闭</button>`
+      }
+      <button type="button" class="primary" id="pv-run">预览丰富结果</button>
+    </div>
+  `,
+    { xl: true }
+  );
+
+  const persistPayload = () => {
+    try {
+      sessionStorage.setItem(
+        "eventide_enrich_preview",
+        JSON.stringify({ payload: document.getElementById("pv-payload").value })
+      );
+    } catch (_) {}
+  };
+
+  document.getElementById("pv-run").onclick = async () => {
+    let payload;
+    try {
+      payload = JSON.parse(document.getElementById("pv-payload").value || "{}");
+    } catch (e) {
+      toast("JSON 无效：" + e.message, true);
+      return;
+    }
+    persistPayload();
+    const ingressId = String(document.getElementById("pv-ingress").value || "").trim();
+    const body = {
+      payload,
+      annotations: {},
+      value: 1,
+      severity: "information",
+      rule_name: "PreviewRule",
+    };
+    if (ingressId) body.ingress_id = ingressId;
+
+    if (draft) {
+      body.rule = draft;
+    } else {
+      const ruleSel = document.getElementById("pv-rule").value;
+      if (ruleSel === "__all__") {
+        body.use_saved = true;
+      } else {
+        const r = rules.find((x) => x.id === ruleSel);
+        if (!r) {
+          toast("请选择丰富规则", true);
+          return;
+        }
+        body.rule = {
+          name: r.name,
+          kind: r.kind || "auto",
+          matchers: r.matchers || {},
+          match_key: r.match_key || "",
+          templates: r.templates || {},
+          mappings: r.mappings || {},
+          lookup_table_ids:
+            r.lookup_table_ids || (r.lookup_table_id ? [r.lookup_table_id] : []),
+          lookup_match_keys: r.lookup_match_keys || {},
+          field_templates: r.field_templates || {},
+          label_extracts: r.label_extracts || {},
+          write_labels: r.write_labels !== false,
+          enabled: r.enabled !== false,
+          priority: r.priority ?? 100,
+        };
+      }
+    }
+
+    try {
+      const out = await api("/api/enrich/preview", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      const labels = out.labels || {};
+      const an = out.annotations || {};
+      document.getElementById("preview-summary").textContent =
+        an.summary || an.description || "（未生成描述）";
+      document.getElementById("preview-ip").textContent =
+        labels.alertIp || labels.ip || labels.instance || "—";
+      document.getElementById("preview-sev").textContent =
+        labels.severity || out.severity || "—";
+      document.getElementById("preview-name").textContent = labels.alertname || "—";
+      document.getElementById("preview-out").textContent = JSON.stringify(
+        {
+          parsed_via: out.parsed_via,
+          before: out.before,
+          after: {
+            labels: out.labels,
+            annotations: out.annotations,
+            severity: out.severity,
+          },
+        },
+        null,
+        2
+      );
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
+
+  const closeBtn = document.getElementById("pv-close");
+  if (closeBtn) closeBtn.onclick = closeModal;
+
+  const backBtn = document.getElementById("pv-back-edit");
+  if (backBtn) {
+    backBtn.onclick = () => {
+      persistPayload();
+      const base = ruleId ? rules.find((r) => r.id === ruleId) : null;
+      editEnrich(base || null, { draft });
+    };
+  }
+}
+
+async function editEnrich(row, opts = {}) {
+  const draft = opts.draft || null;
+  const src = draft
+    ? {
+        ...(row || {}),
+        ...draft,
+        id: row?.id,
+        lookup_table_ids:
+          draft.lookup_table_ids ||
+          row?.lookup_table_ids ||
+          (row?.lookup_table_id ? [row.lookup_table_id] : []),
+        lookup_match_keys: draft.lookup_match_keys || row?.lookup_match_keys || {},
+        field_templates: draft.field_templates || row?.field_templates || {},
+        label_extracts: draft.label_extracts || row?.label_extracts || {},
+        mappings: draft.mappings || row?.mappings || {},
+        matchers: draft.matchers || row?.matchers || {},
+      }
+    : row;
+  const lookups = state.cache.lookups || (await api("/api/lookups"));
+  state.cache.lookups = lookups;
+  const selectedIds = new Set(
+    src?.lookup_table_ids?.length
+      ? src.lookup_table_ids
+      : src?.lookup_table_id
+      ? [src.lookup_table_id]
+      : []
+  );
+  const ft = src?.field_templates || {};
+  const tpl = { ...(src?.templates || {}) };
+  const summaryTpl =
+    ft.summary ||
+    tpl.summary ||
+    (selectedIds.size
+      ? "{{labels.样例-主机台账.主机名}}（{{labels.样例-主机台账.别名}}）"
+      : "{{labels.alertname}} · {{labels.instance}}");
+  delete tpl.summary;
+  const otherTplJson = Object.keys(tpl).length ? JSON.stringify(tpl, null, 2) : "";
+  const builtinChipFields = ["ip", "instance", "alertIp", "alertname", "severity"];
+  const colsFromLookup = (t) => {
+    const set = new Set();
+    Object.values(t.rows || {}).forEach((attrs) => {
+      Object.keys(attrs || {}).forEach((k) => set.add(k));
+    });
+    return [...set].sort();
+  };
+  const matcherPairs = Object.entries(src?.matchers || {}).map(([k, v]) => ({ k, v }));
+  if (!matcherPairs.length) matcherPairs.push({ k: "", v: "" });
+
+  const matcherRowsHtml = (pairs) =>
+    pairs
+      .map(
+        (p, i) => `<div class="matcher-row" data-idx="${i}">
+          <input name="mk_key" placeholder="标签名，如 job" value="${esc(p.k)}" />
+          <span class="matcher-eq">=</span>
+          <input name="mk_val" placeholder="值，如 api" value="${esc(p.v)}" />
+          <button type="button" class="ghost" data-rm-matcher title="删除">×</button>
+        </div>`
+      )
+      .join("");
+
+  const hasAdvanced =
+    (src?.mappings && Object.keys(src.mappings).length) ||
+    otherTplJson ||
+    (src?.priority != null && src.priority !== 100) ||
+    src?.write_labels === false;
+
+  openModal(
+    `
+    <div class="modal-head">
+      <h3>${row ? "编辑丰富规则" : "新建丰富规则"}</h3>
+      <p class="desc">选台账补字段，再决定告警上显示的描述、IP 和级别。保存前可点「试跑预览」验证。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <details class="map-help enrich-help">
+        <summary>帮助说明：可用字段与语法</summary>
+        <div class="map-help-body">
+          <p><b>执行顺序</b>：查表前抽取 → 台账查表 → 内联映射 → 注解模板 → 写到告警卡片（描述/IP/级别/名称）。</p>
+
+          <p><b>模板变量</b>（可写在抽取模板、告警描述、IP、级别、名称等处）</p>
+          <table class="map-help-table">
+            <thead>
+              <tr><th>写法</th><th>含义</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>{{labels.xxx}}</code></td><td>告警标签；常见有 <code>ip</code> / <code>alertIp</code> / <code>instance</code> / <code>alertname</code> / <code>severity</code>，以及接入 <code>map_labels</code> 写入的字段</td></tr>
+              <tr><td><code>{{labels.台账名.列名}}</code></td><td>台账查出的列（必须带台账名前缀，如 <code>{{labels.device_info_form.主机名}}</code>）</td></tr>
+              <tr><td><code>{{annotations.xxx}}</code></td><td>告警注解；常见 <code>summary</code> / <code>description</code></td></tr>
+              <tr><td><code>{{value}}</code></td><td>当前监控值</td></tr>
+              <tr><td><code>{{severity}}</code></td><td>引擎级别（Zabbix：not_classified / information / warning / average / high / disaster）</td></tr>
+              <tr><td><code>{{status}}</code></td><td>firing / resolved</td></tr>
+              <tr><td><code>{{fingerprint}}</code></td><td>告警指纹</td></tr>
+              <tr><td><code>{{rule.name}}</code></td><td>当前丰富规则名</td></tr>
+            </tbody>
+          </table>
+
+          <p style="margin-top:12px"><b>字符串截取语法</b>（加在变量路径后，用 <code>|</code> 连接）</p>
+          <table class="map-help-table">
+            <thead>
+              <tr><th>语法</th><th>说明</th><th>示例</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>|before:SEP</code></td><td>取分隔符<strong>之前</strong></td><td><code>{{labels.sourceciname|before:_}}</code> → <code>82.12.161.32</code></td></tr>
+              <tr><td><code>|after:SEP</code></td><td>取分隔符<strong>之后</strong></td><td><code>{{annotations.summary|after:为：}}</code></td></tr>
+              <tr><td><code>|split:SEP:INDEX</code></td><td>按分隔符拆分，取第 INDEX 段（从 0 起）</td><td><code>{{labels.x|split:_:0}}</code></td></tr>
+              <tr><td><code>|between:起点:终点</code></td><td>取两段之间；起点/终点可空（空=串首/串尾）</td><td><code>{{annotations.summary|between:为：: %}}</code></td></tr>
+            </tbody>
+          </table>
+
+          <p style="margin-top:12px"><b>各配置项怎么用</b></p>
+          <table class="map-help-table">
+            <thead>
+              <tr><th>配置</th><th>说明</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>何时生效</td><td>按 <code>labels</code> 精确匹配；全部满足才应用本规则；不配=全部告警</td></tr>
+              <tr><td>查表前抽取</td><td>用模板算出值，写入 <code>labels.标签名</code>（也可进 annotations），供下方「用标签」查台账。例：标签 <code>sss_ip</code> = <code>{{annotations.summary|before:_}}</code></td></tr>
+              <tr><td>从台账补字段</td><td>勾选台账；「用标签」填匹配键（默认台账的 key，可改为抽取的 <code>sss_ip</code>）。命中后写入 <code>labels.台账名.列名</code></td></tr>
+              <tr><td>告警描述</td><td>对应 field 模板 <code>summary</code>；可点/拖下方芯片插入</td></tr>
+              <tr><td>告警 IP</td><td>写入 <code>ip</code> / <code>alertIp</code>（及必要时 <code>instance</code>）</td></tr>
+              <tr><td>告警级别</td><td>Zabbix 六级：disaster / high / average / warning / information / not_classified（兼容 critical→disaster、info→information；也可用中文）</td></tr>
+              <tr><td>告警名称</td><td>可选，改写 <code>labels.alertname</code></td></tr>
+              <tr><td>高级 · 内联映射</td><td>无台账时用 JSON 对照表；匹配键填标签名</td></tr>
+            </tbody>
+          </table>
+
+          <p class="hint" style="margin:12px 0 0">推荐路径：接入已映射出 <code>ip</code> → 直接用标签 <code>ip</code> 查台账 → 描述写 <code>{{labels.台账名.主机名}}</code>。若 IP 在描述里，先抽取再把「用标签」改成抽取名。</p>
+        </div>
+      </details>
+
+      <div class="enrich-step">
+        <div class="enrich-step-head">
+          <h4>基本信息</h4>
+          <p>给规则起个名字；默认对全部告警生效。</p>
+        </div>
+        <div class="row">
+          <div class="field" style="flex:2"><label>名称</label>
+            <input name="name" required value="${esc(src?.name || "")}" placeholder="例如 主机台账丰富" />
+          </div>
+          <div class="field" style="flex:0.8;min-width:120px;align-self:flex-end">
+            <label class="check-row" style="margin:0;padding:8px 0"><input type="checkbox" name="enabled" ${
+              src?.enabled !== false ? "checked" : ""
+            }/><span>启用</span></label>
+          </div>
+        </div>
+        <details class="enrich-when" ${
+          Object.keys(src?.matchers || {}).length ? "open" : ""
+        }>
+          <summary>何时生效（可选）· 默认全部告警</summary>
+          <div class="hint" style="margin:10px 0 8px">仅当告警同时带有下列标签时才应用本规则。</div>
+          <div id="matcher-rows">${matcherRowsHtml(matcherPairs)}</div>
+          <button type="button" class="ghost" id="btn-add-matcher" style="margin-top:8px">添加条件</button>
+        </details>
+      </div>
+
+      <div class="enrich-step">
+        <div class="enrich-step-head">
+          <h4>查表前抽取标签（可选）</h4>
+          <p>从原告警描述/标签截取后写入 labels，供台账匹配。支持 <code>|before:</code> / <code>|after:</code> / <code>|split:SEP:INDEX</code> / <code>|between:起点:终点</code>。</p>
+        </div>
+        <div id="extract-rows"></div>
+        <button type="button" class="ghost" id="btn-add-extract" style="margin-top:8px">添加抽取</button>
+        <div class="hint" style="margin-top:8px">例：标签名 <code>sss_ip</code>，模板 <code>{{annotations.summary|before:_}}</code>；下方台账「用标签」填 <code>sss_ip</code>。</div>
+      </div>
+
+      <div class="enrich-step">
+        <div class="enrich-step-head">
+          <h4>从台账补字段</h4>
+          <p>勾选台账，并指定<strong>用哪个标签查表</strong>（可填上方抽取的 <code>sss_ip</code>）。查出的列用 <code>{{labels.台账名.列名}}</code>。</p>
+        </div>
+        <div class="field">
+          <div class="lookup-bind-list" id="lookup-bind-list">
+            ${
+              lookups.length
+                ? lookups
+                    .map((t) => {
+                      const checked = selectedIds.has(t.id);
+                      const override =
+                        (src?.lookup_match_keys && src.lookup_match_keys[t.id]) || "";
+                      const defKey = t.key_label || "ip";
+                      return `<div class="lookup-bind-row">
+                  <label class="check-row lookup-bind-check">
+                    <input type="checkbox" name="lookup_table_ids" value="${esc(t.id)}" ${
+                        checked ? "checked" : ""
+                      } data-default-key="${esc(defKey)}" />
+                    <span><b>${esc(t.name)}</b> · ${Object.keys(t.rows || {}).length} 行${
+                        t.enabled ? "" : " · 已停用"
+                      }</span>
+                  </label>
+                  <div class="lookup-bind-key">
+                    <span class="hint">用标签</span>
+                    <input name="lookup_key_${esc(t.id)}" class="mono" placeholder="${esc(
+                        defKey
+                      )}" value="${esc(override || defKey)}" ${checked ? "" : "disabled"} />
+                    <span class="hint">查本表</span>
+                  </div>
+                </div>`;
+                    })
+                    .join("")
+                : `<div class="enrich-inline-empty">
+                    还没有台账。
+                    <button type="button" class="ghost" id="btn-goto-lookup">去新建台账</button>
+                  </div>`
+            }
+          </div>
+        </div>
+        <div class="hint" style="margin-top:8px">例：抽取了 <code>sss_ip</code> → 此处填 <code>sss_ip</code> → 描述写 <code>{{labels.device_info_test.主机名}}</code>。</div>
+      </div>
+
+      <div class="enrich-step">
+        <div class="enrich-step-head">
+          <h4>写到告警卡片上</h4>
+          <p>用 <code>{{labels.台账名.列名}}</code> 或截取 <code>{{annotations.summary|between:为：: %}}</code>。点芯片插入，或拖到描述任意位置。</p>
+        </div>
+        <div class="field"><label>告警描述</label>
+          <textarea name="ft_summary" id="summary-tpl" rows="3" class="chip-drop-target">${esc(summaryTpl)}</textarea>
+          <div class="hint" id="chip-hint" style="margin:8px 0 6px">先勾选台账；芯片可点击或拖入上方描述框。</div>
+          <div id="summary-chips" class="chip-groups"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>告警 IP</label>
+            <input name="ft_ip" value="${esc(
+              ft.ip || ft.alertIp || "{{labels.ip}}"
+            )}" placeholder="{{labels.ip}} 或 {{labels.instance}}" />
+          </div>
+          <div class="field"><label>告警级别</label>
+            <input name="ft_severity" value="${esc(
+              ft.severity || ""
+            )}" placeholder="disaster / 严重 / {{labels.级别}}" />
+          </div>
+        </div>
+        <div class="field"><label>告警名称（可选）</label>
+          <input name="ft_alertname" value="${esc(
+            ft.alertname || ""
+          )}" placeholder="{{labels.主机名}}-不可达，留空则不改" />
+        </div>
+        <div class="hint">级别按 Zabbix：disaster / high / average / warning / information / not_classified（兼容 critical、info；可用中文）。</div>
+      </div>
+
+      <details class="enrich-step enrich-advanced" ${hasAdvanced ? "open" : ""}>
+        <summary>高级选项（内联映射、优先级等）</summary>
+        <div class="enrich-advanced-body">
+          <div class="row">
+            <div class="field" style="flex:1;min-width:160px"><label>内联映射 · 用哪个标签匹配</label>
+              <input name="match_key" value="${esc(
+                src?.match_key || ""
+              )}" placeholder="留空=各台账用自己的匹配标签" />
+              <div class="hint">只影响下方「内联映射表」，与已选台账无关。</div>
+            </div>
+            <div class="field" style="flex:0.6;min-width:100px"><label>优先级</label>
+              <input name="priority" type="number" value="${src?.priority ?? 100}" />
+              <div class="hint">数字越小越先执行</div>
+            </div>
+          </div>
+          <div class="field"><label>内联映射表（JSON，可选）</label>
+            <textarea name="mappings" rows="4" class="mono" placeholder='{"10.0.0.1":{"owner":"alice"}}'>${esc(
+              Object.keys(src?.mappings || {}).length
+                ? JSON.stringify(src.mappings, null, 2)
+                : ""
+            )}</textarea>
+            <div class="hint">无需台账时，可直接在规则里写一小段对照表。</div>
+          </div>
+          <div class="field"><label>其他注解模板（JSON，可选）</label>
+            <textarea name="templates_extra" rows="3" class="mono">${esc(otherTplJson)}</textarea>
+          </div>
+          <label class="check-row"><input type="checkbox" name="write_labels" ${
+            src?.write_labels !== false ? "checked" : ""
+          } /><span>台账 / 映射字段写入 labels（供描述模板引用）</span></label>
+        </div>
+      </details>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button type="button" class="ghost" id="m-goto-preview">试跑预览</button>
+      <button class="primary" type="submit" form="f">保存规则</button>
+    </div>
+  `,
+    { xl: true }
+  );
+
+  document.getElementById("m-cancel").onclick = closeModal;
+
+  const gotoLookup = document.getElementById("btn-goto-lookup");
+  if (gotoLookup) {
+    gotoLookup.onclick = () => {
+      closeModal();
+      localStorage.setItem("eventide_enrich_tab", "lookups");
+      renderPage();
+      setTimeout(() => editLookup(), 50);
+    };
+  }
+
+  const matcherBox = document.getElementById("matcher-rows");
+  const bindMatcherRm = () => {
+    matcherBox.querySelectorAll("[data-rm-matcher]").forEach((btn) => {
+      btn.onclick = () => {
+        const rowEl = btn.closest(".matcher-row");
+        if (matcherBox.querySelectorAll(".matcher-row").length <= 1) {
+          rowEl.querySelector('[name="mk_key"]').value = "";
+          rowEl.querySelector('[name="mk_val"]').value = "";
+          return;
+        }
+        rowEl.remove();
+      };
+    });
+  };
+  bindMatcherRm();
+  document.getElementById("btn-add-matcher").onclick = () => {
+    if (matcherBox.querySelectorAll(".matcher-row").length >= 5) {
+      toast("最多 5 个条件", true);
+      return;
+    }
+    matcherBox.insertAdjacentHTML(
+      "beforeend",
+      `<div class="matcher-row">
+        <input name="mk_key" placeholder="标签名" value="" />
+        <span class="matcher-eq">=</span>
+        <input name="mk_val" placeholder="值" value="" />
+        <button type="button" class="ghost" data-rm-matcher title="删除">×</button>
+      </div>`
+    );
+    bindMatcherRm();
+  };
+
+  const extractBox = document.getElementById("extract-rows");
+  const extractPairs = Object.entries(src?.label_extracts || {}).map(([k, v]) => ({
+    k,
+    v,
+  }));
+  if (!extractPairs.length) extractPairs.push({ k: "", v: "" });
+  const extractRowHtml = (p) => `<div class="extract-row">
+    <input name="ex_key" placeholder="写入标签名，如 extract_ip" value="${esc(p.k)}" />
+    <input name="ex_tpl" placeholder="{{annotations.summary|before:_}}" value="${esc(p.v)}" />
+    <button type="button" class="ghost" data-rm-extract title="删除">×</button>
+  </div>`;
+  extractBox.innerHTML = extractPairs.map(extractRowHtml).join("");
+  const bindExtractRm = () => {
+    extractBox.querySelectorAll("[data-rm-extract]").forEach((btn) => {
+      btn.onclick = () => {
+        const rowEl = btn.closest(".extract-row");
+        if (extractBox.querySelectorAll(".extract-row").length <= 1) {
+          rowEl.querySelector('[name="ex_key"]').value = "";
+          rowEl.querySelector('[name="ex_tpl"]').value = "";
+          return;
+        }
+        rowEl.remove();
+      };
+    });
+  };
+  bindExtractRm();
+  document.getElementById("btn-add-extract").onclick = () => {
+    if (extractBox.querySelectorAll(".extract-row").length >= 8) {
+      toast("最多 8 条抽取", true);
+      return;
+    }
+    extractBox.insertAdjacentHTML("beforeend", extractRowHtml({ k: "", v: "" }));
+    bindExtractRm();
+  };
+
+  const summaryEl = document.getElementById("summary-tpl");
+  const chipsEl = document.getElementById("summary-chips");
+  const chipHint = document.getElementById("chip-hint");
+
+  const lookupNs = (name) => {
+    const s = String(name || "")
+      .split("")
+      .map((c) => (/[a-zA-Z0-9_\-\u4e00-\u9fff]/.test(c) ? c : "_"))
+      .join("");
+    return s || "lookup";
+  };
+
+  const insertChipInto = (el, chip, at) => {
+    if (!el || !chip) return;
+    const start =
+      at != null ? at : el.selectionStart ?? String(el.value || "").length;
+    const end = at != null ? at : el.selectionEnd ?? start;
+    const v = String(el.value || "");
+    el.value = v.slice(0, start) + chip + v.slice(end);
+    el.focus();
+    const caret = start + chip.length;
+    if (typeof el.setSelectionRange === "function") {
+      el.setSelectionRange(caret, caret);
+    }
+  };
+
+  /** Approximate caret index in a textarea from pointer coordinates. */
+  const textareaIndexFromPoint = (ta, clientX, clientY) => {
+    const text = String(ta.value || "");
+    if (!text.length) return 0;
+    const style = getComputedStyle(ta);
+    const rect = ta.getBoundingClientRect();
+    const mirror = document.createElement("div");
+    mirror.setAttribute("aria-hidden", "true");
+    mirror.style.cssText = [
+      "position:fixed",
+      `left:${rect.left}px`,
+      `top:${rect.top}px`,
+      `width:${ta.clientWidth}px`,
+      `height:${ta.clientHeight}px`,
+      "overflow:hidden",
+      "visibility:hidden",
+      "pointer-events:none",
+      "white-space:pre-wrap",
+      "word-wrap:break-word",
+      `font:${style.font}`,
+      `font-size:${style.fontSize}`,
+      `font-family:${style.fontFamily}`,
+      `font-weight:${style.fontWeight}`,
+      `line-height:${style.lineHeight}`,
+      `letter-spacing:${style.letterSpacing}`,
+      `padding:${style.padding}`,
+      `border:${style.border}`,
+      `box-sizing:${style.boxSizing}`,
+    ].join(";");
+    document.body.appendChild(mirror);
+    mirror.scrollTop = ta.scrollTop;
+    mirror.scrollLeft = ta.scrollLeft;
+
+    let best = text.length;
+    let bestDist = Infinity;
+    const marker = document.createElement("span");
+    marker.textContent = "\u200b";
+    // Templates are short; O(n) probe is fine.
+    for (let i = 0; i <= text.length; i++) {
+      mirror.textContent = "";
+      mirror.appendChild(document.createTextNode(text.slice(0, i)));
+      mirror.appendChild(marker);
+      mirror.appendChild(document.createTextNode(text.slice(i)));
+      mirror.scrollTop = ta.scrollTop;
+      mirror.scrollLeft = ta.scrollLeft;
+      const mr = marker.getBoundingClientRect();
+      const cx = mr.left;
+      const cy = mr.top + mr.height / 2;
+      const d = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    mirror.remove();
+    return best;
+  };
+
+  let chipDragActive = false;
+  let suppressChipClick = false;
+
+  const bindChips = () => {
+    chipsEl.querySelectorAll("[data-chip]").forEach((btn) => {
+      btn.draggable = true;
+      btn.ondragstart = (e) => {
+        chipDragActive = true;
+        suppressChipClick = false;
+        const chip = btn.dataset.chip || "";
+        e.dataTransfer.setData("text/plain", chip);
+        e.dataTransfer.setData("application/x-eventide-chip", chip);
+        e.dataTransfer.effectAllowed = "copy";
+        btn.classList.add("is-dragging");
+      };
+      btn.ondragend = () => {
+        chipDragActive = false;
+        btn.classList.remove("is-dragging");
+        // Avoid click-insert after a successful drag.
+        suppressChipClick = true;
+        setTimeout(() => {
+          suppressChipClick = false;
+        }, 0);
+      };
+      btn.onclick = () => {
+        if (suppressChipClick) return;
+        insertChipInto(summaryEl, btn.dataset.chip);
+      };
+    });
+  };
+
+  summaryEl.addEventListener("dragenter", (e) => {
+    const types = e.dataTransfer?.types
+      ? Array.from(e.dataTransfer.types)
+      : [];
+    if (
+      !chipDragActive &&
+      !types.includes("text/plain") &&
+      !types.includes("application/x-eventide-chip")
+    ) {
+      return;
+    }
+    e.preventDefault();
+    summaryEl.classList.add("is-chip-drag-over");
+  });
+  summaryEl.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    summaryEl.classList.add("is-chip-drag-over");
+    const idx = textareaIndexFromPoint(summaryEl, e.clientX, e.clientY);
+    summaryEl.focus();
+    summaryEl.setSelectionRange(idx, idx);
+  });
+  summaryEl.addEventListener("dragleave", (e) => {
+    if (e.target !== summaryEl) return;
+    summaryEl.classList.remove("is-chip-drag-over");
+  });
+  summaryEl.addEventListener("drop", (e) => {
+    e.preventDefault();
+    summaryEl.classList.remove("is-chip-drag-over");
+    const chip =
+      e.dataTransfer.getData("application/x-eventide-chip") ||
+      e.dataTransfer.getData("text/plain") ||
+      "";
+    if (!chip) return;
+    const idx = textareaIndexFromPoint(summaryEl, e.clientX, e.clientY);
+    insertChipInto(summaryEl, chip, idx);
+  });
+
+  const chipBtn = (labelKey, title, cls = "") =>
+    `<button type="button" class="ghost chip-tag ${cls}" draggable="true" data-chip="{{labels.${esc(
+      labelKey
+    )}}}" title="${esc(title)}（可拖入描述）">{{labels.${esc(labelKey)}}}</button>`;
+
+  const refreshChips = () => {
+    const checked = [
+      ...document.querySelectorAll('input[name="lookup_table_ids"]:checked'),
+    ].map((el) => el.value);
+
+    const parts = [];
+    parts.push(`<div class="chip-group">
+      <div class="chip-group-title">告警自带标签</div>
+      <div class="chip-row">${builtinChipFields
+        .map((k) => chipBtn(k, "告警自带，不依赖台账"))
+        .join("")}</div>
+    </div>`);
+
+    checked.forEach((id) => {
+      const t = lookups.find((x) => x.id === id);
+      if (!t) return;
+      const keyLabel = t.key_label || "ip";
+      const ns = lookupNs(t.name);
+      const cols = colsFromLookup(t);
+      const buttons = cols
+        .map((col) =>
+          chipBtn(
+            `${ns}.${col}`,
+            `台账「${t.name}」列「${col}」。匹配：告警 labels.${keyLabel} → 查本表`,
+            "chip-from-lookup"
+          )
+        )
+        .join("");
+      parts.push(`<div class="chip-group">
+        <div class="chip-group-title"><b>${esc(t.name)}</b> · 匹配键 <code class="mono">labels.${esc(
+          keyLabel
+        )}</code> → 写入 <code class="mono">labels.${esc(ns)}.*</code></div>
+        <div class="chip-row">${
+          buttons || `<span class="hint">该台账没有数据列</span>`
+        }</div>
+      </div>`);
+    });
+
+    chipsEl.innerHTML = parts.join("");
+    if (chipHint) {
+      chipHint.textContent = checked.length
+        ? "台账字段一律为 {{labels.台账名.列名}}；点选或拖入描述框任意位置。"
+        : "先勾选上方台账，才会列出可拖拽的 {{labels.台账名.列名}} 芯片。";
+    }
+    bindChips();
+  };
+
+  document.querySelectorAll('input[name="lookup_table_ids"]').forEach((el) => {
+    const syncKey = () => {
+      const row = el.closest(".lookup-bind-row");
+      const keyInput = row?.querySelector(`input[name="lookup_key_${el.value}"]`);
+      if (!keyInput) return;
+      keyInput.disabled = !el.checked;
+      if (el.checked && !String(keyInput.value || "").trim()) {
+        keyInput.value = el.dataset.defaultKey || "ip";
+      }
+    };
+    el.addEventListener("change", () => {
+      syncKey();
+      refreshChips();
+    });
+    syncKey();
+  });
+  refreshChips();
+
+  const collectMatchers = (form) => {
+    const matchers = {};
+    form.querySelectorAll(".matcher-row").forEach((rowEl) => {
+      const k = String(rowEl.querySelector('[name="mk_key"]')?.value || "").trim();
+      const v = String(rowEl.querySelector('[name="mk_val"]')?.value || "").trim();
+      if (k && v) matchers[k] = v;
+    });
+    return matchers;
+  };
+
+  const collectExtracts = (form) => {
+    const out = {};
+    form.querySelectorAll(".extract-row").forEach((rowEl) => {
+      const k = String(rowEl.querySelector('[name="ex_key"]')?.value || "").trim();
+      const v = String(rowEl.querySelector('[name="ex_tpl"]')?.value || "").trim();
+      if (k && v) out[k] = v;
+    });
+    return out;
+  };
+
+  const buildDraft = (fd, form) => {
+    let mappings = {};
+    let extra = {};
+    const rawMap = String(fd.get("mappings") || "").trim();
+    if (rawMap) mappings = JSON.parse(rawMap);
+    const rawExtra = String(fd.get("templates_extra") || "").trim();
+    if (rawExtra) extra = JSON.parse(rawExtra);
+    const summary = String(fd.get("ft_summary") || "").trim();
+    const templates = { ...extra };
+    if (summary) templates.summary = summary;
+    const field_templates = {};
+    if (summary) field_templates.summary = summary;
+    const ip = String(fd.get("ft_ip") || "").trim();
+    const severity = String(fd.get("ft_severity") || "").trim();
+    const alertname = String(fd.get("ft_alertname") || "").trim();
+    if (ip) field_templates.ip = ip;
+    if (severity) field_templates.severity = severity;
+    if (alertname) field_templates.alertname = alertname;
+    const lookup_table_ids = [
+      ...form.querySelectorAll('input[name="lookup_table_ids"]:checked'),
+    ].map((el) => el.value);
+    const lookup_match_keys = {};
+    lookup_table_ids.forEach((id) => {
+      const keyInput = form.querySelector(`input[name="lookup_key_${id}"]`);
+      const k = String(keyInput?.value || "").trim();
+      if (k) lookup_match_keys[id] = k;
+    });
+    return {
+      name: fd.get("name") || "preview",
+      kind: "auto",
+      matchers: collectMatchers(form),
+      match_key: String(fd.get("match_key") || "").trim(),
+      templates,
+      mappings,
+      lookup_table_ids,
+      lookup_match_keys,
+      field_templates,
+      label_extracts: collectExtracts(form),
+      write_labels: form.querySelector('[name="write_labels"]')?.checked || false,
+      enabled: form.querySelector('[name="enabled"]')?.checked !== false,
+      priority: Number(fd.get("priority") || 100),
+    };
+  };
+
+  document.getElementById("m-goto-preview").onclick = () => {
+    const form = document.getElementById("f");
+    const fd = new FormData(form);
+    let draftBody;
+    try {
+      draftBody = buildDraft(fd, form);
+      draftBody.name = String(fd.get("name") || "").trim() || draftBody.name;
+      draftBody.enabled = form.querySelector('[name="enabled"]').checked;
+    } catch (e) {
+      toast("高级 JSON 无效：" + e.message, true);
+      return;
+    }
+    openEnrichPreviewModal({
+      draft: draftBody,
+      ruleId: row?.id || null,
+      fromEditor: true,
+    });
+  };
+
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    let body;
+    try {
+      body = buildDraft(fd, form);
+      body.name = fd.get("name");
+      body.enabled = form.querySelector('[name="enabled"]').checked;
+    } catch (err) {
+      toast("高级 JSON 无效：" + err.message, true);
+      return;
+    }
+    const hasAny =
+      (body.lookup_table_ids || []).length ||
+      Object.keys(body.mappings || {}).length ||
+      Object.keys(body.templates || {}).length ||
+      Object.keys(body.field_templates || {}).length ||
+      Object.keys(body.label_extracts || {}).length;
+    if (!hasAny) {
+      toast("请至少勾选台账，或配置描述 / IP / 级别", true);
+      return;
+    }
+    if (Object.keys(body.mappings || {}).length && !body.match_key) {
+      toast("使用内联映射时，请填写「用哪个标签匹配」", true);
+      return;
+    }
+    try {
+      if (row) {
+        await api(`/api/enrich/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        await api("/api/enrich", { method: "POST", body: JSON.stringify(body) });
+      }
+    } catch (err) {
+      toast(err.message || String(err), true);
+      return;
+    }
+    sessionStorage.removeItem("eventide_enrich_preview");
+    closeModal();
+    toast("已保存");
+    localStorage.setItem("eventide_enrich_tab", "rules");
+    renderPage();
+  };
+}
+
+function editSilence(prefill) {
+  const now = new Date();
+  const end = new Date(now.getTime() + 2 * 3600 * 1000);
+  const toLocal = (d) => {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+      d.getHours()
+    )}:${pad(d.getMinutes())}`;
+  };
+  const matchersJson = JSON.stringify(prefill?.matchers || {}, null, 2);
+  openModal(`
+    <div class="modal-head">
+      <h3>新建静默</h3>
+      <p class="desc">在时间窗内抑制匹配标签的通知。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>注释</label><input name="comment" placeholder="维护窗口" value="${esc(
+        prefill?.comment || ""
+      )}" /></div>
+      <div class="field"><label>规则 ID（可选，留空匹配全部）</label><input name="rule_id" placeholder="uuid" value="${esc(
+        prefill?.rule_id || ""
+      )}" /></div>
+      <div class="field"><label>匹配标签 JSON</label>
+        <textarea name="matchers" rows="4">${esc(matchersJson)}</textarea>
+      </div>
+      <div class="row">
+        <div class="field"><label>开始</label><input name="starts_at" type="datetime-local" required value="${toLocal(
+          now
+        )}" /></div>
+        <div class="field"><label>结束</label><input name="ends_at" type="datetime-local" required value="${toLocal(
+          end
+        )}" /></div>
+      </div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`, { wide: true });
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    let matchers = {};
+    try {
+      matchers = JSON.parse(String(fd.get("matchers") || "{}"));
+    } catch {
+      toast("匹配标签 JSON 无效", true);
+      return;
+    }
+    const ruleId = String(fd.get("rule_id") || "").trim();
+    const body = {
+      comment: fd.get("comment") || "",
+      rule_id: ruleId || null,
+      matchers,
+      starts_at: new Date(fd.get("starts_at")).toISOString(),
+      ends_at: new Date(fd.get("ends_at")).toISOString(),
+    };
+    await api("/api/silences", { method: "POST", body: JSON.stringify(body) });
+    closeModal();
+    toast("已保存");
+    renderPage();
+  };
+}
+
+// ---------- IAM editors ----------
+async function editUser(row) {
+  const [roles, depts] = await Promise.all([
+    state.cache.roles || api("/api/roles"),
+    state.cache.departments || api("/api/departments"),
+  ]);
+  state.cache.roles = roles;
+  state.cache.departments = depts;
+  const selectedRoles = new Set(row?.role_ids || []);
+  openModal(`
+    <div class="modal-head">
+      <h3>${row ? "编辑用户" : "新建用户"}</h3>
+      <p class="desc">分配部门与角色；角色权限在「权限管理」配置。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="row">
+        <div class="field"><label>用户名</label>
+          <input name="username" required value="${esc(row?.username || "")}" ${
+            row ? "readonly" : ""
+          } /></div>
+        <div class="field"><label>显示名</label>
+          <input name="display_name" value="${esc(row?.display_name || "")}" /></div>
+      </div>
+      <div class="field"><label>${row ? "新密码（留空不改）" : "初始密码"}</label>
+        <input name="password" type="password" autocomplete="new-password" ${
+          row ? "" : "required minlength=6"
+        } placeholder="${row ? "留空则不修改" : "至少 6 位"}" /></div>
+      <div class="field"><label>部门</label>
+        <select name="department_id">
+          <option value="">— 未分配 —</option>
+          ${depts
+            .map(
+              (d) =>
+                `<option value="${esc(d.id)}" ${
+                  row?.department_id === d.id ? "selected" : ""
+                }>${esc(d.name)}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="field"><label>角色</label>
+        <div class="check-grid">${roles
           .map(
-            (g) => `<div class="seg" style="margin-bottom:12px">
-            <div class="hint" style="margin:0 0 6px;font-weight:600">${esc(g)}</div>
-            ${groups[g]
-              .map(
-                (p) => `<label class="check-row"><input type="checkbox" name="perms" value="${esc(
-                  p.code
-                )}" ${selected.has(p.code) ? "checked" : ""} ${
-                  starOn ? "disabled" : ""
-                }/> <span>${esc(p.label)} <code class="mono">${esc(p.code)}</code></span></label>`
-              )
-              .join("")}
-          </div>`
+            (r) => `<label class="check-row"><input type="checkbox" name="role_ids" value="${esc(
+              r.id
+            )}" ${selectedRoles.has(r.id) ? "checked" : ""}/> <span>${esc(r.name)}${
+              r.is_system ? "（系统）" : ""
+            }</span></label>`
           )
           .join("")}</div>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`,
-      { xl: true }
-    );
-    const star = document.getElementById("perm-star");
-    const syncStar = () => {
-      document.querySelectorAll('#perm-list input[name="perms"]').forEach((el) => {
-        el.disabled = star.checked;
-      });
-    };
-    star.onchange = syncStar;
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const fd = new FormData(form);
-      let permissions = [];
-      if (form.querySelector('[name="perm_star"]').checked) {
-        permissions = ["*"];
-      } else {
-        permissions = [...form.querySelectorAll('[name="perms"]:checked')].map((x) => x.value);
-      }
-      const body = {
-        name: String(fd.get("name") || "").trim(),
-        description: String(fd.get("description") || "").trim(),
-        permissions,
-      };
-      try {
-        if (row) {
-          await api(`/api/roles/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-        } else {
-          await api("/api/roles", { method: "POST", body: JSON.stringify(body) });
-        }
-        closeModal();
-        toast("已保存（相关用户需重新登录后权限生效）");
-        renderPage();
-      } catch (err) {
-        toast(err.message, true);
-      }
-    };
-  }
-
-  async function editDepartment(row) {
-    const depts = state.cache.departments || (await api("/api/departments"));
-    state.cache.departments = depts;
-    openModal(`
-      <div class="modal-head">
-        <h3>${row ? "编辑部门" : "新建部门"}</h3>
       </div>
-      <form id="f" class="modal-body">
-        <div class="field"><label>名称</label>
-          <input name="name" required value="${esc(row?.name || "")}" /></div>
-        <div class="field"><label>上级部门</label>
-          <select name="parent_id">
-            <option value="">— 无（根部门）—</option>
-            ${depts
-              .filter((d) => !row || d.id !== row.id)
-              .map(
-                (d) =>
-                  `<option value="${esc(d.id)}" ${
-                    row?.parent_id === d.id ? "selected" : ""
-                  }>${esc(d.name)}</option>`
-              )
-              .join("")}
-          </select>
-        </div>
-        <div class="field"><label>排序</label>
-          <input name="sort_order" type="number" value="${row?.sort_order ?? 0}" /></div>
-        <label class="check-row"><input type="checkbox" name="enabled" ${
-          !row || row.enabled ? "checked" : ""
-        }/> <span>启用</span></label>
-      </form>
-      <div class="modal-actions">
-        <button type="button" class="ghost" id="m-cancel">取消</button>
-        <button class="primary" type="submit" form="f">保存</button>
-      </div>`);
-    document.getElementById("m-cancel").onclick = closeModal;
-    document.getElementById("f").onsubmit = async (e) => {
-      e.preventDefault();
-      const form = e.target;
-      const fd = new FormData(form);
-      const body = {
-        name: String(fd.get("name") || "").trim(),
-        parent_id: String(fd.get("parent_id") || "") || null,
-        sort_order: Number(fd.get("sort_order") || 0),
-        enabled: form.querySelector('[name="enabled"]').checked,
-      };
-      try {
-        if (row) {
-          await api(`/api/departments/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-        } else {
-          await api("/api/departments", { method: "POST", body: JSON.stringify(body) });
-        }
-        closeModal();
-        toast("已保存");
-        renderPage();
-      } catch (err) {
-        toast(err.message, true);
-      }
+      <label class="check-row"><input type="checkbox" name="enabled" ${
+        !row || row.enabled ? "checked" : ""
+      }/> <span>启用</span></label>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`);
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const password = String(fd.get("password") || "").trim();
+    const body = {
+      username: String(fd.get("username") || "").trim(),
+      display_name: String(fd.get("display_name") || "").trim(),
+      department_id: String(fd.get("department_id") || "") || null,
+      role_ids: [...form.querySelectorAll('[name="role_ids"]:checked')].map((x) => x.value),
+      enabled: form.querySelector('[name="enabled"]').checked,
     };
-  }
+    if (password) body.password = password;
+    try {
+      if (row) {
+        await api(`/api/users/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        if (!password) {
+          toast("请设置初始密码", true);
+          return;
+        }
+        await api("/api/users", { method: "POST", body: JSON.stringify(body) });
+      }
+      closeModal();
+      toast("已保存");
+      renderPage();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+}
 
-  tryBoot();
-})();
+function resetUserPassword(id) {
+  openModal(`
+    <div class="modal-head"><h3>重置密码</h3></div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>新密码</label>
+        <input name="password" type="password" required minlength="6" autocomplete="new-password" /></div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">确定</button>
+    </div>`);
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const pw = new FormData(e.target).get("password");
+    try {
+      await api(`/api/users/${id}/reset-password`, {
+        method: "POST",
+        body: JSON.stringify({ password: pw }),
+      });
+      closeModal();
+      toast("密码已重置");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+}
+
+async function editRole(row) {
+  let catalog = state.cache.permCatalog;
+  if (!catalog) catalog = await api("/api/permissions");
+  state.cache.permCatalog = catalog;
+  const selected = new Set(row?.permissions || []);
+  const groups = {};
+  (catalog || []).forEach((p) => {
+    (groups[p.group] || (groups[p.group] = [])).push(p);
+  });
+  const starOn = selected.has("*");
+  openModal(
+    `
+    <div class="modal-head">
+      <h3>${row ? "编辑角色" : "新建角色"}</h3>
+      <p class="desc">勾选权限码；含 <code>*</code> 表示全部权限。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="row">
+        <div class="field"><label>名称</label>
+          <input name="name" required value="${esc(row?.name || "")}" ${
+            row?.is_system ? "readonly" : ""
+          } /></div>
+        <div class="field"><label>说明</label>
+          <input name="description" value="${esc(row?.description || "")}" /></div>
+      </div>
+      <label class="check-row" style="margin-bottom:12px">
+        <input type="checkbox" name="perm_star" id="perm-star" ${starOn ? "checked" : ""}/>
+        <span><strong>全部权限 (*)</strong></span>
+      </label>
+      <div id="perm-list">${Object.keys(groups)
+        .map(
+          (g) => `<div class="seg" style="margin-bottom:12px">
+          <div class="hint" style="margin:0 0 6px;font-weight:600">${esc(g)}</div>
+          ${groups[g]
+            .map(
+              (p) => `<label class="check-row"><input type="checkbox" name="perms" value="${esc(
+                p.code
+              )}" ${selected.has(p.code) ? "checked" : ""} ${
+                starOn ? "disabled" : ""
+              }/> <span>${esc(p.label)} <code class="mono">${esc(p.code)}</code></span></label>`
+            )
+            .join("")}
+        </div>`
+        )
+        .join("")}</div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`,
+    { xl: true }
+  );
+  const star = document.getElementById("perm-star");
+  const syncStar = () => {
+    document.querySelectorAll('#perm-list input[name="perms"]').forEach((el) => {
+      el.disabled = star.checked;
+    });
+  };
+  star.onchange = syncStar;
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    let permissions = [];
+    if (form.querySelector('[name="perm_star"]').checked) {
+      permissions = ["*"];
+    } else {
+      permissions = [...form.querySelectorAll('[name="perms"]:checked')].map((x) => x.value);
+    }
+    const body = {
+      name: String(fd.get("name") || "").trim(),
+      description: String(fd.get("description") || "").trim(),
+      permissions,
+    };
+    try {
+      if (row) {
+        await api(`/api/roles/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        await api("/api/roles", { method: "POST", body: JSON.stringify(body) });
+      }
+      closeModal();
+      toast("已保存（相关用户需重新登录后权限生效）");
+      renderPage();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+}
+
+async function editDepartment(row) {
+  const depts = state.cache.departments || (await api("/api/departments"));
+  state.cache.departments = depts;
+  openModal(`
+    <div class="modal-head">
+      <h3>${row ? "编辑部门" : "新建部门"}</h3>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>名称</label>
+        <input name="name" required value="${esc(row?.name || "")}" /></div>
+      <div class="field"><label>上级部门</label>
+        <select name="parent_id">
+          <option value="">— 无（根部门）—</option>
+          ${depts
+            .filter((d) => !row || d.id !== row.id)
+            .map(
+              (d) =>
+                `<option value="${esc(d.id)}" ${
+                  row?.parent_id === d.id ? "selected" : ""
+                }>${esc(d.name)}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+      <div class="field"><label>排序</label>
+        <input name="sort_order" type="number" value="${row?.sort_order ?? 0}" /></div>
+      <label class="check-row"><input type="checkbox" name="enabled" ${
+        !row || row.enabled ? "checked" : ""
+      }/> <span>启用</span></label>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`);
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    const body = {
+      name: String(fd.get("name") || "").trim(),
+      parent_id: String(fd.get("parent_id") || "") || null,
+      sort_order: Number(fd.get("sort_order") || 0),
+      enabled: form.querySelector('[name="enabled"]').checked,
+    };
+    try {
+      if (row) {
+        await api(`/api/departments/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        await api("/api/departments", { method: "POST", body: JSON.stringify(body) });
+      }
+      closeModal();
+      toast("已保存");
+      renderPage();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+}
+
+
+alertsMod = createAlertsModule({
+  api,
+  state,
+  toast,
+  esc,
+  fmtTime,
+  severityOptions,
+  severityLabel,
+  navigate,
+  setActions,
+  openModal,
+  closeModal,
+  showCtxMenu,
+  copyText,
+  editSilence,
+  showNotifyLogDetail,
+});
+
+function alertTable(...args) {
+  return alertsMod.alertTable(...args);
+}
+function bindAlertTable(...args) {
+  return alertsMod.bindAlertTable(...args);
+}
+function showAlertDetail(...args) {
+  return alertsMod.showAlertDetail(...args);
+}
+function showTrapRecentDetail(...args) {
+  return alertsMod.showTrapRecentDetail(...args);
+}
+
+setUnauthorizedHandler(() => logout(false));
+
+tryBoot();

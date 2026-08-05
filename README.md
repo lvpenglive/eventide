@@ -33,6 +33,9 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
   - [13.2 更后可演进](#132-更后可演进)
   - [13.3 SNMP Trap 接入](#133-snmp-trap-接入)
 - [14. 开发与构建](#14-开发与构建)
+  - [14.1 CI 多平台打包](#141-ci-多平台打包)
+  - [14.2 控制台前端演进](#142-控制台前端演进)
+  - [14.3 本地调试日志](#143-本地调试日志)
 
 ---
 
@@ -86,11 +89,12 @@ Eventide 定位为 **团队级告警中枢**：
 
 ### 2.3 前端
 
-内嵌静态控制台（无独立 Node 构建）：
+内嵌静态控制台（**无独立 Node 构建**，随 `eventide` 二进制一起交付）：
 
-- HTML + CSS + Vanilla JS SPA  
+- HTML + CSS + Vanilla JS SPA（ES modules）  
 - 字体：Syne / Figtree  
 - 登录态：`localStorage` 存 JWT  
+- 演进计划见 [§14.2](#142-控制台前端演进)（先体验与模块化，有信号再上 Vue/React）
 
 ### 2.4 与 WatchAlert 的差异（技术视角）
 
@@ -110,11 +114,12 @@ Eventide 定位为 **团队级告警中枢**：
 eventide/
 ├── Cargo.toml                 # workspace
 ├── eventide.toml              # 运行配置
-├── static/                    # 控制台前端
+├── static/                    # 控制台前端（ServeDir 直出）
 │   ├── index.html
 │   └── assets/
 │       ├── app.css
-│       └── app.js
+│       ├── app.js             # 路由 + 其余页面
+│       └── js/                # ES modules（api / ui / pages/*）
 └── crates/
     ├── eventide-core/         # 模型、评估、告警标识、Ingress 归一化
     ├── eventide-sources/      # Prometheus / Loki / Kafka 适配
@@ -1044,6 +1049,7 @@ degrade_skip_notify = false
 - [x] SNMP Trap：SNMPv3 USM 接收（TOML `[[snmpv3_users]]`；MD5/SHA/SHA256 + DES/AES128）
 - [x] SNMP Trap：多机同时收（UDP LB 推荐）+ VIP 主备备选；Redis 心跳 / 控制台集群视图
 - [x] SNMP Trap：策略 MySQL + MIB RustFS + 多实例热加载
+- [ ] 控制台前端体验打磨 + ES modules 模块化（见 [§14.2](#142-控制台前端演进)）；有标杆客户/多人协作信号后再考虑 Vite + Vue/React
 
 ### 13.3 SNMP Trap 接入
 
@@ -1224,7 +1230,81 @@ cp eventide.toml.example eventide.toml
 cp eventide-trap.toml.example eventide-trap.toml
 ```
 
-日志级别：
+### 14.2 控制台前端演进
+
+**原则**：继续「单二进制 + 无 Node 构建」交付；先把关键路径做成像样的产品壳，再谈换栈。不要为了「看起来现代」提前上 monorepo / 微前端。
+
+#### 现状
+
+| 项 | 说明 |
+|----|------|
+| 形态 | `static/` 内嵌 SPA；`ServeDir` 直出 |
+| 入口 | `index.html` → `type="module"` 加载 `assets/app.js` |
+| 已拆模块 | `assets/js/api.js`（鉴权请求）、`ui.js`（toast / modal / esc 等）、`pages/alerts.js`（告警列表与详情） |
+| 其余页面 | 仍集中在 `app.js`（路由 + Trap / 规则 / 丰富 / IAM 等） |
+
+内嵌静态页**够用**（配置、查看、操作都能完成）；对标商业控制台时，短板主要在**体验一致性**与**长期扩展成本**（大文件难协作），而不是「技术过时」。
+
+#### 阶段 0 — 体验打磨（不换栈）
+
+1. **统一交互范式**：列表页统一为「筛选 + 表格/卡片 + 分页 + 弹窗编辑」；按钮文案、空状态、错误提示一套规范。  
+2. **关键路径优先**：登录 → 告警列表 → 详情 → 静默；Trap 策略；许可导入。这三条做到顺滑，比换框架更像商业产品。  
+3. **性能**：告警大列表坚持服务端分页；减少整页无意义重绘；接口失败有明确提示。  
+4. **视觉收敛**：保持现有品牌字体与 dusk 风格，克制堆卡片/特效。
+
+#### 阶段 1 — ES modules 模块化（进行中）
+
+目标结构（无构建工具，浏览器原生 `import`）：
+
+```
+static/
+  index.html
+  assets/
+    app.css
+    app.js              # 路由 + 组装
+    js/
+      api.js            # fetch / JWT / 402 license_readonly
+      ui.js             # toast、modal、confirm、表格小工具
+      pages/
+        alerts.js       # ✅ 已拆
+        trap.js         # 待拆
+        enrich.js       # 待拆
+        settings.js     # 待拆（含许可）
+        …
+```
+
+优先级：告警相关 ✅ → Trap / MIB / 策略 → 丰富与台账 → 系统设置（许可）→ 其余 CRUD 页。  
+可选辅助脚本：`scripts/split-console-modules.mjs`（对照拆分，非常规构建步骤）。
+
+#### 阶段 2 — 有信号再换栈（可选）
+
+出现以下信号再考虑 Vue 3 / React + Vite：
+
+- 要做复杂仪表盘、可配置工作台、大量表单校验与草稿  
+- 2 人以上长期改前端  
+- 客户明确对比竞品 UI，且成交卡在「看起来不专业」
+
+推荐仍贴合当前部署：
+
+- 单独 `console/` 工程，`npm run build` → 产物写入 `static/`  
+- 服务端继续 `ServeDir`，**不**拆成第二个部署包  
+
+#### 性价比排序
+
+| 顺序 | 做什么 | 为什么 |
+|------|--------|--------|
+| 1 | 告警列表 / 详情体验 | 用户每天都看 |
+| 2 | 继续拆 `app.js`（Trap、丰富、设置） | 后续改动的基础 |
+| 3 | 统一表格 / 表单 / Toast 约定 | 商业感来自一致性 |
+| 4 | （可选）Vite + Vue/React | 有客户与人力再上 |
+
+#### 明确不做（现阶段）
+
+- 全量重写成 Ant Design / 同类中后台模板  
+- 为换栈停功能开发  
+- 前后端分离成两个独立部署单元（牺牲「单二进制」卖点）
+
+### 14.3 本地调试日志
 
 ```bash
 # Windows PowerShell
