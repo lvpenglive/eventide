@@ -323,6 +323,18 @@ pub fn parse_probe_alert(v: &serde_json::Value) -> Option<IngressAlert> {
     if let Some(port) = json_any_str(v, "bizPort") {
         labels.insert("bizPort".into(), port);
     }
+    // Keep ip / alertIp / instance aligned so console "告警 IP" and enrich lookups work.
+    let ip = labels
+        .get("alertIp")
+        .cloned()
+        .or_else(|| labels.get("ipaddr").cloned())
+        .or_else(|| json_any_str(v, "ip"))
+        .filter(|s| !s.is_empty());
+    if let Some(ip) = ip {
+        labels.insert("ip".into(), ip.clone());
+        labels.entry("alertIp".to_string()).or_insert_with(|| ip.clone());
+        labels.entry("instance".to_string()).or_insert(ip);
+    }
 
     let mut annotations: Labels = BTreeMap::new();
     if let Some(msg) = json_str(v, "retMessage") {
@@ -869,6 +881,14 @@ mod tests {
             Some("????-??????")
         );
         assert_eq!(alerts[0].value, Some(12976.0));
+        assert_eq!(
+            alerts[0].labels.get("alertIp").map(|s| s.as_str()),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            alerts[0].labels.get("ip").map(|s| s.as_str()),
+            Some("127.0.0.1")
+        );
 
         let recover = r#"2026-07-21 17:00:29.175 [Worker] INFO  alertLogger - {"eventType":"recover","eventTime":"2026-07-21 17:00:28","messageId":"2077682656462446593","resultFlag":"GOOD","retCode":"4000","retMessage":"??","retTimeMs":26010,"bizchainName":"????-??????","alertCategory":"business"}"#;
         let alerts = parse_ingress_payload(recover.as_bytes()).unwrap();

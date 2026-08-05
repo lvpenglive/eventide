@@ -257,6 +257,7 @@ pub async fn put_storm(
             .delete_kv(STORM_CONFIG_KEY)
             .map_err(ApiError::internal)?;
         state.set_storm_prefs(state.config.storm.clone());
+        state.sync_storm_to_redis(true);
         return Ok(Json(storm_view(&state)));
     }
 
@@ -268,16 +269,21 @@ pub async fn put_storm(
         .set_kv(STORM_CONFIG_KEY, &json)
         .map_err(ApiError::internal)?;
     state.set_storm_prefs(storm);
+    state.sync_storm_to_redis(false);
     Ok(Json(storm_view(&state)))
 }
 
 fn storm_view(state: &AppState) -> StormSettingsView {
-    let source = match state.db.get_kv(STORM_CONFIG_KEY) {
-        Ok(Some(_)) => "runtime",
-        _ => "toml",
+    // Prefer MySQL truth so any instance's console shows the shared override.
+    let (storm, source) = match state.db.get_kv(STORM_CONFIG_KEY) {
+        Ok(Some(s)) => match serde_json::from_str::<StormConfig>(&s) {
+            Ok(c) => (c.normalize(), "runtime"),
+            Err(_) => (state.storm_prefs(), "runtime"),
+        },
+        _ => (state.config.storm.clone(), "toml"),
     };
     StormSettingsView {
-        storm: state.storm_prefs(),
+        storm,
         source: source.into(),
     }
 }

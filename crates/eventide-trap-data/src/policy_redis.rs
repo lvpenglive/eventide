@@ -20,6 +20,11 @@ pub const TRAP_API_TOKEN_KEY: &str = "eventide:trap:api_token";
 /// Pub/Sub when Trap HTTP token is rotated from the console.
 pub const TRAP_API_TOKEN_CHANNEL: &str = "eventide:trap:api_token:changed";
 
+/// Redis key for console `[storm]` override JSON (mirrors MySQL `app_kv`).
+pub const STORM_CONFIG_REDIS_KEY: &str = "eventide:storm:config";
+/// Pub/Sub when storm prefs change — other eventide-server instances hot-reload.
+pub const STORM_CONFIG_CHANNEL: &str = "eventide:storm:config:changed";
+
 /// Redis key prefix for Trap instance heartbeats: `eventide:trap:instances:{id}`.
 pub const TRAP_INSTANCE_KEY_PREFIX: &str = "eventide:trap:instances:";
 
@@ -167,6 +172,44 @@ impl PolicyRedis {
                 .context("redis GET trap api_token")
         })?;
         Ok(raw)
+    }
+
+    /// SET storm JSON + PUBLISH. `None` deletes the key (reset to toml defaults).
+    pub fn publish_storm_config(&self, json: Option<&str>) -> Result<()> {
+        self.with_conn(|conn| {
+            match json {
+                Some(raw) => {
+                    let _: () = conn
+                        .set(STORM_CONFIG_REDIS_KEY, raw)
+                        .context("redis SET storm config")?;
+                    let _: i64 = conn
+                        .publish(STORM_CONFIG_CHANNEL, "changed")
+                        .context("redis PUBLISH storm config")?;
+                }
+                None => {
+                    let _: () = conn
+                        .del(STORM_CONFIG_REDIS_KEY)
+                        .context("redis DEL storm config")?;
+                    let _: i64 = conn
+                        .publish(STORM_CONFIG_CHANNEL, "reset")
+                        .context("redis PUBLISH storm reset")?;
+                }
+            }
+            Ok(())
+        })?;
+        tracing::info!(
+            reset = json.is_none(),
+            "published storm config to redis"
+        );
+        Ok(())
+    }
+
+    pub fn load_storm_config(&self) -> Result<Option<String>> {
+        let raw: Option<String> = self.with_conn(|conn| {
+            conn.get(STORM_CONFIG_REDIS_KEY)
+                .context("redis GET storm config")
+        })?;
+        Ok(raw.filter(|s| !s.is_empty()))
     }
 
     /// SET heartbeat with TTL (seconds). Keepalived VIP HA uses this for console visibility.

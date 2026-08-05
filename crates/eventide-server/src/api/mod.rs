@@ -1010,7 +1010,9 @@ fn sample_ingress_payload(route: &IngressRoute, scenario: &str) -> String {
             "bizname": "demo",
             "bizchainName": name,
             "alertCategory": "business",
-            "areacode": "test"
+            "areacode": "test",
+            "alertIp": "10.0.0.88",
+            "bizPort": 8080
         })
         .to_string(),
         "probe_recover" => serde_json::json!({
@@ -1024,7 +1026,9 @@ fn sample_ingress_payload(route: &IngressRoute, scenario: &str) -> String {
             "bizname": "demo",
             "bizchainName": name,
             "alertCategory": "business",
-            "areacode": "test"
+            "areacode": "test",
+            "alertIp": "10.0.0.88",
+            "bizPort": 8080
         })
         .to_string(),
         _ => serde_json::json!({

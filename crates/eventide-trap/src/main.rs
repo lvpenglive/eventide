@@ -17,8 +17,8 @@ use crate::stats::{RecentBuffer, RecentItem, TrapStats};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use eventide_trap_data::{
-    connect_mysql, ensure_trap_schema, MibStore, PolicyRedis, PolicyStore, S3Store,
-    TrapInstanceHeartbeat, POLICY_CHANGED_CHANNEL, TRAP_API_TOKEN_CHANNEL,
+    connect_mysql, ensure_trap_schema, run_resilient_pubsub, MibStore, PolicyRedis, PolicyStore,
+    S3Store, TrapInstanceHeartbeat, POLICY_CHANGED_CHANNEL, TRAP_API_TOKEN_CHANNEL,
 };
 use std::net::SocketAddr;
 use std::path::Path;
@@ -140,34 +140,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let reload_secs = config.policy_reload_secs.max(1);
-    let pol_bg = policies.clone();
-    let mib_bg = mibs.clone();
-    let redis_bg = policy_redis.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(reload_secs));
-        loop {
-            tick.tick().await;
-            match pol_bg
-                .refresh_prefer_redis(redis_bg.as_deref())
-                .await
-            {
-                Ok(true) => tracing::info!("policies reloaded (redis/mysql)"),
-                Ok(false) => {}
-                Err(e) => tracing::warn!("policy refresh: {e:#}"),
-            }
-            match mib_bg.refresh_if_changed().await {
-                Ok(true) => tracing::info!("MIBs reloaded from MySQL/S3"),
-                Ok(false) => {}
-                Err(e) => tracing::warn!("MIB refresh: {e:#}"),
-            }
-        }
-    });
-
-    if let Some(r) = policy_redis.clone() {
-        spawn_policy_pubsub(r, policies.clone());
-    }
-
     let mut api_token = config.api_token.clone();
     if let Some(r) = policy_redis.as_ref() {
         match r.load_api_token() {
@@ -191,8 +163,53 @@ async fn main() -> Result<()> {
         }
     }
     let api_token = Arc::new(RwLock::new(api_token));
+
+    let reload_secs = config.policy_reload_secs.max(1);
+    let pol_bg = policies.clone();
+    let mib_bg = mibs.clone();
+    let redis_bg = policy_redis.clone();
+    let token_bg = api_token.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(reload_secs));
+        loop {
+            tick.tick().await;
+            match pol_bg
+                .refresh_prefer_redis(redis_bg.as_deref())
+                .await
+            {
+                Ok(true) => tracing::info!("policies reloaded (redis/mysql)"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("policy refresh: {e:#}"),
+            }
+            if let Some(r) = redis_bg.as_ref() {
+                match r.load_api_token() {
+                    Ok(Some(t)) => {
+                        let auth = !t.trim().is_empty();
+                        let changed = token_bg
+                            .read()
+                            .map(|g| g.as_str() != t)
+                            .unwrap_or(true);
+                        if changed {
+                            if let Ok(mut g) = token_bg.write() {
+                                *g = t;
+                            }
+                            tracing::info!(auth, "trap api_token refreshed (poll)");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!(error = %e, "api_token poll skipped"),
+                }
+            }
+            match mib_bg.refresh_if_changed().await {
+                Ok(true) => tracing::info!("MIBs reloaded from MySQL/S3"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("MIB refresh: {e:#}"),
+            }
+        }
+    });
+
     if let Some(r) = policy_redis.clone() {
-        spawn_api_token_pubsub(r, api_token.clone());
+        spawn_change_pubsub(r, policies.clone(), api_token.clone());
     }
 
     let state = Arc::new(AppState {
@@ -269,6 +286,7 @@ fn spawn_instance_heartbeat(
     let ttl = interval_secs.max(1).saturating_mul(3);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
+        let mut fail_streak = 0u32;
         loop {
             tick.tick().await;
             let hb = TrapInstanceHeartbeat {
@@ -281,62 +299,99 @@ fn spawn_instance_heartbeat(
                 parsed_ok: state.stats.parsed_ok.load(Ordering::Relaxed),
                 updated_at: Utc::now().to_rfc3339(),
             };
-            if let Err(e) = redis.beat_instance(&hb, ttl) {
-                tracing::warn!(error = %e, "trap instance heartbeat failed");
+            match redis.beat_instance(&hb, ttl) {
+                Ok(()) => fail_streak = 0,
+                Err(e) => {
+                    fail_streak = fail_streak.saturating_add(1);
+                    if fail_streak == 1 || fail_streak % 12 == 0 {
+                        tracing::warn!(
+                            error = %e,
+                            fail_streak,
+                            "trap instance heartbeat failed"
+                        );
+                    } else {
+                        tracing::debug!(error = %e, fail_streak, "trap instance heartbeat failed");
+                    }
+                }
             }
         }
     });
 }
 
-fn spawn_api_token_pubsub(redis: Arc<PolicyRedis>, api_token: Arc<RwLock<String>>) {
-    let notify = Arc::new(Notify::new());
-    let notify_sub = notify.clone();
+/// One Redis connection for policy + api_token channels (fewer sockets through NAT).
+fn spawn_change_pubsub(
+    redis: Arc<PolicyRedis>,
+    policies: Arc<PolicyStore>,
+    api_token: Arc<RwLock<String>>,
+) {
+    let policy_notify = Arc::new(Notify::new());
+    let token_notify = Arc::new(Notify::new());
+    let policy_ready = policy_notify.clone();
+    let token_ready = token_notify.clone();
     let client = redis.client().clone();
-    std::thread::Builder::new()
-        .name("trap-api-token-pubsub".into())
-        .spawn(move || loop {
-            match client.get_connection() {
-                Ok(mut conn) => {
-                    let mut pubsub = conn.as_pubsub();
-                    if let Err(e) = pubsub.subscribe(TRAP_API_TOKEN_CHANNEL) {
-                        tracing::warn!(error = %e, "api_token pubsub subscribe failed; retry in 5s");
-                        std::thread::sleep(Duration::from_secs(5));
-                        continue;
-                    }
-                    tracing::info!(
-                        channel = TRAP_API_TOKEN_CHANNEL,
-                        "subscribed to api_token changes"
-                    );
-                    loop {
-                        match pubsub.get_message() {
-                            Ok(_msg) => notify_sub.notify_one(),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "api_token pubsub read failed; reconnect");
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "api_token pubsub connect failed; retry in 5s");
-                    std::thread::sleep(Duration::from_secs(5));
-                }
-            }
-        })
-        .expect("spawn api_token pubsub thread");
 
-    let redis_async = redis;
+    std::thread::Builder::new()
+        .name("trap-redis-pubsub".into())
+        .spawn(move || {
+            let channels = [POLICY_CHANGED_CHANNEL, TRAP_API_TOKEN_CHANNEL];
+            run_resilient_pubsub(
+                &client,
+                &channels,
+                || {
+                    policy_ready.notify_one();
+                    token_ready.notify_one();
+                },
+                |ch| {
+                    if ch == POLICY_CHANGED_CHANNEL {
+                        policy_ready.notify_one();
+                    } else if ch == TRAP_API_TOKEN_CHANNEL {
+                        token_ready.notify_one();
+                    } else {
+                        policy_ready.notify_one();
+                        token_ready.notify_one();
+                    }
+                },
+            );
+        })
+        .expect("spawn trap redis pubsub thread");
+
+    let redis_pol = redis.clone();
+    let policies_bg = policies;
     tokio::spawn(async move {
         loop {
-            notify.notified().await;
+            policy_notify.notified().await;
             loop {
                 tokio::select! {
                     biased;
-                    _ = notify.notified() => {}
+                    _ = policy_notify.notified() => {}
                     _ = tokio::time::sleep(Duration::from_millis(80)) => break,
                 }
             }
-            match redis_async.load_api_token() {
+            match policies_bg
+                .reload_prefer_redis(Some(redis_pol.as_ref()))
+                .await
+            {
+                Ok(()) => {
+                    let count = policies_bg.list().await.len();
+                    tracing::info!(count, "policies reloaded via redis pubsub");
+                }
+                Err(e) => tracing::warn!(error = %e, "pubsub policy reload failed"),
+            }
+        }
+    });
+
+    let redis_tok = redis;
+    tokio::spawn(async move {
+        loop {
+            token_notify.notified().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = token_notify.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(80)) => break,
+                }
+            }
+            match redis_tok.load_api_token() {
                 Ok(Some(t)) => {
                     let auth = !t.trim().is_empty();
                     if let Ok(mut g) = api_token.write() {
@@ -351,90 +406,6 @@ fn spawn_api_token_pubsub(redis: Arc<PolicyRedis>, api_token: Arc<RwLock<String>
                     tracing::info!("trap api_token cleared via redis (key missing)");
                 }
                 Err(e) => tracing::warn!(error = %e, "api_token reload failed"),
-            }
-        }
-    });
-}
-
-/// Blocking Redis SUBSCRIBE → Notify → async reload.
-///
-/// Uses a read timeout so idle NAT/firewall drops are detected early; timeouts
-/// alone do **not** force reconnect (connection stays subscribed). Real I/O
-/// errors reconnect with backoff. Requires redis crate `keep-alive` feature.
-fn spawn_policy_pubsub(redis: Arc<PolicyRedis>, policies: Arc<PolicyStore>) {
-    let notify = Arc::new(Notify::new());
-    let notify_sub = notify.clone();
-    let client = redis.client().clone();
-    std::thread::Builder::new()
-        .name("trap-policy-pubsub".into())
-        .spawn(move || {
-            let mut backoff_secs = 1u64;
-            loop {
-                match client.get_connection_with_timeout(Duration::from_secs(5)) {
-                    Ok(mut conn) => {
-                        let _ = conn.set_write_timeout(Some(Duration::from_secs(5)));
-                        let mut pubsub = conn.as_pubsub();
-                        // Idle wait: wake periodically so half-open sockets fail fast.
-                        if let Err(e) = pubsub.set_read_timeout(Some(Duration::from_secs(20))) {
-                            tracing::warn!(error = %e, "policy pubsub set_read_timeout failed");
-                        }
-                        if let Err(e) = pubsub.subscribe(POLICY_CHANGED_CHANNEL) {
-                            tracing::warn!(error = %e, "policy pubsub subscribe failed; retry");
-                            std::thread::sleep(Duration::from_secs(backoff_secs));
-                            backoff_secs = (backoff_secs * 2).min(30);
-                            continue;
-                        }
-                        tracing::info!(channel = POLICY_CHANGED_CHANNEL, "subscribed to policy changes");
-                        backoff_secs = 1;
-                        loop {
-                            match pubsub.get_message() {
-                                Ok(_msg) => notify_sub.notify_one(),
-                                Err(e) if e.is_timeout() => {
-                                    // Still subscribed; keep waiting (TCP keepalive + timeout probe).
-                                    continue;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "policy pubsub disconnected; reconnecting"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, retry_in = backoff_secs, "policy pubsub connect failed");
-                        std::thread::sleep(Duration::from_secs(backoff_secs));
-                        backoff_secs = (backoff_secs * 2).min(30);
-                    }
-                }
-            }
-        })
-        .expect("spawn policy pubsub thread");
-
-    let redis_async = redis;
-    tokio::spawn(async move {
-        loop {
-            notify.notified().await;
-            // Coalesce rapid CRUD bursts.
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = notify.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(80)) => break,
-                }
-            }
-            match policies
-                .reload_prefer_redis(Some(redis_async.as_ref()))
-                .await
-            {
-                Ok(()) => {
-                    let count = policies.list().await.len();
-                    tracing::info!(count, "policies reloaded via redis pubsub");
-                }
-                Err(e) => tracing::warn!(error = %e, "pubsub policy reload failed"),
             }
         }
     });

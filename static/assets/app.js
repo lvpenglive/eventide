@@ -872,11 +872,28 @@ const pages = {
 
   async ingress(root) {
     setActions(`
-      <button class="ghost" id="btn-snmp-sample">SNMP Trap 样例</button>
+      <button class="ghost" id="btn-ingress-help">使用帮助</button>
       <button class="primary" id="btn-add">新建接入</button>
     `);
     document.getElementById("btn-add").onclick = () => editIngress();
-    document.getElementById("btn-snmp-sample").onclick = () => editIngressSnmpTrapSample();
+    document.getElementById("btn-ingress-help").onclick = () => {
+      const el = document.getElementById("ingress-help");
+      if (!el) return;
+      el.open = true;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+    const wireIngressHelpActions = () => {
+      root.querySelectorAll("[data-quick-kind]").forEach((btn) => {
+        btn.onclick = () => {
+          const kind = btn.dataset.quickKind;
+          if (kind === "snmptrap") {
+            editIngressSnmpTrapSample();
+            return;
+          }
+          editIngress(null, { kind });
+        };
+      });
+    };
     const [rows, chs] = await Promise.all([api("/api/ingress"), api("/api/channels")]);
     state.cache.channels = chs;
     const chMap = Object.fromEntries(chs.map((c) => [c.id, c]));
@@ -884,11 +901,12 @@ const pages = {
 
     if (!rows.length) {
       root.innerHTML = `
+        ${ingressHelpHtml(true)}
         <div class="panel guide">
           <h3>配置告警接入</h3>
           <ol class="steps">
             <li>先在「通知渠道」配置至少一个机器人 / Webhook（可选，也可稍后绑定）</li>
-            <li>Kafka / SNMP Trap：可用「SNMP Trap 样例」一键生成；或先到「工具 → Kafka」确认 Topic</li>
+            <li>Kafka / SNMP Trap：可在上方帮助里对各类型点「一键创建」；或先到「工具 → Kafka」确认 Topic</li>
             <li>创建接入：选择 Alertmanager / Generic（含拨测） / Kafka</li>
             <li>把外部平台 Webhook 指到下方生成的地址，或使用「试推送」验证</li>
             <li>在「告警事件」查看 firing / resolved 与通知结果</li>
@@ -896,10 +914,11 @@ const pages = {
           <button class="primary" id="btn-guide-add">新建第一个接入</button>
         </div>`;
       document.getElementById("btn-guide-add").onclick = () => editIngress();
+      wireIngressHelpActions();
       return;
     }
 
-    root.innerHTML = `<div class="ingress-list">${rows
+    root.innerHTML = `${ingressHelpHtml(false)}<div class="ingress-list">${rows
       .map((r) => {
         const url =
           r.kind === "kafka"
@@ -991,6 +1010,7 @@ const pages = {
     root.querySelectorAll("[data-test]").forEach((b) => {
       b.onclick = () => openIngressTest(rows.find((x) => x.id === b.dataset.test));
     });
+    wireIngressHelpActions();
   },
 
   async kafka(root) {
@@ -4739,6 +4759,66 @@ const INGRESS_TYPES = [
     tone: "blue",
   },
 ];
+
+/** Collapsible help for the ingress list page. */
+function ingressHelpHtml(open = false) {
+  return `<details class="map-help ingress-help" id="ingress-help" ${open ? "open" : ""}>
+    <summary>接入类型怎么用（点开查看）</summary>
+    <div class="map-help-body">
+      <p>外部告警进入 Eventide 后，统一走 <b>去重 → 丰富 → 静默 → 通知</b>。按来源选一种接入即可；也可用右侧按钮一键打开新建表单。</p>
+      <table class="map-help-table">
+        <thead><tr><th>类型</th><th>适用场景</th><th>怎么接</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>Alertmanager</b></td>
+            <td>Prometheus / VictoriaMetrics 告警回调</td>
+            <td>
+              在 Alertmanager 配 <code>webhook_configs</code>，URL 用卡片上的
+              <code>/api/ingress/{id}/alertmanager</code>。<br/>
+              请求头：<code>Authorization: Bearer &lt;token&gt;</code>（或 <code>X-Eventide-Token</code>）。
+            </td>
+            <td><button type="button" class="ghost" data-quick-kind="alertmanager">一键创建</button></td>
+          </tr>
+          <tr>
+            <td><b>Generic / 拨测</b></td>
+            <td>自研系统、Jeecg 业务拨测 <code>probe-alert</code></td>
+            <td>
+              <code>POST /api/ingress/{id}/generic</code>（或自动识别的 <code>/push</code>）。<br/>
+              拨测 JSON 需含 <code>eventType</code>=fire/recover、<code>messageId</code>、
+              <code>bizchainName</code>、<code>retMessage</code>；IP 请带 <code>alertIp</code>。<br/>
+              字段对不上时，在编辑里开「自定义字段映射」。
+            </td>
+            <td><button type="button" class="ghost" data-quick-kind="generic">一键创建</button></td>
+          </tr>
+          <tr>
+            <td><b>Kafka</b></td>
+            <td>告警总线、多系统汇聚、Zabbix / 拨测 / Trap 等</td>
+            <td>
+              填 Brokers + Topic +（建议）Group；Eventide 后台消费。<br/>
+              <b>无 map_*</b>：自动识别 Alertmanager / Generic / 拨测 JSON。<br/>
+              <b>有 map_*</b>：按字段映射解析（如 Zabbix）。可用「工具 → Kafka」试写验证。
+            </td>
+            <td><button type="button" class="ghost" data-quick-kind="kafka">一键创建</button></td>
+          </tr>
+          <tr>
+            <td><b>SNMP Trap 样例</b></td>
+            <td>设备 Trap → Trap 服务 → Kafka → 本接入</td>
+            <td>
+              先跑 <code>eventide-trap</code>，写出 Topic（默认 <code>eventide.snmptrap</code>）。<br/>
+              一键建 Kafka 接入（字段已对齐，一般不用映射）。<br/>
+              在「SNMP Trap」页试推送，再到「告警事件」查看。
+            </td>
+            <td><button type="button" class="ghost" data-quick-kind="snmptrap">一键创建</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="margin-top:10px">
+        <b>建议顺序：</b>通知渠道 → 新建接入 → 「试推送」→ 告警事件确认 → 再接真实平台。<br/>
+        Token 仅保护 HTTP 推送；Kafka 接入靠网络与 ACL，不使用接入 Token。
+      </p>
+    </div>
+  </details>`;
+}
 
 function snmpTrapIngressDefaults() {
   const brokers =

@@ -71,6 +71,27 @@ impl AppState {
         }
     }
 
+    /// Push current storm prefs to Redis (or clear on reset) for peer hot-reload.
+    pub fn sync_storm_to_redis(&self, reset: bool) {
+        let Some(redis) = self.policy_redis.as_ref() else {
+            return;
+        };
+        let payload = if reset {
+            None
+        } else {
+            match serde_json::to_string(&self.storm_prefs()) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "serialize storm for redis failed");
+                    return;
+                }
+            }
+        };
+        if let Err(e) = redis.publish_storm_config(payload.as_deref()) {
+            tracing::warn!(error = %e, "failed to publish storm config to redis");
+        }
+    }
+
     pub fn storm_prefs(&self) -> StormConfig {
         self.storm
             .read()

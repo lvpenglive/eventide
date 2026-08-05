@@ -1862,12 +1862,12 @@ textarea.chip-drop-target.is-chip-drag-over {
   display: none;
 }
 .map-help > summary::before {
-  content: "??";
+  content: "▸ ";
   color: var(--muted);
   font-weight: 400;
 }
 .map-help[open] > summary::before {
-  content: "??";
+  content: "▾ ";
 }
 .map-help-body {
   padding: 0 12px 12px;
@@ -1879,6 +1879,25 @@ textarea.chip-drop-target.is-chip-drag-over {
   font-size: 12px;
   color: var(--muted);
   line-height: 1.55;
+}
+.ingress-help {
+  margin-bottom: 16px;
+}
+.ingress-help .map-help-table td {
+  vertical-align: top;
+  line-height: 1.55;
+}
+.ingress-help .map-help-table td:first-child {
+  white-space: nowrap;
+  width: 7.5rem;
+}
+.ingress-help .map-help-table td:last-child {
+  white-space: nowrap;
+  width: 1%;
+  vertical-align: middle;
+}
+.ingress-help .map-help-table button {
+  white-space: nowrap;
 }
 .map-help-table {
   width: 100%;

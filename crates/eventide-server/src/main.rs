@@ -18,6 +18,7 @@ mod scheduler;
 mod state;
 mod trap_proxy;
 mod trap_token;
+mod storm_sync;
 
 use anyhow::Context;
 use axum::Router;
@@ -222,6 +223,13 @@ async fn main() -> anyhow::Result<()> {
     // Seed Redis snapshot so Trap instances can boot without waiting for a CRUD.
     state.sync_policies_to_redis().await;
     state.sync_trap_api_token_to_redis();
+    // Seed storm override (or clear) so peers / late joiners see the same prefs.
+    {
+        use crate::state::STORM_CONFIG_KEY;
+        let reset = !matches!(state.db.get_kv(STORM_CONFIG_KEY), Ok(Some(_)));
+        state.sync_storm_to_redis(reset);
+    }
+    crate::storm_sync::spawn_storm_config_pubsub(state.clone());
     crate::notify_pipeline::spawn_notify_workers(state.clone(), notify_rx);
 
     spawn_scheduler(state.clone());
