@@ -316,8 +316,24 @@ async function tryBoot() {
   }
 }
 
+/** Drop credentials that leaked into the address bar (form GET fallback). */
+function scrubLoginQueryFromUrl() {
+  try {
+    const q = new URLSearchParams(location.search);
+    if (!q.has("username") && !q.has("password")) return;
+    q.delete("username");
+    q.delete("password");
+    const rest = q.toString();
+    const next = `${location.pathname}${rest ? `?${rest}` : ""}${location.hash || ""}`;
+    history.replaceState(null, "", next);
+  } catch (_) {}
+}
+scrubLoginQueryFromUrl();
+
 document.getElementById("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  e.stopPropagation();
+  scrubLoginQueryFromUrl();
   const err = document.getElementById("login-error");
   err.textContent = "";
   const username = document.getElementById("username").value.trim();
