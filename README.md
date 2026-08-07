@@ -9,7 +9,7 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
 
 两条路径汇入同一套 **告警标识去重 → 告警丰富（台账补字段）→ 静默 → 多通道通知** 流水线。
 
-> License: MIT。参考 WatchAlert 的产品划分，代码为独立实现（WatchAlert 为 AGPL，请勿直接复制其源码）。
+> License: MIT。参考 同类产品 的产品划分，代码为独立实现（同类产品 为 AGPL，请勿直接复制其源码）。
 
 ---
 
@@ -36,6 +36,7 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
   - [14.1 CI 多平台打包](#141-ci-多平台打包)
   - [14.2 控制台前端演进](#142-控制台前端演进)
   - [14.3 本地调试日志](#143-本地调试日志)
+  - [14.4 控制台 E2E](#144-控制台-e2e)
 
 ---
 
@@ -96,9 +97,9 @@ Eventide 定位为 **团队级告警中枢**：
 - 登录态：`localStorage` 存 JWT  
 - 演进计划见 [§14.2](#142-控制台前端演进)（先体验与模块化，有信号再上 Vue/React）
 
-### 2.4 与 WatchAlert 的差异（技术视角）
+### 2.4 与 同类产品 的差异（技术视角）
 
-| | WatchAlert | Eventide |
+| | 同类产品 | Eventide |
 |--|------------|----------|
 | 语言 | Go | Rust |
 | 存储 | MySQL | MySQL |
@@ -380,7 +381,7 @@ Ingress HTTP 接口可用：
 - `Authorization: Bearer <token>`  
 - 或 `X-Eventide-Token: <token>`  
 
-（对应路由上配置的 `token`；为空则不校验。）
+（对应路由上配置的 `token`；**HTTP 接入创建/更新时 Token 必填，至少 8 字符；未配置则推送返回 401。Kafka 接入不使用 Token。）
 
 ### 8.2 需登录接口
 
@@ -498,6 +499,13 @@ username = "admin"
 password = "admin123"
 jwt_secret = "eventide-dev-secret-change-me"
 token_ttl_hours = 24
+# 登录防爆破（按 IP + 用户名分别计数；默认 15 分钟内失败 5 次锁定 5 分钟）
+login_max_failures = 5
+login_window_seconds = 900
+login_lockout_seconds = 300
+# 密码过期提醒（天）；0 = 关闭
+password_max_age_days = 90
+password_warn_days = 14
 
 # 抗风暴见 §11.8；完整字段见仓库内 eventide.toml 示例
 # [storm]
@@ -893,15 +901,15 @@ degrade_notify_per_sec = 50    # 通知尝试速率阈值（配合 degrade）
 
 ### 安全注意
 
-- 修改默认 `password` / `jwt_secret`  
-- Ingress `token` 不要留空暴露到公网  
+- 修改默认 `password` / `jwt_secret`；可调 `[auth] login_max_failures` / `login_window_seconds` / `login_lockout_seconds` 防爆破  
+- HTTP Ingress **必须**配置 `token`（≥8 字符）；Kafka 靠网络与 ACL  
 - 控制台与 API 建议置于内网或反向代理 TLS 之后  
 
 ---
 
 ## 13. 路线图
 
-已完成（相对 WatchAlert 精简对齐）：
+已完成（相对 同类产品 精简对齐）：
 
 - [x] Prometheus / VictoriaMetrics 拉数评估  
 - [x] Kafka / Log 数据源  
@@ -1313,6 +1321,23 @@ cargo run -p eventide-server -- eventide.toml
 ```
 
 核心单测集中在 `eventide-core`（比较符、`for` 状态机、告警标识、Ingress 解析与字段映射、模板截取、告警丰富）。
+
+### 14.4 控制台 E2E
+
+依赖本机已启动的 Eventide（默认 `http://127.0.0.1:8080`）与 Playwright：
+
+```powershell
+pip install playwright
+python -m playwright install chromium
+
+$env:EVENTIDE_USER="admin"
+$env:EVENTIDE_PASS="admin123"
+python scripts/e2e_console.py
+```
+
+覆盖：错误/正确登录、URL 不泄露密码、侧栏各页加载、接入帮助与一键创建、试推送弹窗、告警/设置页、退出登录。失败时截图写入 `docs/e2e-artifacts/`（可用 `EVENTIDE_E2E_ARTIFACTS=0` 关闭）。
+
+相关脚本：`scripts/capture_console_screenshots.py`（手册配图采集）。
 
 ---
 

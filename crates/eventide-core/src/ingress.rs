@@ -52,11 +52,22 @@ pub fn apply_ingress(
                     ends_at: Some(incoming.ends_at.unwrap_or(now)),
                     pending_since: None,
                     last_evaluated_at: now,
+                    tally: 1,
+                    last_occurrence_at: now,
                     notified_firing: false,
                     notified_resolved: false,
+                    acknowledged_at: None,
+                    acknowledged_by: None,
+                    assignee: None,
+                    ack_comment: None,
+                    closed_at: None,
+                    closed_by: None,
+                    close_comment: None,
+                    escalated_at: None,
                 };
                 (event, AlertTransition::Unchanged)
             } else {
+                let starts = incoming.starts_at.unwrap_or(now);
                 let event = AlertEvent {
                     id: Uuid::new_v4(),
                     rule_id: route.id,
@@ -66,12 +77,22 @@ pub fn apply_ingress(
                     labels,
                     annotations: incoming.annotations.clone(),
                     value: incoming.value,
-                    starts_at: incoming.starts_at.unwrap_or(now),
+                    starts_at: starts,
                     ends_at: None,
                     pending_since: None,
                     last_evaluated_at: now,
+                    tally: 1,
+                    last_occurrence_at: starts,
                     notified_firing: false,
                     notified_resolved: false,
+                    acknowledged_at: None,
+                    acknowledged_by: None,
+                    assignee: None,
+                    ack_comment: None,
+                    closed_at: None,
+                    closed_by: None,
+                    close_comment: None,
+                    escalated_at: None,
                 };
                 (event, AlertTransition::BecameFiring)
             }
@@ -89,6 +110,7 @@ pub fn apply_ingress(
                 | (AlertStatus::Pending, AlertStatus::Firing) => {
                     event.status = AlertStatus::Firing;
                     event.ends_at = None;
+                    event.bump_occurrence(now);
                     AlertTransition::Unchanged
                 }
                 (AlertStatus::Resolved, AlertStatus::Firing) => {
@@ -97,6 +119,10 @@ pub fn apply_ingress(
                     event.ends_at = None;
                     event.notified_firing = false;
                     event.notified_resolved = false;
+                    event.clear_ack();
+                    event.clear_close();
+                    event.clear_escalation();
+                    event.reset_occurrence(now);
                     AlertTransition::BecameFiring
                 }
                 (AlertStatus::Firing, AlertStatus::Resolved)
@@ -802,6 +828,9 @@ mod tests {
             endpoint: String::new(),
             options: BTreeMap::new(),
             channel_ids: vec![],
+            escalate_after_seconds: 0,
+            escalate_severity: None,
+            escalate_channel_ids: vec![],
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -826,6 +855,48 @@ mod tests {
         assert_eq!(ev.status, AlertStatus::Firing);
         assert_eq!(t, AlertTransition::BecameFiring);
         assert!(ev.fingerprint.contains("fp1"));
+        assert_eq!(ev.tally, 1);
+    }
+
+    #[test]
+    fn ingress_tally_bumps_and_resets() {
+        let r = route();
+        let mut labels = BTreeMap::new();
+        labels.insert("alertname".into(), "HighCPU".into());
+        let firing = IngressAlert {
+            status: AlertStatus::Firing,
+            fingerprint: Some("fp1".into()),
+            labels: labels.clone(),
+            annotations: BTreeMap::new(),
+            severity: Severity::Warning,
+            value: None,
+            starts_at: None,
+            ends_at: None,
+        };
+        let t0 = Utc::now();
+        let (e1, _) = apply_ingress(&r, &firing, None, t0);
+        assert_eq!(e1.tally, 1);
+        let t1 = t0 + chrono::Duration::seconds(3);
+        let (e2, tr) = apply_ingress(&r, &firing, Some(e1), t1);
+        assert_eq!(tr, AlertTransition::Unchanged);
+        assert_eq!(e2.tally, 2);
+        assert_eq!(e2.last_occurrence_at, t1);
+
+        let resolved = IngressAlert {
+            status: AlertStatus::Resolved,
+            fingerprint: Some("fp1".into()),
+            labels: labels.clone(),
+            annotations: BTreeMap::new(),
+            severity: Severity::Warning,
+            value: None,
+            starts_at: None,
+            ends_at: None,
+        };
+        let (er, _) = apply_ingress(&r, &resolved, Some(e2), t1);
+        let t2 = t1 + chrono::Duration::seconds(2);
+        let (again, tr2) = apply_ingress(&r, &firing, Some(er), t2);
+        assert_eq!(tr2, AlertTransition::BecameFiring);
+        assert_eq!(again.tally, 1);
     }
 
     #[test]

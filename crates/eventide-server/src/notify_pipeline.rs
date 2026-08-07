@@ -153,9 +153,13 @@ async fn persist_and_notify_inner(
     enrich_alert(&mut event, Some(&rule.name), &enrich_rules, &lookups);
 
     let silences = state.db.active_silences(now)?;
+    let windows = state.db.active_maintenance_windows(now)?;
     let silenced = silences
         .iter()
-        .any(|s| s.matches(rule.id, &event.labels, now));
+        .any(|s| s.matches(rule.id, &event.labels, now))
+        || windows
+            .iter()
+            .any(|w| w.matches(rule.id, &event.labels, now));
 
     let should_notify = match transition {
         AlertTransition::BecameFiring if !event.notified_firing && !silenced => true,
@@ -194,7 +198,7 @@ async fn persist_and_notify_inner(
         match transition {
             AlertTransition::BecameFiring => event.notified_firing = true,
             AlertTransition::BecameResolved => event.notified_resolved = true,
-            AlertTransition::Unchanged => {}
+            AlertTransition::Escalated | AlertTransition::Unchanged => {}
         }
         state.db.upsert_alert(&event)?;
         maybe_index_alert(state, &event);
@@ -334,7 +338,7 @@ async fn run_channel_notifies(
     match transition {
         AlertTransition::BecameFiring => event.notified_firing = true,
         AlertTransition::BecameResolved => event.notified_resolved = true,
-        AlertTransition::Unchanged => {}
+        AlertTransition::Escalated | AlertTransition::Unchanged => {}
     }
     Ok(())
 }
@@ -500,8 +504,108 @@ pub fn synthetic_rule_for_ingress(route: &IngressRoute, event: &AlertEvent) -> R
         labels: BTreeMap::new(),
         annotations: BTreeMap::new(),
         channel_ids: route.channel_ids.clone(),
+        escalate_after_seconds: route.escalate_after_seconds,
+        escalate_severity: route.escalate_severity,
+        escalate_channel_ids: route.escalate_channel_ids.clone(),
         enabled: true,
         created_at: route.created_at,
         updated_at: route.updated_at,
     }
+}
+
+/// Resolve notify context for an existing alert (rule eval or ingress route).
+pub fn rule_context_for_alert(
+    state: &AppState,
+    event: &AlertEvent,
+) -> anyhow::Result<(Rule, Vec<Uuid>)> {
+    if let Some(rule) = state.db.get_rule(event.rule_id)? {
+        let channels = rule.channel_ids.clone();
+        return Ok((rule, channels));
+    }
+    if let Some(route) = state.db.get_ingress_route(event.rule_id)? {
+        let channels = route.channel_ids.clone();
+        let rule = synthetic_rule_for_ingress(&route, event);
+        return Ok((rule, channels));
+    }
+    // Orphan alert: persist close without channels.
+    let name = event
+        .labels
+        .get("alertname")
+        .cloned()
+        .unwrap_or_else(|| "alert".into());
+    let now = Utc::now();
+    let rule = Rule {
+        id: event.rule_id,
+        name,
+        datasource_id: Uuid::nil(),
+        expr: "manual-close".into(),
+        comparator: Comparator::Gt,
+        threshold: 0.0,
+        for_seconds: 0,
+        interval_seconds: 0,
+        severity: event.severity,
+        labels: BTreeMap::new(),
+        annotations: BTreeMap::new(),
+        channel_ids: vec![],
+        escalate_after_seconds: 0,
+        escalate_severity: None,
+        escalate_channel_ids: vec![],
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+    };
+    Ok((rule, vec![]))
+}
+
+/// Send unacked-timeout escalation notify. Does not touch `notified_firing` / `notified_resolved`.
+pub async fn escalate_alert_notify(
+    state: &Arc<AppState>,
+    mut event: AlertEvent,
+    rule: &Rule,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    if event.is_acknowledged() || event.escalated_at.is_some() || event.status != AlertStatus::Firing
+    {
+        return Ok(());
+    }
+    if rule.escalate_after_seconds == 0 {
+        return Ok(());
+    }
+    let age = (now - event.starts_at).num_seconds().max(0) as u64;
+    if age < rule.escalate_after_seconds {
+        return Ok(());
+    }
+
+    let silences = state.db.active_silences(now)?;
+    let windows = state.db.active_maintenance_windows(now)?;
+    let suppressed = silences
+        .iter()
+        .any(|s| s.matches(rule.id, &event.labels, now))
+        || windows
+            .iter()
+            .any(|w| w.matches(rule.id, &event.labels, now));
+    if suppressed {
+        return Ok(());
+    }
+
+    if let Some(sev) = rule.escalate_severity {
+        if sev.as_u8() > event.severity.as_u8() {
+            event.severity = sev;
+        }
+    }
+
+    let channels = rule.escalate_notify_channels().to_vec();
+    if channels.is_empty() {
+        event.escalated_at = Some(now);
+        state.db.upsert_alert(&event)?;
+        maybe_index_alert(state, &event);
+        return Ok(());
+    }
+
+    let transition = AlertTransition::Escalated;
+    run_channel_notifies(state, rule, &channels, &mut event, transition, now).await?;
+    event.escalated_at = Some(now);
+    state.db.upsert_alert(&event)?;
+    maybe_index_alert(state, &event);
+    Ok(())
 }

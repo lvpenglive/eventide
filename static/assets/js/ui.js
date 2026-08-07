@@ -142,6 +142,74 @@ function fmtTime(s) {
   }
 }
 
+function passwordToggleSvgs() {
+  return `<svg class="eye-open" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>
+    <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden>
+      <path d="M2 12s3.5-7 10-7c2.1 0 3.9.6 5.4 1.5"/>
+      <path d="M22 12s-3.5 7-10 7c-2.1 0-3.9-.6-5.4-1.5"/>
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+      <path d="M3 3l18 18"/>
+      <path d="M14.1 9.9 9.9 14.1"/>
+    </svg>`;
+}
+
+/** Password input + eye toggle. Pass extra attrs like `required minlength="8"`. */
+function passwordFieldHtml({
+  name = "password",
+  attrs = "",
+  value = "",
+  hint = "",
+} = {}) {
+  const valAttr = value ? ` value="${esc(value)}"` : "";
+  const hintHtml =
+    hint === false
+      ? ""
+      : hint
+        ? `<div class="hint">${hint}</div>`
+        : `<div class="hint">至少 8 位，须含大写、小写、数字与特殊字符</div>`;
+  return `<div class="password-field">
+    <input name="${esc(name)}" type="password"${valAttr} ${attrs} />
+    <button type="button" class="password-toggle" data-pw-toggle aria-pressed="false" aria-label="显示密码" title="显示密码">
+      ${passwordToggleSvgs()}
+    </button>
+  </div>${hintHtml}`;
+}
+
+/** Returns error message, or null if ok. Empty string is ok (caller decides required). */
+function validatePasswordComplexity(password) {
+  if (!password) return null;
+  if ([...password].length < 8) return "密码至少 8 位";
+  if (!/[a-z]/.test(password)) return "密码须包含小写字母";
+  if (!/[A-Z]/.test(password)) return "密码须包含大写字母";
+  if (!/[0-9]/.test(password)) return "密码须包含数字";
+  if (!/[^A-Za-z0-9]/.test(password)) return "密码须包含特殊字符（如 !@#$%）";
+  return null;
+}
+
+function bindPasswordToggles(root = document) {
+  root.querySelectorAll("[data-pw-toggle]").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const input = btn.closest(".password-field")?.querySelector("input");
+      if (!input) return;
+      const show = input.type === "password";
+      input.type = show ? "text" : "password";
+      btn.setAttribute("aria-pressed", show ? "true" : "false");
+      const label = show ? "隐藏密码" : "显示密码";
+      btn.setAttribute("aria-label", label);
+      btn.title = label;
+      const open = btn.querySelector(".eye-open");
+      const off = btn.querySelector(".eye-off");
+      if (open) open.hidden = show;
+      if (off) off.hidden = !show;
+    });
+  });
+}
+
 export {
   SEVERITIES,
   severityOptions,
@@ -153,6 +221,9 @@ export {
   esc,
   cmpLabel,
   fmtTime,
+  passwordFieldHtml,
+  bindPasswordToggles,
+  validatePasswordComplexity,
 };
 
 /** Modal helpers — call after DOM ready */

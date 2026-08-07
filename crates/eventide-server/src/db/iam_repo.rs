@@ -193,7 +193,7 @@ impl Db {
         let mut conn = self.conn()?;
         let rows: Vec<Row> = conn.query(
             "SELECT id, username, display_name, password_hash, department_id, role_ids_json,
-                    enabled, created_at, updated_at
+                    enabled, created_at, updated_at, password_changed_at
              FROM users ORDER BY username",
         )?;
         rows.iter().map(map_user).collect()
@@ -203,7 +203,7 @@ impl Db {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
             "SELECT id, username, display_name, password_hash, department_id, role_ids_json,
-                    enabled, created_at, updated_at
+                    enabled, created_at, updated_at, password_changed_at
              FROM users WHERE id=?",
             positional(vec![Value::from(id.to_string())]),
         )?;
@@ -214,7 +214,7 @@ impl Db {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
             "SELECT id, username, display_name, password_hash, department_id, role_ids_json,
-                    enabled, created_at, updated_at
+                    enabled, created_at, updated_at, password_changed_at
              FROM users WHERE username=?",
             positional(vec![Value::from(username)]),
         )?;
@@ -225,13 +225,14 @@ impl Db {
         let mut conn = self.conn()?;
         conn.exec_drop(
             "INSERT INTO users (id, username, display_name, password_hash, department_id,
-                                role_ids_json, enabled, created_at, updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?)
+                                role_ids_json, enabled, created_at, updated_at, password_changed_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE
                username=VALUES(username), display_name=VALUES(display_name),
                password_hash=VALUES(password_hash), department_id=VALUES(department_id),
                role_ids_json=VALUES(role_ids_json), enabled=VALUES(enabled),
-               updated_at=VALUES(updated_at)",
+               updated_at=VALUES(updated_at),
+               password_changed_at=VALUES(password_changed_at)",
             positional(vec![
                 Value::from(u.id.to_string()),
                 Value::from(u.username.as_str()),
@@ -247,6 +248,7 @@ impl Db {
                 Value::from(u.enabled as i64),
                 Value::from(fmt_dt(u.created_at)),
                 Value::from(fmt_dt(u.updated_at)),
+                Value::from(fmt_dt(u.password_changed_at)),
             ]),
         )?;
         Ok(())
@@ -335,6 +337,13 @@ fn map_user(row: &Row) -> Result<UserAccount> {
     let roles_json = col_str(row, 5)?;
     let created = col_str(row, 7)?;
     let updated = col_str(row, 8)?;
+    let created_at = parse_dt(&created).unwrap_or_else(|_| Utc::now());
+    let updated_at = parse_dt(&updated).unwrap_or_else(|_| Utc::now());
+    let password_changed_at = col_str_opt(row, 9)
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| parse_dt(s).ok())
+        .unwrap_or(created_at);
     let role_ids = uuid_ids_from_json(&roles_json).unwrap_or_default();
     Ok(UserAccount {
         id: col_uuid(row, 0)?,
@@ -349,7 +358,8 @@ fn map_user(row: &Row) -> Result<UserAccount> {
             .map_err(|e| anyhow!(e))?,
         role_ids,
         enabled: col_i64(row, 6) != 0,
-        created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
-        updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
+        created_at,
+        updated_at,
+        password_changed_at,
     })
 }

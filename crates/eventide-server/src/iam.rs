@@ -38,6 +38,16 @@ pub const PERMISSION_CATALOG: &[PermDef] = &[
         group: "运营",
     },
     PermDef {
+        code: "maintenance:read",
+        label: "查看维护窗",
+        group: "运营",
+    },
+    PermDef {
+        code: "maintenance:write",
+        label: "管理维护窗",
+        group: "运营",
+    },
+    PermDef {
         code: "datasources:read",
         label: "查看数据源",
         group: "接入",
@@ -128,6 +138,11 @@ pub const PERMISSION_CATALOG: &[PermDef] = &[
         group: "系统",
     },
     PermDef {
+        code: "audit:read",
+        label: "查看操作审计",
+        group: "系统",
+    },
+    PermDef {
         code: "trap:read",
         label: "查看 SNMP Trap",
         group: "接入",
@@ -162,7 +177,7 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
     let m = method.to_uppercase();
     let write = matches!(m.as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
 
-    if path == "/api/auth/me" {
+    if path == "/api/auth/me" || path == "/api/auth/change-password" {
         return None;
     }
     if path == "/api/permissions" {
@@ -194,6 +209,13 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
             "silences:read"
         });
     }
+    if path.starts_with("/api/maintenance-windows") {
+        return Some(if write {
+            "maintenance:write"
+        } else {
+            "maintenance:read"
+        });
+    }
     if path.starts_with("/api/datasources") {
         return Some(if write {
             "datasources:write"
@@ -220,6 +242,9 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
     }
     if path.starts_with("/api/notifies") {
         return Some("channels:read");
+    }
+    if path.starts_with("/api/audit-logs") {
+        return Some("audit:read");
     }
     if path.starts_with("/api/enrich") || path.starts_with("/api/lookups") {
         return Some(if write { "enrich:write" } else { "enrich:read" });
@@ -280,6 +305,8 @@ pub struct UserAccount {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Last time the password was set/changed (for expiry reminders).
+    pub password_changed_at: DateTime<Utc>,
 }
 
 impl UserAccount {
@@ -293,6 +320,7 @@ impl UserAccount {
             "enabled": self.enabled,
             "created_at": self.created_at.to_rfc3339(),
             "updated_at": self.updated_at.to_rfc3339(),
+            "password_changed_at": self.password_changed_at.to_rfc3339(),
         })
     }
 }

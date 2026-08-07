@@ -6,6 +6,7 @@ use crate::db::Db;
 use crate::elasticsearch::EsClient;
 use crate::leader::LeaderElection;
 use crate::license::LicenseGate;
+use crate::login_limit::LoginLimiter;
 use crate::notify_pipeline::NotifyQueue;
 use eventide_core::{IngressPressure, RedisAggregateBuffer, RedisThrottleGate};
 use eventide_notify::Notifier;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub trap_api_token: Arc<RwLock<String>>,
     /// Product license / trial gate.
     pub license: Arc<LicenseGate>,
+    /// Brute-force protection for `/api/auth/login`.
+    pub login_limiter: LoginLimiter,
 }
 
 impl AppState {

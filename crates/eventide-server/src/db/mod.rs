@@ -70,6 +70,9 @@ impl Db {
     labels_json MEDIUMTEXT NOT NULL,
     annotations_json MEDIUMTEXT NOT NULL,
     channel_ids_json MEDIUMTEXT NOT NULL,
+    escalate_after_seconds INT NOT NULL DEFAULT 0,
+    escalate_severity VARCHAR(32) NULL,
+    escalate_channel_ids_json MEDIUMTEXT NULL,
     enabled TINYINT NOT NULL DEFAULT 1,
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL,
@@ -90,8 +93,18 @@ impl Db {
     ends_at VARCHAR(64) NULL,
     pending_since VARCHAR(64) NULL,
     last_evaluated_at VARCHAR(64) NOT NULL,
+    tally INT UNSIGNED NOT NULL DEFAULT 1,
+    last_occurrence_at VARCHAR(64) NOT NULL,
     notified_firing TINYINT NOT NULL DEFAULT 0,
     notified_resolved TINYINT NOT NULL DEFAULT 0,
+    acknowledged_at VARCHAR(64) NULL,
+    acknowledged_by VARCHAR(255) NULL,
+    assignee VARCHAR(255) NULL,
+    ack_comment TEXT NULL,
+    closed_at VARCHAR(64) NULL,
+    closed_by VARCHAR(255) NULL,
+    close_comment TEXT NULL,
+    escalated_at VARCHAR(64) NULL,
     UNIQUE KEY uk_alert_fp (fingerprint),
     KEY idx_alert_status (status),
     KEY idx_alert_rule (rule_id)
@@ -104,6 +117,18 @@ impl Db {
     ends_at VARCHAR(64) NOT NULL,
     comment TEXT NOT NULL,
     created_at VARCHAR(64) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+            r#"CREATE TABLE IF NOT EXISTS maintenance_windows (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    comment TEXT NOT NULL,
+    rule_id CHAR(36) NULL,
+    matchers_json MEDIUMTEXT NOT NULL,
+    starts_at VARCHAR(64) NOT NULL,
+    ends_at VARCHAR(64) NOT NULL,
+    enabled TINYINT NOT NULL DEFAULT 1,
+    created_at VARCHAR(64) NOT NULL,
+    updated_at VARCHAR(64) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
             r#"CREATE TABLE IF NOT EXISTS notify_logs (
     id CHAR(36) PRIMARY KEY,
@@ -118,6 +143,24 @@ impl Db {
     KEY idx_notify_logs_channel (channel_id),
     KEY idx_notify_logs_alert (alert_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+            r#"CREATE TABLE IF NOT EXISTS audit_logs (
+    id CHAR(36) PRIMARY KEY,
+    created_at VARCHAR(64) NOT NULL,
+    actor_username VARCHAR(128) NOT NULL,
+    actor_uid CHAR(36) NULL,
+    action VARCHAR(64) NOT NULL,
+    resource_type VARCHAR(64) NOT NULL,
+    resource_id VARCHAR(128) NULL,
+    method VARCHAR(16) NOT NULL,
+    path VARCHAR(512) NOT NULL,
+    status_code INT NOT NULL,
+    detail_json MEDIUMTEXT NULL,
+    client_ip VARCHAR(64) NULL,
+    KEY idx_audit_created (created_at),
+    KEY idx_audit_actor (actor_username),
+    KEY idx_audit_action (action),
+    KEY idx_audit_resource (resource_type, resource_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
             r#"CREATE TABLE IF NOT EXISTS ingress_routes (
     id CHAR(36) PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -126,6 +169,9 @@ impl Db {
     endpoint TEXT NOT NULL,
     options_json MEDIUMTEXT NOT NULL,
     channel_ids_json MEDIUMTEXT NOT NULL,
+    escalate_after_seconds INT NOT NULL DEFAULT 0,
+    escalate_severity VARCHAR(32) NULL,
+    escalate_channel_ids_json MEDIUMTEXT NULL,
     enabled TINYINT NOT NULL DEFAULT 1,
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL
@@ -195,6 +241,7 @@ impl Db {
     enabled TINYINT NOT NULL DEFAULT 1,
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL,
+    password_changed_at VARCHAR(64) NULL,
     UNIQUE KEY uk_users_username (username),
     KEY idx_users_dept (department_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
@@ -250,8 +297,136 @@ impl Db {
             "ALTER TABLE alert_events MODIFY fingerprint VARCHAR(768) NOT NULL",
         )
         .with_context(|| "migrate: widen alert_events.fingerprint")?;
+        // v16: password expiry tracking
+        match conn.query_drop(
+            "ALTER TABLE users ADD COLUMN password_changed_at VARCHAR(64) NULL",
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("Duplicate column") && !msg.contains("1060") {
+                    return Err(e).context("migrate: add users.password_changed_at");
+                }
+            }
+        }
+        conn.query_drop(
+            "UPDATE users SET password_changed_at = COALESCE(NULLIF(password_changed_at, ''), created_at, updated_at)
+             WHERE password_changed_at IS NULL OR password_changed_at = ''",
+        )
+        .with_context(|| "migrate: backfill users.password_changed_at")?;
+        // v17: alert acknowledge / take-ownership
+        for col_sql in [
+            "ALTER TABLE alert_events ADD COLUMN acknowledged_at VARCHAR(64) NULL",
+            "ALTER TABLE alert_events ADD COLUMN acknowledged_by VARCHAR(255) NULL",
+            "ALTER TABLE alert_events ADD COLUMN assignee VARCHAR(255) NULL",
+            "ALTER TABLE alert_events ADD COLUMN ack_comment TEXT NULL",
+        ] {
+            match conn.query_drop(col_sql) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("Duplicate column") && !msg.contains("1060") {
+                        return Err(e).context(format!("migrate: {col_sql}"));
+                    }
+                }
+            }
+        }
+        // v18: manual close (force resolve)
+        for col_sql in [
+            "ALTER TABLE alert_events ADD COLUMN closed_at VARCHAR(64) NULL",
+            "ALTER TABLE alert_events ADD COLUMN closed_by VARCHAR(255) NULL",
+            "ALTER TABLE alert_events ADD COLUMN close_comment TEXT NULL",
+        ] {
+            match conn.query_drop(col_sql) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("Duplicate column") && !msg.contains("1060") {
+                        return Err(e).context(format!("migrate: {col_sql}"));
+                    }
+                }
+            }
+        }
+        // v19: Netcool-style tally + last occurrence
+        for col_sql in [
+            "ALTER TABLE alert_events ADD COLUMN tally INT UNSIGNED NOT NULL DEFAULT 1",
+            "ALTER TABLE alert_events ADD COLUMN last_occurrence_at VARCHAR(64) NULL",
+        ] {
+            match conn.query_drop(col_sql) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("Duplicate column") && !msg.contains("1060") {
+                        return Err(e).context(format!("migrate: {col_sql}"));
+                    }
+                }
+            }
+        }
+        conn.query_drop(
+            "UPDATE alert_events SET last_occurrence_at = COALESCE(NULLIF(last_occurrence_at, ''), starts_at)
+             WHERE last_occurrence_at IS NULL OR last_occurrence_at = ''",
+        )
+        .with_context(|| "migrate: backfill alert_events.last_occurrence_at")?;
+        // v20: maintenance windows
+        conn.query_drop(
+            r#"CREATE TABLE IF NOT EXISTS maintenance_windows (
+    id CHAR(36) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    comment TEXT NOT NULL,
+    rule_id CHAR(36) NULL,
+    matchers_json MEDIUMTEXT NOT NULL,
+    starts_at VARCHAR(64) NOT NULL,
+    ends_at VARCHAR(64) NOT NULL,
+    enabled TINYINT NOT NULL DEFAULT 1,
+    created_at VARCHAR(64) NOT NULL,
+    updated_at VARCHAR(64) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+        )
+        .with_context(|| "migrate: create maintenance_windows")?;
+        // v21: unacked timeout escalation
+        for col_sql in [
+            "ALTER TABLE alert_events ADD COLUMN escalated_at VARCHAR(64) NULL",
+            "ALTER TABLE rules ADD COLUMN escalate_after_seconds INT NOT NULL DEFAULT 0",
+            "ALTER TABLE rules ADD COLUMN escalate_severity VARCHAR(32) NULL",
+            "ALTER TABLE rules ADD COLUMN escalate_channel_ids_json MEDIUMTEXT NULL",
+            "ALTER TABLE ingress_routes ADD COLUMN escalate_after_seconds INT NOT NULL DEFAULT 0",
+            "ALTER TABLE ingress_routes ADD COLUMN escalate_severity VARCHAR(32) NULL",
+            "ALTER TABLE ingress_routes ADD COLUMN escalate_channel_ids_json MEDIUMTEXT NULL",
+        ] {
+            match conn.query_drop(col_sql) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("Duplicate column") && !msg.contains("1060") {
+                        return Err(e).context(format!("migrate: {col_sql}"));
+                    }
+                }
+            }
+        }
+        // v22: operation audit logs
+        conn.query_drop(
+            r#"CREATE TABLE IF NOT EXISTS audit_logs (
+    id CHAR(36) PRIMARY KEY,
+    created_at VARCHAR(64) NOT NULL,
+    actor_username VARCHAR(128) NOT NULL,
+    actor_uid CHAR(36) NULL,
+    action VARCHAR(64) NOT NULL,
+    resource_type VARCHAR(64) NOT NULL,
+    resource_id VARCHAR(128) NULL,
+    method VARCHAR(16) NOT NULL,
+    path VARCHAR(512) NOT NULL,
+    status_code INT NOT NULL,
+    detail_json MEDIUMTEXT NULL,
+    client_ip VARCHAR(64) NULL,
+    KEY idx_audit_created (created_at),
+    KEY idx_audit_actor (actor_username),
+    KEY idx_audit_action (action),
+    KEY idx_audit_resource (resource_type, resource_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
+        )
+        .with_context(|| "migrate: create audit_logs")?;
         conn.exec_drop(
-            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '15')
+            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '22')
                ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)"#,
             (),
         )?;
@@ -309,6 +484,7 @@ impl Db {
             enabled: true,
             created_at: now,
             updated_at: now,
+            password_changed_at: now,
         })?;
 
         tracing::info!("seeded IAM admin user '{username}' with system role admin");

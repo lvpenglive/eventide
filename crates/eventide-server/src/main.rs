@@ -2,6 +2,7 @@
 
 mod api;
 mod alert_history;
+mod audit;
 mod auth;
 mod config;
 mod db;
@@ -12,9 +13,11 @@ mod kafka_ingress;
 mod kafka_groups;
 mod leader;
 mod license;
+mod login_limit;
 mod notify_pipeline;
 mod password;
 mod scheduler;
+mod escalation;
 mod state;
 mod trap_proxy;
 mod trap_token;
@@ -31,8 +34,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{AppConfig, TrapProxyConfig};
 use crate::db::Db;
+use crate::login_limit::{LoginLimitConfig, LoginLimiter};
 use crate::scheduler::spawn_scheduler;
 use crate::state::AppState;
+use std::time::Duration;
 use eventide_trap_data::{MibStore, PolicyRedis, PolicyStore, S3Store};
 
 #[tokio::main]
@@ -201,6 +206,36 @@ async fn main() -> anyhow::Result<()> {
 
     let license = crate::license::LicenseGate::from_db(&db).context("evaluate product license")?;
 
+    let login_limiter = LoginLimiter::new(LoginLimitConfig {
+        max_failures: config.auth.login_max_failures.max(1),
+        window: Duration::from_secs(config.auth.login_window_seconds.max(1)),
+        lockout: Duration::from_secs(config.auth.login_lockout_seconds.max(1)),
+    });
+    tracing::info!(
+        max_failures = config.auth.login_max_failures,
+        window_secs = config.auth.login_window_seconds,
+        lockout_secs = config.auth.login_lockout_seconds,
+        "login rate limit enabled"
+    );
+
+    if let Ok(routes) = db.list_ingress_routes() {
+        let bare = routes
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    eventide_core::IngressKind::Alertmanager | eventide_core::IngressKind::Generic
+                ) && r.token.as_ref().map(|t| t.trim().is_empty()).unwrap_or(true)
+            })
+            .count();
+        if bare > 0 {
+            tracing::warn!(
+                count = bare,
+                "HTTP ingress route(s) have empty token — push will be rejected until Token is set"
+            );
+        }
+    }
+
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
@@ -219,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         policy_redis,
         trap_api_token: Arc::new(std::sync::RwLock::new(trap_api_token_runtime)),
         license,
+        login_limiter,
     });
     // Seed Redis snapshot so Trap instances can boot without waiting for a CRUD.
     state.sync_policies_to_redis().await;
@@ -234,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_scheduler(state.clone());
     crate::kafka_ingress::spawn_kafka_ingress(state.clone());
+    crate::escalation::spawn_escalation_loop(state.clone());
     crate::notify_pipeline::spawn_aggregate_flusher(state.clone());
 
     let static_dir = config.static_dir.clone();
@@ -248,7 +285,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("static console from {static_dir}");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

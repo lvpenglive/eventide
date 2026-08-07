@@ -1,8 +1,11 @@
 //! JWT login / auth middleware + route permission checks.
 
 use crate::iam::{has_perm, route_permission};
-use crate::password::verify_password;
+use crate::password::{
+    hash_password, password_age_status, validate_password_complexity, verify_password,
+};
 use crate::state::AppState;
+use axum::extract::ConnectInfo;
 use axum::extract::FromRequestParts;
 use axum::extract::State;
 use axum::http::request::Parts;
@@ -13,6 +16,7 @@ use axum::Json;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -66,40 +70,70 @@ pub struct LoginResponse {
     pub username: String,
     pub expires_at: String,
     pub permissions: Vec<String>,
+    pub password_status: serde_json::Value,
+}
+
+fn auth_password_status(
+    state: &AppState,
+    changed_at: chrono::DateTime<Utc>,
+) -> serde_json::Value {
+    let auth = &state.config.auth;
+    password_age_status(
+        changed_at,
+        auth.password_max_age_days,
+        auth.password_warn_days,
+    )
+    .to_json()
 }
 
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let user = state
-        .db
-        .get_user_by_username(req.username.trim())
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-        })?;
+    let ip = addr.ip().to_string();
+    let username = req.username.trim().to_string();
+
+    if let Err(secs) = state.login_limiter.check(&ip, &username) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": format!("登录失败次数过多，请 {secs} 秒后再试"),
+                "retry_after_seconds": secs,
+            })),
+        ));
+    }
+
+    let user = state.db.get_user_by_username(&username).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
 
     let Some(user) = user else {
+        state.login_limiter.record_failure(&ip, &username);
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "用户名或密码错误" })),
         ));
     };
     if !user.enabled {
+        state.login_limiter.record_failure(&ip, &username);
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "账号已禁用" })),
         ));
     }
     if !verify_password(&req.password, &user.password_hash) {
+        state.login_limiter.record_failure(&ip, &username);
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "用户名或密码错误" })),
         ));
     }
+
+    state.login_limiter.record_success(&ip, &username);
 
     let perms = state
         .db
@@ -133,11 +167,14 @@ pub async fn login(
         )
     })?;
 
+    let password_status = auth_password_status(&state, user.password_changed_at);
+
     Ok(Json(LoginResponse {
         token,
         username: user.username,
         expires_at: exp.to_rfc3339(),
         permissions: perms,
+        password_status,
     }))
 }
 
@@ -155,6 +192,8 @@ pub async fn me(
         "redis_url": state.config.redis_url,
         "static_dir": state.config.static_dir,
         "token_ttl_hours": state.config.auth.token_ttl_hours,
+        "password_max_age_days": state.config.auth.password_max_age_days,
+        "password_warn_days": state.config.auth.password_warn_days,
     });
 
     if let Ok(uid) = uuid::Uuid::parse_str(&claims.uid) {
@@ -163,6 +202,7 @@ pub async fn me(
             body["department_id"] = serde_json::json!(u.department_id);
             body["role_ids"] = serde_json::json!(u.role_ids);
             body["enabled"] = serde_json::json!(u.enabled);
+            body["password_status"] = auth_password_status(&state, u.password_changed_at);
             if let Ok(perms) = state.db.permissions_for_roles(&u.role_ids) {
                 body["permissions"] = serde_json::json!(perms);
             }
@@ -170,6 +210,75 @@ pub async fn me(
     }
 
     Ok(Json(body))
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// Authenticated user changes their own password.
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    AuthUser(claims): AuthUser,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let uid = uuid::Uuid::parse_str(&claims.uid).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "无效的用户" })),
+        )
+    })?;
+    let mut user = state
+        .db
+        .get_user(uid)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "用户不存在" })),
+        ))?;
+
+    if !verify_password(&req.current_password, &user.password_hash) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "当前密码不正确" })),
+        ));
+    }
+    let new_pw = req.new_password.trim();
+    validate_password_complexity(new_pw).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    if verify_password(new_pw, &user.password_hash) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "新密码不能与当前密码相同" })),
+        ));
+    }
+
+    let now = Utc::now();
+    user.password_hash = hash_password(new_pw);
+    user.password_changed_at = now;
+    user.updated_at = now;
+    state.db.upsert_user(&user).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "password_status": auth_password_status(&state, user.password_changed_at),
+    })))
 }
 
 pub async fn require_auth(
@@ -222,8 +331,10 @@ pub async fn require_writable_license(
     if write {
         let path = req.uri().path();
         // Allow importing / clearing license while in read-only grace.
-        let license_mgmt = path == "/api/license";
-        if !license_mgmt && !state.license.is_writable() {
+        // Self password change is also allowed (account hygiene).
+        let allowed =
+            path == "/api/license" || path == "/api/auth/change-password";
+        if !allowed && !state.license.is_writable() {
             return (
                 StatusCode::PAYMENT_REQUIRED,
                 Json(serde_json::json!({

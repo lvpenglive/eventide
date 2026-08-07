@@ -8,3 +8,6 @@
 .DS_Store
 scripts/_*.rs
 scripts/emit_repo.py
+
+/logs/
+

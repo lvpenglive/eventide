@@ -194,7 +194,9 @@ impl Db {
         let mut conn = self.conn()?;
         let rows: Vec<Row> = conn.query(
             "SELECT id, name, datasource_id, expr, comparator, threshold, for_seconds, interval_seconds,
-                    severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at
+                    severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at,
+                    COALESCE(escalate_after_seconds, 0), escalate_severity,
+                    COALESCE(escalate_channel_ids_json, '[]')
              FROM rules ORDER BY name",
         )?;
         rows.iter().map(map_rule).collect()
@@ -240,7 +242,9 @@ impl Db {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
             "SELECT id, name, datasource_id, expr, comparator, threshold, for_seconds, interval_seconds,
-                    severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at
+                    severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at,
+                    COALESCE(escalate_after_seconds, 0), escalate_severity,
+                    COALESCE(escalate_channel_ids_json, '[]')
              FROM rules WHERE id=?",
             positional(vec![v(id.to_string())]),
         )?;
@@ -250,18 +254,27 @@ impl Db {
     pub fn upsert_rule(&self, rule: &Rule) -> Result<()> {
         let mut conn = self.conn()?;
         let channel_ids: Vec<String> = rule.channel_ids.iter().map(|u| u.to_string()).collect();
+        let esc_channels: Vec<String> = rule
+            .escalate_channel_ids
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
         conn.exec_drop(
             "INSERT INTO rules (
                 id, name, datasource_id, expr, comparator, threshold, for_seconds, interval_seconds,
-                severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at
-             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                severity, labels_json, annotations_json, channel_ids_json, enabled, created_at, updated_at,
+                escalate_after_seconds, escalate_severity, escalate_channel_ids_json
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE
                name=VALUES(name), datasource_id=VALUES(datasource_id), expr=VALUES(expr),
                comparator=VALUES(comparator), threshold=VALUES(threshold),
                for_seconds=VALUES(for_seconds), interval_seconds=VALUES(interval_seconds),
                severity=VALUES(severity), labels_json=VALUES(labels_json),
                annotations_json=VALUES(annotations_json), channel_ids_json=VALUES(channel_ids_json),
-               enabled=VALUES(enabled), updated_at=VALUES(updated_at)",
+               enabled=VALUES(enabled), updated_at=VALUES(updated_at),
+               escalate_after_seconds=VALUES(escalate_after_seconds),
+               escalate_severity=VALUES(escalate_severity),
+               escalate_channel_ids_json=VALUES(escalate_channel_ids_json)",
             positional(vec![
                 v(rule.id.to_string()),
                 v(rule.name.as_str()),
@@ -278,6 +291,9 @@ impl Db {
                 v(rule.enabled as i64),
                 v(fmt_dt(rule.created_at)),
                 v(fmt_dt(rule.updated_at)),
+                v(rule.escalate_after_seconds as i64),
+                v(rule.escalate_severity.map(|s| s.as_str().to_string())),
+                v(serde_json::to_string(&esc_channels)?),
             ]),
         )?;
         Ok(())
@@ -296,24 +312,28 @@ impl Db {
 
     // ---------- alert events ----------
 
+    const ALERT_COLS: &'static str = "id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
+                        value, starts_at, ends_at, pending_since, last_evaluated_at,
+                        tally, last_occurrence_at,
+                        notified_firing, notified_resolved,
+                        acknowledged_at, acknowledged_by, assignee, ack_comment,
+                        closed_at, closed_by, close_comment, escalated_at";
+
     pub fn list_alerts(&self, status: Option<&str>) -> Result<Vec<AlertEvent>> {
         let mut conn = self.conn()?;
         if let Some(st) = status {
-            let rows: Vec<Row> = conn.exec(
-                "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
-                        value, starts_at, ends_at, pending_since, last_evaluated_at,
-                        notified_firing, notified_resolved
-                 FROM alert_events WHERE status=? ORDER BY last_evaluated_at DESC LIMIT 1000",
-                positional(vec![v(st)]),
-            )?;
+            let sql = format!(
+                "SELECT {} FROM alert_events WHERE status=? ORDER BY last_evaluated_at DESC LIMIT 1000",
+                Self::ALERT_COLS
+            );
+            let rows: Vec<Row> = conn.exec(sql, positional(vec![v(st)]))?;
             rows.iter().map(map_alert).collect()
         } else {
-            let rows: Vec<Row> = conn.query(
-                "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
-                        value, starts_at, ends_at, pending_since, last_evaluated_at,
-                        notified_firing, notified_resolved
-                 FROM alert_events ORDER BY last_evaluated_at DESC LIMIT 1000",
-            )?;
+            let sql = format!(
+                "SELECT {} FROM alert_events ORDER BY last_evaluated_at DESC LIMIT 1000",
+                Self::ALERT_COLS
+            );
+            let rows: Vec<Row> = conn.query(sql)?;
             rows.iter().map(map_alert).collect()
         }
     }
@@ -342,10 +362,8 @@ impl Db {
         let mut conn = self.conn()?;
         let lim = limit.max(1) as i64;
         let rows: Vec<Row> = conn.exec(
-            "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
-                    value, starts_at, ends_at, pending_since, last_evaluated_at,
-                    notified_firing, notified_resolved
-             FROM alert_events
+            &format!(
+                "SELECT {} FROM alert_events
              ORDER BY CASE status
                  WHEN 'firing' THEN 0
                  WHEN 'pending' THEN 1
@@ -353,6 +371,8 @@ impl Db {
              END,
              last_evaluated_at DESC
              LIMIT ?",
+                Self::ALERT_COLS
+            ),
             positional(vec![v(lim)]),
         )?;
         rows.iter().map(map_alert).collect()
@@ -366,6 +386,7 @@ impl Db {
             "ingress_routes",
             "lookup_tables",
             "enrich_rules",
+            "maintenance_windows",
         ];
         if !allowed.contains(&table) {
             anyhow::bail!("count_table: unsupported table");
@@ -409,10 +430,10 @@ impl Db {
     pub fn get_alert_by_fingerprint(&self, fp: &str) -> Result<Option<AlertEvent>> {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
-            "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
-                    value, starts_at, ends_at, pending_since, last_evaluated_at,
-                    notified_firing, notified_resolved
-             FROM alert_events WHERE fingerprint=?",
+            &format!(
+                "SELECT {} FROM alert_events WHERE fingerprint=?",
+                Self::ALERT_COLS
+            ),
             positional(vec![v(fp)]),
         )?;
         Ok(row.as_ref().map(map_alert).transpose()?)
@@ -421,10 +442,7 @@ impl Db {
     pub fn get_alert(&self, id: Uuid) -> Result<Option<AlertEvent>> {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
-            "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
-                    value, starts_at, ends_at, pending_since, last_evaluated_at,
-                    notified_firing, notified_resolved
-             FROM alert_events WHERE id=?",
+            &format!("SELECT {} FROM alert_events WHERE id=?", Self::ALERT_COLS),
             positional(vec![v(id.to_string())]),
         )?;
         Ok(row.as_ref().map(map_alert).transpose()?)
@@ -480,10 +498,10 @@ impl Db {
     pub fn alerts_for_rule(&self, rule_id: Uuid) -> Result<BTreeMap<String, AlertEvent>> {
         let mut conn = self.conn()?;
         let rows: Vec<Row> = conn.exec(
-            "SELECT id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
-                    value, starts_at, ends_at, pending_since, last_evaluated_at,
-                    notified_firing, notified_resolved
-             FROM alert_events WHERE rule_id=?",
+            &format!(
+                "SELECT {} FROM alert_events WHERE rule_id=?",
+                Self::ALERT_COLS
+            ),
             positional(vec![v(rule_id.to_string())]),
         )?;
         let mut map = BTreeMap::new();
@@ -500,14 +518,22 @@ impl Db {
             "INSERT INTO alert_events (
                 id, rule_id, fingerprint, status, severity, labels_json, annotations_json,
                 value, starts_at, ends_at, pending_since, last_evaluated_at,
-                notified_firing, notified_resolved
-             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                tally, last_occurrence_at,
+                notified_firing, notified_resolved,
+                acknowledged_at, acknowledged_by, assignee, ack_comment,
+                closed_at, closed_by, close_comment, escalated_at
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE
                id=VALUES(id), status=VALUES(status), severity=VALUES(severity),
                labels_json=VALUES(labels_json), annotations_json=VALUES(annotations_json),
                value=VALUES(value), starts_at=VALUES(starts_at), ends_at=VALUES(ends_at),
                pending_since=VALUES(pending_since), last_evaluated_at=VALUES(last_evaluated_at),
-               notified_firing=VALUES(notified_firing), notified_resolved=VALUES(notified_resolved)",
+               tally=VALUES(tally), last_occurrence_at=VALUES(last_occurrence_at),
+               notified_firing=VALUES(notified_firing), notified_resolved=VALUES(notified_resolved),
+               acknowledged_at=VALUES(acknowledged_at), acknowledged_by=VALUES(acknowledged_by),
+               assignee=VALUES(assignee), ack_comment=VALUES(ack_comment),
+               closed_at=VALUES(closed_at), closed_by=VALUES(closed_by),
+               close_comment=VALUES(close_comment), escalated_at=VALUES(escalated_at)",
             positional(vec![
                 v(ev.id.to_string()),
                 v(ev.rule_id.to_string()),
@@ -521,11 +547,76 @@ impl Db {
                 v(ev.ends_at.map(fmt_dt)),
                 v(ev.pending_since.map(fmt_dt)),
                 v(fmt_dt(ev.last_evaluated_at)),
+                v(ev.tally as i64),
+                v(fmt_dt(ev.last_occurrence_at)),
                 v(ev.notified_firing as i64),
                 v(ev.notified_resolved as i64),
+                v(ev.acknowledged_at.map(fmt_dt)),
+                v(ev.acknowledged_by.as_deref()),
+                v(ev.assignee.as_deref()),
+                v(ev.ack_comment.as_deref()),
+                v(ev.closed_at.map(fmt_dt)),
+                v(ev.closed_by.as_deref()),
+                v(ev.close_comment.as_deref()),
+                v(ev.escalated_at.map(fmt_dt)),
             ]),
         )?;
         Ok(())
+    }
+
+    /// Firing alerts that may need unacked escalation (caller filters by rule timeout).
+    pub fn list_escalation_candidates(&self) -> Result<Vec<AlertEvent>> {
+        let mut conn = self.conn()?;
+        let sql = format!(
+            "SELECT {} FROM alert_events
+             WHERE status='firing'
+               AND (acknowledged_at IS NULL OR acknowledged_at='')
+               AND (escalated_at IS NULL OR escalated_at='')
+               AND (closed_at IS NULL OR closed_at='')
+             ORDER BY starts_at ASC
+             LIMIT 500",
+            Self::ALERT_COLS
+        );
+        let rows: Vec<Row> = conn.query(sql)?;
+        rows.iter().map(map_alert).collect()
+    }
+
+    /// Operator acknowledge / take ownership. Returns updated event.
+    pub fn ack_alert(
+        &self,
+        id: Uuid,
+        by: &str,
+        assignee: Option<&str>,
+        comment: Option<&str>,
+    ) -> Result<Option<AlertEvent>> {
+        let mut ev = match self.get_alert(id)? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let now = Utc::now();
+        ev.acknowledged_at = Some(now);
+        ev.acknowledged_by = Some(by.trim().to_string());
+        ev.assignee = assignee
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| Some(by.trim().to_string()));
+        ev.ack_comment = comment
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        self.upsert_alert(&ev)?;
+        Ok(Some(ev))
+    }
+
+    pub fn unack_alert(&self, id: Uuid) -> Result<Option<AlertEvent>> {
+        let mut ev = match self.get_alert(id)? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        ev.clear_ack();
+        self.upsert_alert(&ev)?;
+        Ok(Some(ev))
     }
 
     // ---------- silences ----------
@@ -572,6 +663,76 @@ impl Db {
         let n = conn
             .exec_iter(
                 "DELETE FROM silences WHERE id=?",
+                positional(vec![v(id.to_string())]),
+            )?
+            .affected_rows();
+        Ok(n > 0)
+    }
+
+    // ---------- maintenance windows ----------
+
+    pub fn list_maintenance_windows(&self) -> Result<Vec<MaintenanceWindow>> {
+        let mut conn = self.conn()?;
+        let rows: Vec<Row> = conn.query(
+            "SELECT id, name, comment, rule_id, matchers_json, starts_at, ends_at, enabled,
+                    created_at, updated_at
+             FROM maintenance_windows ORDER BY starts_at DESC",
+        )?;
+        rows.iter().map(map_maintenance).collect()
+    }
+
+    pub fn get_maintenance_window(&self, id: Uuid) -> Result<Option<MaintenanceWindow>> {
+        let mut conn = self.conn()?;
+        let row: Option<Row> = conn.exec_first(
+            "SELECT id, name, comment, rule_id, matchers_json, starts_at, ends_at, enabled,
+                    created_at, updated_at
+             FROM maintenance_windows WHERE id=?",
+            positional(vec![v(id.to_string())]),
+        )?;
+        Ok(row.as_ref().map(map_maintenance).transpose()?)
+    }
+
+    pub fn active_maintenance_windows(&self, now: DateTime<Utc>) -> Result<Vec<MaintenanceWindow>> {
+        Ok(self
+            .list_maintenance_windows()?
+            .into_iter()
+            .filter(|w| w.enabled && now >= w.starts_at && now < w.ends_at)
+            .collect())
+    }
+
+    pub fn upsert_maintenance_window(&self, w: &MaintenanceWindow) -> Result<()> {
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "INSERT INTO maintenance_windows (
+                id, name, comment, rule_id, matchers_json, starts_at, ends_at, enabled,
+                created_at, updated_at
+             ) VALUES (?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+               name=VALUES(name), comment=VALUES(comment), rule_id=VALUES(rule_id),
+               matchers_json=VALUES(matchers_json), starts_at=VALUES(starts_at),
+               ends_at=VALUES(ends_at), enabled=VALUES(enabled),
+               updated_at=VALUES(updated_at)",
+            positional(vec![
+                v(w.id.to_string()),
+                v(w.name.as_str()),
+                v(w.comment.as_str()),
+                v(w.rule_id.map(|u| u.to_string())),
+                v(serde_json::to_string(&w.matchers)?),
+                v(fmt_dt(w.starts_at)),
+                v(fmt_dt(w.ends_at)),
+                v(w.enabled as i64),
+                v(fmt_dt(w.created_at)),
+                v(fmt_dt(w.updated_at)),
+            ]),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_maintenance_window(&self, id: Uuid) -> Result<bool> {
+        let mut conn = self.conn()?;
+        let n = conn
+            .exec_iter(
+                "DELETE FROM maintenance_windows WHERE id=?",
                 positional(vec![v(id.to_string())]),
             )?
             .affected_rows();
@@ -727,6 +888,7 @@ impl Db {
         let transition = match log.transition {
             AlertTransition::BecameFiring => "became_firing",
             AlertTransition::BecameResolved => "became_resolved",
+            AlertTransition::Escalated => "escalated",
             AlertTransition::Unchanged => "unchanged",
         };
         conn.exec_drop(
@@ -746,13 +908,84 @@ impl Db {
         Ok(())
     }
 
+    pub fn insert_audit_log(&self, log: &AuditLog) -> Result<()> {
+        let mut conn = self.conn()?;
+        conn.exec_drop(
+            "INSERT INTO audit_logs
+             (id, created_at, actor_username, actor_uid, action, resource_type, resource_id,
+              method, path, status_code, detail_json, client_ip)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            positional(vec![
+                v(log.id.to_string()),
+                v(fmt_dt(log.created_at)),
+                v(log.actor_username.as_str()),
+                v(log.actor_uid.map(|u| u.to_string())),
+                v(log.action.as_str()),
+                v(log.resource_type.as_str()),
+                v(log.resource_id.clone()),
+                v(log.method.as_str()),
+                v(log.path.as_str()),
+                v(log.status_code as i64),
+                v(log.detail_json.clone()),
+                v(log.client_ip.clone()),
+            ]),
+        )?;
+        Ok(())
+    }
+
+    pub fn list_audit_logs(
+        &self,
+        actor: Option<&str>,
+        action: Option<&str>,
+        resource_type: Option<&str>,
+        q: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AuditLog>> {
+        let mut conn = self.conn()?;
+        let lim = limit.clamp(1, 500) as i64;
+        let mut sql = String::from(
+            "SELECT id, created_at, actor_username, actor_uid, action, resource_type, resource_id,
+                    method, path, status_code, detail_json, client_ip
+             FROM audit_logs WHERE 1=1",
+        );
+        let mut vals: Vec<Value> = Vec::new();
+        if let Some(a) = actor.map(str::trim).filter(|s| !s.is_empty()) {
+            sql.push_str(" AND actor_username=?");
+            vals.push(v(a));
+        }
+        if let Some(a) = action.map(str::trim).filter(|s| !s.is_empty()) {
+            sql.push_str(" AND action=?");
+            vals.push(v(a));
+        }
+        if let Some(rt) = resource_type.map(str::trim).filter(|s| !s.is_empty()) {
+            sql.push_str(" AND resource_type=?");
+            vals.push(v(rt));
+        }
+        if let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) {
+            sql.push_str(
+                " AND (path LIKE ? OR IFNULL(resource_id,'') LIKE ? OR IFNULL(detail_json,'') LIKE ? OR actor_username LIKE ?)",
+            );
+            let pat = format!("%{q}%");
+            vals.push(v(pat.clone()));
+            vals.push(v(pat.clone()));
+            vals.push(v(pat.clone()));
+            vals.push(v(pat));
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+        vals.push(v(lim));
+        let rows: Vec<Row> = conn.exec(sql, positional(vals))?;
+        rows.iter().map(map_audit_log).collect()
+    }
+
     // ---------- ingress routes ----------
 
     pub fn list_ingress_routes(&self) -> Result<Vec<IngressRoute>> {
         let mut conn = self.conn()?;
         let rows: Vec<Row> = conn.query(
             "SELECT id, name, kind, token, channel_ids_json, enabled, created_at, updated_at,
-                    COALESCE(endpoint, ''), COALESCE(options_json, '{}')
+                    COALESCE(endpoint, ''), COALESCE(options_json, '{}'),
+                    COALESCE(escalate_after_seconds, 0), escalate_severity,
+                    COALESCE(escalate_channel_ids_json, '[]')
              FROM ingress_routes ORDER BY name",
         )?;
         rows.iter().map(map_ingress).collect()
@@ -762,7 +995,9 @@ impl Db {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
             "SELECT id, name, kind, token, channel_ids_json, enabled, created_at, updated_at,
-                    COALESCE(endpoint, ''), COALESCE(options_json, '{}')
+                    COALESCE(endpoint, ''), COALESCE(options_json, '{}'),
+                    COALESCE(escalate_after_seconds, 0), escalate_severity,
+                    COALESCE(escalate_channel_ids_json, '[]')
              FROM ingress_routes WHERE id=?",
             positional(vec![v(id.to_string())]),
         )?;
@@ -772,14 +1007,25 @@ impl Db {
     pub fn upsert_ingress_route(&self, route: &IngressRoute) -> Result<()> {
         let mut conn = self.conn()?;
         let channel_ids: Vec<String> = route.channel_ids.iter().map(|u| u.to_string()).collect();
+        let esc_channels: Vec<String> = route
+            .escalate_channel_ids
+            .iter()
+            .map(|u| u.to_string())
+            .collect();
         conn.exec_drop(
-            "INSERT INTO ingress_routes (id, name, kind, token, channel_ids_json, enabled, created_at, updated_at, endpoint, options_json)
-             VALUES (?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO ingress_routes (
+                id, name, kind, token, channel_ids_json, enabled, created_at, updated_at,
+                endpoint, options_json,
+                escalate_after_seconds, escalate_severity, escalate_channel_ids_json
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE
                name=VALUES(name), kind=VALUES(kind), token=VALUES(token),
                channel_ids_json=VALUES(channel_ids_json), enabled=VALUES(enabled),
                updated_at=VALUES(updated_at), endpoint=VALUES(endpoint),
-               options_json=VALUES(options_json)",
+               options_json=VALUES(options_json),
+               escalate_after_seconds=VALUES(escalate_after_seconds),
+               escalate_severity=VALUES(escalate_severity),
+               escalate_channel_ids_json=VALUES(escalate_channel_ids_json)",
             positional(vec![
                 v(route.id.to_string()),
                 v(route.name.as_str()),
@@ -791,6 +1037,9 @@ impl Db {
                 v(fmt_dt(route.updated_at)),
                 v(route.endpoint.as_str()),
                 v(serde_json::to_string(&route.options)?),
+                v(route.escalate_after_seconds as i64),
+                v(route.escalate_severity.map(|s| s.as_str().to_string())),
+                v(serde_json::to_string(&esc_channels)?),
             ]),
         )?;
         Ok(())
@@ -918,6 +1167,8 @@ fn map_rule(row: &Row) -> Result<Rule> {
     let channel_ids_json = col_str(row, 11)?;
     let created = col_str(row, 13)?;
     let updated = col_str(row, 14)?;
+    let esc_sev = col_str_opt(row, 16);
+    let esc_ch_json = col_str_opt(row, 17).unwrap_or_else(|| "[]".into());
     Ok(Rule {
         id: col_uuid(row, 0)?,
         name: col_str(row, 1)?,
@@ -934,6 +1185,9 @@ fn map_rule(row: &Row) -> Result<Rule> {
         enabled: col_i64(row, 12) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
+        escalate_after_seconds: col_i64(row, 15).max(0) as u64,
+        escalate_severity: esc_sev.as_deref().and_then(Severity::parse),
+        escalate_channel_ids: uuid_ids_from_json(&esc_ch_json).unwrap_or_default(),
     })
 }
 
@@ -946,6 +1200,14 @@ fn map_alert(row: &Row) -> Result<AlertEvent> {
     let ends = col_str_opt(row, 9);
     let pending = col_str_opt(row, 10);
     let last = col_str(row, 11)?;
+    let last_occ = col_str_opt(row, 13);
+    let starts_at = parse_dt(&starts).unwrap_or_else(|_| Utc::now());
+    let last_occurrence_at = last_occ
+        .as_deref()
+        .and_then(|s| parse_dt(s).ok())
+        .unwrap_or(starts_at);
+    let ack_at = col_str_opt(row, 16);
+    let tally = col_i64(row, 12).max(1) as u32;
     Ok(AlertEvent {
         id: col_uuid(row, 0)?,
         rule_id: col_uuid(row, 1)?,
@@ -955,12 +1217,26 @@ fn map_alert(row: &Row) -> Result<AlertEvent> {
         labels: labels_from_json(&labels_json).unwrap_or_default(),
         annotations: labels_from_json(&annotations_json).unwrap_or_default(),
         value: col_f64_opt(row, 7),
-        starts_at: parse_dt(&starts).unwrap_or_else(|_| Utc::now()),
+        starts_at,
         ends_at: ends.as_deref().and_then(|s| parse_dt(s).ok()),
         pending_since: pending.as_deref().and_then(|s| parse_dt(s).ok()),
         last_evaluated_at: parse_dt(&last).unwrap_or_else(|_| Utc::now()),
-        notified_firing: col_i64(row, 12) != 0,
-        notified_resolved: col_i64(row, 13) != 0,
+        tally,
+        last_occurrence_at,
+        notified_firing: col_i64(row, 14) != 0,
+        notified_resolved: col_i64(row, 15) != 0,
+        acknowledged_at: ack_at.as_deref().and_then(|s| parse_dt(s).ok()),
+        acknowledged_by: col_str_opt(row, 17).filter(|s| !s.is_empty()),
+        assignee: col_str_opt(row, 18).filter(|s| !s.is_empty()),
+        ack_comment: col_str_opt(row, 19).filter(|s| !s.is_empty()),
+        closed_at: col_str_opt(row, 20)
+            .as_deref()
+            .and_then(|s| parse_dt(s).ok()),
+        closed_by: col_str_opt(row, 21).filter(|s| !s.is_empty()),
+        close_comment: col_str_opt(row, 22).filter(|s| !s.is_empty()),
+        escalated_at: col_str_opt(row, 23)
+            .as_deref()
+            .and_then(|s| parse_dt(s).ok()),
     })
 }
 
@@ -1046,6 +1322,27 @@ fn map_silence(row: &Row) -> Result<Silence> {
     })
 }
 
+fn map_maintenance(row: &Row) -> Result<MaintenanceWindow> {
+    let rule_id = col_str_opt(row, 3);
+    let matchers_json = col_str(row, 4)?;
+    let starts = col_str(row, 5)?;
+    let ends = col_str(row, 6)?;
+    let created = col_str(row, 8)?;
+    let updated = col_str(row, 9)?;
+    Ok(MaintenanceWindow {
+        id: col_uuid(row, 0)?,
+        name: col_str(row, 1)?,
+        comment: col_str(row, 2).unwrap_or_default(),
+        rule_id: rule_id.and_then(|s| Uuid::parse_str(&s).ok()),
+        matchers: labels_from_json(&matchers_json).unwrap_or_default(),
+        starts_at: parse_dt(&starts).unwrap_or_else(|_| Utc::now()),
+        ends_at: parse_dt(&ends).unwrap_or_else(|_| Utc::now()),
+        enabled: col_i64(row, 7) != 0,
+        created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
+        updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
+    })
+}
+
 fn map_ingress(row: &Row) -> Result<IngressRoute> {
     let kind_s = col_str(row, 2)?;
     let channel_ids_json = col_str(row, 4)?;
@@ -1053,6 +1350,8 @@ fn map_ingress(row: &Row) -> Result<IngressRoute> {
     let updated = col_str(row, 7)?;
     let endpoint = col_str_opt(row, 8).unwrap_or_default();
     let options_json = col_str_opt(row, 9).unwrap_or_else(|| "{}".into());
+    let esc_sev = col_str_opt(row, 11);
+    let esc_ch_json = col_str_opt(row, 12).unwrap_or_else(|| "[]".into());
     Ok(IngressRoute {
         id: col_uuid(row, 0)?,
         name: col_str(row, 1)?,
@@ -1064,6 +1363,9 @@ fn map_ingress(row: &Row) -> Result<IngressRoute> {
         enabled: col_i64(row, 5) != 0,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
+        escalate_after_seconds: col_i64(row, 10).max(0) as u64,
+        escalate_severity: esc_sev.as_deref().and_then(Severity::parse),
+        escalate_channel_ids: uuid_ids_from_json(&esc_ch_json).unwrap_or_default(),
     })
 }
 
@@ -1074,6 +1376,7 @@ fn map_notify_log(row: &Row) -> Result<NotifyLog> {
     let transition = match transition_s.as_str() {
         "became_firing" => AlertTransition::BecameFiring,
         "became_resolved" => AlertTransition::BecameResolved,
+        "escalated" => AlertTransition::Escalated,
         _ => AlertTransition::Unchanged,
     };
     Ok(NotifyLog {
@@ -1085,5 +1388,26 @@ fn map_notify_log(row: &Row) -> Result<NotifyLog> {
         error: col_str_opt(row, 5),
         body,
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
+    })
+}
+
+fn map_audit_log(row: &Row) -> Result<AuditLog> {
+    let created = col_str(row, 1)?;
+    let actor_uid = col_str_opt(row, 3)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| Uuid::parse_str(&s).ok());
+    Ok(AuditLog {
+        id: col_uuid(row, 0)?,
+        created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
+        actor_username: col_str(row, 2)?,
+        actor_uid,
+        action: col_str(row, 4)?,
+        resource_type: col_str(row, 5)?,
+        resource_id: col_str_opt(row, 6).filter(|s| !s.is_empty()),
+        method: col_str(row, 7)?,
+        path: col_str(row, 8)?,
+        status_code: col_i64(row, 9) as i32,
+        detail_json: col_str_opt(row, 10).filter(|s| !s.is_empty()),
+        client_ip: col_str_opt(row, 11).filter(|s| !s.is_empty()),
     })
 }

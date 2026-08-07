@@ -19,7 +19,7 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="/assets/app.css?v=57" />
+  <link rel="stylesheet" href="/assets/app.css?v=68" />
 </head>
 <body>
   <!-- Login -->
@@ -38,11 +38,25 @@
         </div>
         <div class="field">
           <label for="password">密码</label>
-          <input id="password" name="password" type="password" autocomplete="current-password" required />
+          <div class="password-field">
+            <input id="password" name="password" type="password" autocomplete="current-password" required />
+            <button type="button" class="password-toggle" id="login-toggle-pw" aria-pressed="false" aria-label="显示密码" title="显示密码">
+              <svg class="eye-open" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+              <svg class="eye-off" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" hidden>
+                <path d="M2 12s3.5-7 10-7c2.1 0 3.9.6 5.4 1.5"/>
+                <path d="M22 12s-3.5 7-10 7c-2.1 0-3.9-.6-5.4-1.5"/>
+                <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+                <path d="M3 3l18 18"/>
+                <path d="M14.1 9.9 9.9 14.1"/>
+              </svg>
+            </button>
+          </div>
         </div>
         <div class="login-error" id="login-error"></div>
         <button class="primary" type="submit" style="width:100%">进入系统</button>
-        <div class="login-hint">首次启动使用 eventide.toml 中的账号种子管理员；之后在「用户管理」维护</div>
       </form>
     </div>
   </div>
@@ -66,6 +80,7 @@
           <div class="nav-sub">
             <button class="nav-item" data-page="alerts" title="告警事件"><span class="ico">●</span><span class="label">告警事件</span></button>
             <button class="nav-item" data-page="silences" title="静默策略"><span class="ico">◐</span><span class="label">静默策略</span></button>
+            <button class="nav-item" data-page="maintenance" title="维护窗"><span class="ico">▣</span><span class="label">维护窗</span></button>
           </div>
         </div>
 
@@ -103,6 +118,7 @@
             <button class="nav-item" data-page="roles" title="权限管理"><span class="ico">▣</span><span class="label">权限管理</span></button>
             <button class="nav-item" data-page="departments" title="部门管理"><span class="ico">▦</span><span class="label">部门管理</span></button>
             <button class="nav-item" data-page="settings" title="系统设置"><span class="ico">⚙</span><span class="label">系统设置</span></button>
+            <button class="nav-item" data-page="audit" title="操作审计"><span class="ico">☰</span><span class="label">操作审计</span></button>
           </div>
         </div>
 
@@ -121,6 +137,7 @@
           <strong id="user-name">—</strong>
         </div>
         <div id="sidebar-theme" class="theme-switch compact" style="width:100%;margin-bottom:10px"></div>
+        <button class="ghost" id="btn-change-pw" type="button" style="width:100%;margin-bottom:8px">修改密码</button>
         <button class="ghost" id="btn-logout">退出登录</button>
       </div>
     </aside>
@@ -135,6 +152,7 @@
         </div>
       </div>
       <div id="license-banner" class="license-banner" hidden></div>
+      <div id="password-banner" class="license-banner" hidden></div>
       <div id="page-root"></div>
     </main>
   </div>
@@ -144,6 +162,6 @@
   </div>
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="/assets/app.js?v=78"></script>
+  <script type="module" src="/assets/app.js?v=95"></script>
 </body>
 </html>

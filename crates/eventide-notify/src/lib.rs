@@ -147,6 +147,7 @@ pub(crate) fn transition_label(t: AlertTransition) -> &'static str {
     match t {
         AlertTransition::BecameFiring => "firing",
         AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Escalated => "escalated",
         AlertTransition::Unchanged => "unchanged",
     }
 }

@@ -8,7 +8,8 @@ mod policy_admin;
 mod settings;
 mod snmp_get;
 
-use crate::auth::{self, require_auth, require_route_perm, require_writable_license};
+use crate::auth::{self, AuthUser, require_auth, require_route_perm, require_writable_license};
+use crate::audit::audit_mutators;
 use crate::scheduler;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -44,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     let protected = Router::new()
         .route("/api/auth/me", get(auth::me))
+        .route("/api/auth/change-password", post(auth::change_password))
         .route("/api/overview", get(overview::overview))
         .route("/api/datasources", get(list_datasources).post(create_datasource))
         .route(
@@ -59,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/channels/{id}/test", post(test_channel))
         .route("/api/notifies", get(list_notifies))
+        .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/rules", get(list_rules).post(create_rule))
         .route(
             "/api/rules/{id}",
@@ -66,10 +69,25 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/rules/{id}/evaluate", post(evaluate_rule_now))
         .route("/api/alerts", get(list_alerts))
+        .route("/api/alerts/batch/ack", post(batch_ack_alerts))
+        .route("/api/alerts/batch/close", post(batch_close_alerts))
         .route("/api/alerts/{id}", get(get_alert))
+        .route("/api/alerts/{id}/ack", post(ack_alert))
+        .route("/api/alerts/{id}/unack", post(unack_alert))
+        .route("/api/alerts/{id}/close", post(close_alert))
         .route("/api/alerts/{id}/notifies", get(list_alert_notifies))
         .route("/api/silences", get(list_silences).post(create_silence))
         .route("/api/silences/{id}", delete(delete_silence))
+        .route(
+            "/api/maintenance-windows",
+            get(list_maintenance_windows).post(create_maintenance_window),
+        )
+        .route(
+            "/api/maintenance-windows/{id}",
+            get(get_maintenance_window)
+                .put(update_maintenance_window)
+                .delete(delete_maintenance_window),
+        )
         .route("/api/enrich", get(list_enrich).post(create_enrich))
         .route("/api/enrich/preview", post(preview_enrich))
         .route(
@@ -164,7 +182,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/trap-api/{*path}",
             axum::routing::any(crate::trap_proxy::forward),
         )
-        // Inner → outer: perm, license write-gate, JWT
+        // Inner → outer: audit, perm, license write-gate, JWT
+        .layer(middleware::from_fn_with_state(state.clone(), audit_mutators))
         .layer(middleware::from_fn(require_route_perm))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -540,6 +559,41 @@ async fn list_notifies(
     Ok(Json(out))
 }
 
+#[derive(Deserialize)]
+struct AuditListQuery {
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    resource_type: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default = "default_audit_limit")]
+    limit: usize,
+}
+
+fn default_audit_limit() -> usize {
+    200
+}
+
+async fn list_audit_logs(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<AuditListQuery>,
+) -> ApiResult<Json<Vec<AuditLog>>> {
+    state
+        .db
+        .list_audit_logs(
+            q.actor.as_deref(),
+            q.action.as_deref(),
+            q.resource_type.as_deref(),
+            q.q.as_deref(),
+            q.limit,
+        )
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
 // ---- rules ----
 
 #[derive(Deserialize)]
@@ -561,6 +615,12 @@ struct RuleInput {
     annotations: BTreeMap<String, String>,
     #[serde(default)]
     channel_ids: Vec<Uuid>,
+    #[serde(default)]
+    escalate_after_seconds: u64,
+    #[serde(default)]
+    escalate_severity: Option<String>,
+    #[serde(default)]
+    escalate_channel_ids: Vec<Uuid>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -607,6 +667,9 @@ fn rule_from_input(id: Uuid, input: RuleInput, created_at: DateTime<Utc>) -> Api
         labels: input.labels,
         annotations: input.annotations,
         channel_ids: input.channel_ids,
+        escalate_after_seconds: input.escalate_after_seconds,
+        escalate_severity: parse_escalate_severity(input.escalate_severity)?,
+        escalate_channel_ids: input.escalate_channel_ids,
         enabled: input.enabled,
         created_at,
         updated_at: Utc::now(),
@@ -698,6 +761,8 @@ struct AlertQuery {
     source: Option<String>,
     /// `mysql` | `es` — override list backend (default from settings).
     store: Option<String>,
+    /// `true` | `false` — filter by acknowledge state.
+    acked: Option<String>,
     /// 1-based page (default 1).
     page: Option<u32>,
     /// Page size (default 50, max 200).
@@ -812,6 +877,13 @@ async fn list_alerts(
     if let Some(st) = q.status.as_deref().filter(|s| !s.is_empty()) {
         alerts.retain(|a| a.status.as_str() == st);
     }
+    if let Some(acked) = q.acked.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        match acked.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "acked" => alerts.retain(|a| a.is_acknowledged()),
+            "0" | "false" | "no" | "unacked" => alerts.retain(|a| !a.is_acknowledged()),
+            _ => {}
+        }
+    }
 
     // Firing first, then pending, then resolved; within group by last_evaluated desc.
     alerts.sort_by(|a, b| {
@@ -892,6 +964,265 @@ async fn get_alert(
         .get_alert(id)
         .map_err(ApiError::internal)?
         .map(Json)
+        .ok_or_else(|| ApiError::not_found("alert not found"))
+}
+
+#[derive(Deserialize)]
+struct AckInput {
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+async fn ack_alert(
+    State(state): State<Arc<AppState>>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(input): Json<AckInput>,
+) -> ApiResult<Json<AlertEvent>> {
+    let by = claims.sub.trim();
+    if by.is_empty() {
+        return Err(ApiError::bad("无效用户"));
+    }
+    state
+        .db
+        .ack_alert(
+            id,
+            by,
+            input.assignee.as_deref(),
+            input.comment.as_deref(),
+        )
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("alert not found"))
+}
+
+async fn unack_alert(
+    State(state): State<Arc<AppState>>,
+    AuthUser(_claims): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<AlertEvent>> {
+    state
+        .db
+        .unack_alert(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("alert not found"))
+}
+
+#[derive(Deserialize)]
+struct CloseInput {
+    /// Required close reason (for no-recover / manual resolve).
+    #[serde(default)]
+    comment: Option<String>,
+    /// When true (default), send BecameResolved notify to bound channels.
+    #[serde(default = "default_true_close_notify")]
+    notify: bool,
+}
+
+fn default_true_close_notify() -> bool {
+    true
+}
+
+async fn close_alert(
+    State(state): State<Arc<AppState>>,
+    AuthUser(claims): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CloseInput>,
+) -> ApiResult<Json<AlertEvent>> {
+    let by = claims.sub.trim();
+    if by.is_empty() {
+        return Err(ApiError::bad("无效用户"));
+    }
+    let comment = input
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::bad("请填写关闭原因"))?;
+
+    close_alert_one(&state, id, by, comment, input.notify)
+        .await
+        .map(Json)
+}
+
+const BATCH_ALERT_LIMIT: usize = 50;
+
+#[derive(Deserialize)]
+struct BatchAckInput {
+    ids: Vec<Uuid>,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BatchCloseInput {
+    ids: Vec<Uuid>,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default = "default_true_close_notify")]
+    notify: bool,
+}
+
+#[derive(Serialize)]
+struct BatchItemError {
+    id: Uuid,
+    error: String,
+}
+
+#[derive(Serialize)]
+struct BatchOpResponse {
+    ok: Vec<Uuid>,
+    failed: Vec<BatchItemError>,
+}
+
+fn normalize_batch_ids(ids: Vec<Uuid>) -> ApiResult<Vec<Uuid>> {
+    if ids.is_empty() {
+        return Err(ApiError::bad("请选择至少一条告警"));
+    }
+    if ids.len() > BATCH_ALERT_LIMIT {
+        return Err(ApiError::bad(format!(
+            "单次最多处理 {BATCH_ALERT_LIMIT} 条"
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if seen.insert(id) {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+async fn batch_ack_alerts(
+    State(state): State<Arc<AppState>>,
+    AuthUser(claims): AuthUser,
+    Json(input): Json<BatchAckInput>,
+) -> ApiResult<Json<BatchOpResponse>> {
+    let by = claims.sub.trim();
+    if by.is_empty() {
+        return Err(ApiError::bad("无效用户"));
+    }
+    let ids = normalize_batch_ids(input.ids)?;
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+    for id in ids {
+        match state.db.ack_alert(
+            id,
+            by,
+            input.assignee.as_deref(),
+            input.comment.as_deref(),
+        ) {
+            Ok(Some(_)) => ok.push(id),
+            Ok(None) => failed.push(BatchItemError {
+                id,
+                error: "告警不存在".into(),
+            }),
+            Err(e) => failed.push(BatchItemError {
+                id,
+                error: e.to_string(),
+            }),
+        }
+    }
+    Ok(Json(BatchOpResponse { ok, failed }))
+}
+
+async fn batch_close_alerts(
+    State(state): State<Arc<AppState>>,
+    AuthUser(claims): AuthUser,
+    Json(input): Json<BatchCloseInput>,
+) -> ApiResult<Json<BatchOpResponse>> {
+    let by = claims.sub.trim();
+    if by.is_empty() {
+        return Err(ApiError::bad("无效用户"));
+    }
+    let comment = input
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::bad("请填写关闭原因"))?;
+    let ids = normalize_batch_ids(input.ids)?;
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+    for id in ids {
+        match close_alert_one(&state, id, by, comment, input.notify).await {
+            Ok(_) => ok.push(id),
+            Err(e) => failed.push(BatchItemError {
+                id,
+                error: e.message,
+            }),
+        }
+    }
+    Ok(Json(BatchOpResponse { ok, failed }))
+}
+
+async fn close_alert_one(
+    state: &Arc<AppState>,
+    id: Uuid,
+    by: &str,
+    comment: &str,
+    notify: bool,
+) -> ApiResult<AlertEvent> {
+    let mut event = state
+        .db
+        .get_alert(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("alert not found"))?;
+
+    if event.status == AlertStatus::Resolved {
+        return Err(ApiError::bad("告警已是恢复状态，无需关闭"));
+    }
+
+    let now = Utc::now();
+    event.status = AlertStatus::Resolved;
+    event.ends_at = Some(now);
+    event.last_evaluated_at = now;
+    event.pending_since = None;
+    event.closed_at = Some(now);
+    event.closed_by = Some(by.to_string());
+    event.close_comment = Some(comment.to_string());
+    event.annotations.insert("closed_by".into(), by.to_string());
+    event
+        .annotations
+        .insert("close_comment".into(), comment.to_string());
+    event
+        .annotations
+        .insert("closed_at".into(), now.to_rfc3339());
+    // Allow resolve notify edge even if a previous resolve was sent.
+    event.notified_resolved = false;
+
+    if notify {
+        let (rule, channel_ids) =
+            crate::notify_pipeline::rule_context_for_alert(state, &event)
+                .map_err(ApiError::internal)?;
+        crate::notify_pipeline::persist_and_notify(
+            state,
+            &rule,
+            &channel_ids,
+            event.clone(),
+            AlertTransition::BecameResolved,
+            true,
+            now,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    } else {
+        event.notified_resolved = true;
+        state
+            .db
+            .upsert_alert(&event)
+            .map_err(ApiError::internal)?;
+    }
+
+    state
+        .db
+        .get_alert(id)
+        .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("alert not found"))
 }
 
@@ -1098,6 +1429,120 @@ async fn delete_silence(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("silence not found"))
+    }
+}
+
+// ---- maintenance windows ----
+
+#[derive(Deserialize)]
+struct MaintenanceInput {
+    name: String,
+    #[serde(default)]
+    comment: String,
+    rule_id: Option<Uuid>,
+    #[serde(default)]
+    matchers: BTreeMap<String, String>,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn maintenance_from_input(
+    id: Uuid,
+    input: MaintenanceInput,
+    created_at: DateTime<Utc>,
+) -> ApiResult<MaintenanceWindow> {
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad("name is required"));
+    }
+    if input.ends_at <= input.starts_at {
+        return Err(ApiError::bad("ends_at must be after starts_at"));
+    }
+    let now = Utc::now();
+    Ok(MaintenanceWindow {
+        id,
+        name,
+        comment: input.comment,
+        rule_id: input.rule_id,
+        matchers: input.matchers,
+        starts_at: input.starts_at,
+        ends_at: input.ends_at,
+        enabled: input.enabled,
+        created_at,
+        updated_at: now,
+    })
+}
+
+async fn list_maintenance_windows(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<Vec<MaintenanceWindow>>> {
+    state
+        .db
+        .list_maintenance_windows()
+        .map(Json)
+        .map_err(ApiError::internal)
+}
+
+async fn get_maintenance_window(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<MaintenanceWindow>> {
+    let id = parse_id(&id)?;
+    state
+        .db
+        .get_maintenance_window(id)
+        .map_err(ApiError::internal)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("maintenance window not found"))
+}
+
+async fn create_maintenance_window(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<MaintenanceInput>,
+) -> ApiResult<(StatusCode, Json<MaintenanceWindow>)> {
+    let now = Utc::now();
+    let w = maintenance_from_input(Uuid::new_v4(), input, now)?;
+    state
+        .db
+        .upsert_maintenance_window(&w)
+        .map_err(ApiError::internal)?;
+    Ok((StatusCode::CREATED, Json(w)))
+}
+
+async fn update_maintenance_window(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<MaintenanceInput>,
+) -> ApiResult<Json<MaintenanceWindow>> {
+    let id = parse_id(&id)?;
+    let existing = state
+        .db
+        .get_maintenance_window(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("maintenance window not found"))?;
+    let w = maintenance_from_input(id, input, existing.created_at)?;
+    state
+        .db
+        .upsert_maintenance_window(&w)
+        .map_err(ApiError::internal)?;
+    Ok(Json(w))
+}
+
+async fn delete_maintenance_window(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let id = parse_id(&id)?;
+    let ok = state
+        .db
+        .delete_maintenance_window(id)
+        .map_err(ApiError::internal)?;
+    if ok {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("maintenance window not found"))
     }
 }
 
@@ -1386,8 +1831,18 @@ fn preview_event_from_input(
                             ends_at: None,
                             pending_since: None,
                             last_evaluated_at: Utc::now(),
+                            tally: 1,
+                            last_occurrence_at: Utc::now(),
                             notified_firing: false,
                             notified_resolved: false,
+                            acknowledged_at: None,
+                            acknowledged_by: None,
+                            assignee: None,
+                            ack_comment: None,
+                            closed_at: None,
+                            closed_by: None,
+                            close_comment: None,
+                            escalated_at: None,
                         },
                         "labels".into(),
                     ));
@@ -1418,8 +1873,18 @@ fn preview_event_from_input(
             ends_at: None,
             pending_since: None,
             last_evaluated_at: Utc::now(),
+            tally: 1,
+            last_occurrence_at: Utc::now(),
             notified_firing: false,
             notified_resolved: false,
+            acknowledged_at: None,
+            acknowledged_by: None,
+            assignee: None,
+            ack_comment: None,
+            closed_at: None,
+            closed_by: None,
+            close_comment: None,
+            escalated_at: None,
         },
         "labels".into(),
     ))
@@ -1480,8 +1945,18 @@ fn alert_event_from_ingress(incoming: &IngressAlert) -> AlertEvent {
         ends_at: incoming.ends_at,
         pending_since: None,
         last_evaluated_at: Utc::now(),
+        tally: 1,
+        last_occurrence_at: incoming.starts_at.unwrap_or_else(Utc::now),
         notified_firing: false,
         notified_resolved: false,
+        acknowledged_at: None,
+        acknowledged_by: None,
+        assignee: None,
+        ack_comment: None,
+        closed_at: None,
+        closed_by: None,
+        close_comment: None,
+        escalated_at: None,
     }
 }
 
@@ -2051,8 +2526,49 @@ struct IngressInput {
     options: BTreeMap<String, String>,
     #[serde(default)]
     channel_ids: Vec<Uuid>,
+    #[serde(default)]
+    escalate_after_seconds: u64,
+    #[serde(default)]
+    escalate_severity: Option<String>,
+    #[serde(default)]
+    escalate_channel_ids: Vec<Uuid>,
     #[serde(default = "default_true")]
     enabled: bool,
+}
+
+fn parse_escalate_severity(raw: Option<String>) -> ApiResult<Option<Severity>> {
+    match raw {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => Severity::parse(&s)
+            .map(Some)
+            .ok_or_else(|| ApiError::bad("bad escalate_severity")),
+    }
+}
+
+fn ingress_from_input(
+    id: Uuid,
+    input: IngressInput,
+    created_at: DateTime<Utc>,
+) -> ApiResult<IngressRoute> {
+    let kind =
+        IngressKind::parse(&input.kind).ok_or_else(|| ApiError::bad("unsupported ingress kind"))?;
+    let token = normalize_http_ingress_token(kind, input.token)?;
+    Ok(IngressRoute {
+        id,
+        name: input.name,
+        kind,
+        token,
+        endpoint: input.endpoint,
+        options: input.options,
+        channel_ids: input.channel_ids,
+        escalate_after_seconds: input.escalate_after_seconds,
+        escalate_severity: parse_escalate_severity(input.escalate_severity)?,
+        escalate_channel_ids: input.escalate_channel_ids,
+        enabled: input.enabled,
+        created_at,
+        updated_at: Utc::now(),
+    })
 }
 
 async fn list_ingress(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<IngressRoute>>> {
@@ -2080,21 +2596,8 @@ async fn create_ingress(
     State(state): State<Arc<AppState>>,
     Json(input): Json<IngressInput>,
 ) -> ApiResult<(StatusCode, Json<IngressRoute>)> {
-    let kind =
-        IngressKind::parse(&input.kind).ok_or_else(|| ApiError::bad("unsupported ingress kind"))?;
     let now = Utc::now();
-    let route = IngressRoute {
-        id: Uuid::new_v4(),
-        name: input.name,
-        kind,
-        token: input.token,
-        endpoint: input.endpoint,
-        options: input.options,
-        channel_ids: input.channel_ids,
-        enabled: input.enabled,
-        created_at: now,
-        updated_at: now,
-    };
+    let route = ingress_from_input(Uuid::new_v4(), input, now)?;
     state
         .db
         .upsert_ingress_route(&route)
@@ -2113,25 +2616,34 @@ async fn update_ingress(
         .get_ingress_route(id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("ingress route not found"))?;
-    let kind =
-        IngressKind::parse(&input.kind).ok_or_else(|| ApiError::bad("unsupported ingress kind"))?;
-    let route = IngressRoute {
-        id,
-        name: input.name,
-        kind,
-        token: input.token,
-        endpoint: input.endpoint,
-        options: input.options,
-        channel_ids: input.channel_ids,
-        enabled: input.enabled,
-        created_at: existing.created_at,
-        updated_at: Utc::now(),
-    };
+    let route = ingress_from_input(id, input, existing.created_at)?;
     state
         .db
         .upsert_ingress_route(&route)
         .map_err(ApiError::internal)?;
     Ok(Json(route))
+}
+
+/// HTTP ingress (alertmanager / generic) must have a non-empty token (≥8 chars).
+/// Kafka ignores token (cleared).
+fn normalize_http_ingress_token(
+    kind: IngressKind,
+    token: Option<String>,
+) -> ApiResult<Option<String>> {
+    if matches!(kind, IngressKind::Kafka) {
+        return Ok(None);
+    }
+    let t = token.unwrap_or_default();
+    let t = t.trim();
+    if t.is_empty() {
+        return Err(ApiError::bad(
+            "HTTP 接入必须配置鉴权 Token（请求头 Authorization: Bearer / X-Eventide-Token）",
+        ));
+    }
+    if t.chars().count() < 8 {
+        return Err(ApiError::bad("鉴权 Token 至少 8 个字符"));
+    }
+    Ok(Some(t.to_string()))
 }
 
 async fn delete_ingress(

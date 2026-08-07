@@ -20,6 +20,11 @@ pub async fn overview(
         .active_silences(chrono::Utc::now())
         .map_err(internal)?
         .len();
+    let active_maintenance = state
+        .db
+        .active_maintenance_windows(chrono::Utc::now())
+        .map_err(internal)?
+        .len();
     let recent_alerts = state
         .db
         .list_recent_alerts_overview(10)
@@ -63,6 +68,11 @@ pub async fn overview(
     } else {
         health
     };
+    let health = if active_maintenance > 0 {
+        format!("{health} · {active_maintenance} 个维护窗生效")
+    } else {
+        health
+    };
 
     Ok(Json(serde_json::json!({
         "health": health,
@@ -76,12 +86,19 @@ pub async fn overview(
         "alerts_pending": pending,
         "alerts_resolved": resolved,
         "active_silences": active_silences,
+        "active_maintenance_windows": active_maintenance,
         "recent_alerts": recent_alerts,
         "ingress": ingress_brief,
         "notify_skips": notify_skips,
         "pressure_inflight": state.pressure.inflight(),
+        "ingress_max_inflight": state
+            .storm
+            .read()
+            .map(|s| s.ingress_max_inflight)
+            .unwrap_or(state.config.storm.ingress_max_inflight),
         "is_leader": state.leader.is_leader(),
         "leader_holder_id": state.leader.holder_id(),
+        "cluster_enabled": state.config.cluster.enabled,
     })))
 }
 

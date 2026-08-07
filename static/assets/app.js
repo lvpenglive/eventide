@@ -11,8 +11,11 @@ import {
   cmpLabel,
   fmtTime,
   createModalApi,
+  passwordFieldHtml,
+  bindPasswordToggles,
+  validatePasswordComplexity,
 } from "./js/ui.js";
-import { createAlertsModule, ALERT_PAGE_SIZE } from "./js/pages/alerts.js";
+import { createAlertsModule, ALERT_PAGE_SIZE } from "./js/pages/alerts.js?v=95";
 
 const SIDEBAR_KEY = "eventide_sidebar_collapsed";
 const NAV_GROUPS_KEY = "eventide_nav_groups";
@@ -22,6 +25,7 @@ const PAGE_GROUP = {
   overview: null,
   alerts: "ops",
   silences: "ops",
+  maintenance: "ops",
   datasources: "config",
   rules: "config",
   ingress: "config",
@@ -35,6 +39,7 @@ const PAGE_GROUP = {
   roles: "system",
   departments: "system",
   settings: "system",
+  audit: "system",
   kafka: "tools",
 };
 
@@ -42,6 +47,7 @@ const PAGE_PERM = {
   overview: "overview:read",
   alerts: "alerts:read",
   silences: "silences:read",
+  maintenance: "maintenance:read",
   datasources: "datasources:read",
   rules: "rules:read",
   ingress: "ingress:read",
@@ -56,12 +62,14 @@ const PAGE_PERM = {
   roles: "roles:read",
   departments: "departments:read",
   settings: "settings:read",
+  audit: "audit:read",
 };
 
 const PAGE_ORDER = [
   "overview",
   "alerts",
   "silences",
+  "maintenance",
   "datasources",
   "rules",
   "ingress",
@@ -76,6 +84,7 @@ const PAGE_ORDER = [
   "roles",
   "departments",
   "settings",
+  "audit",
 ];
 
 const state = {
@@ -98,10 +107,12 @@ const titles = {
   alerts: ["告警事件", "按状态浏览 · 点开看详情"],
   enrich: ["告警丰富", "台账补字段 · 写描述 / IP / 级别"],
   silences: ["静默策略", "按规则或标签临时抑制通知"],
+  maintenance: ["维护窗", "计划维护期间抑制匹配告警通知"],
   users: ["用户管理", "账号 · 部门 · 角色"],
   roles: ["权限管理", "角色与权限码"],
   departments: ["部门管理", "组织架构"],
   settings: ["系统设置", "许可 · 外观 · 抗风暴 · 告警历史 · Trap Token · 运行信息"],
+  audit: ["操作审计", "谁在何时做了哪些变更"],
 };
 
 function can(perm) {
@@ -149,6 +160,7 @@ function showApp() {
   applySidebarState();
   applyNavPermissions();
   refreshLicenseBanner();
+  refreshPasswordBanner();
 }
 
 function licenseKindLabel(kind) {
@@ -201,6 +213,108 @@ async function refreshLicenseBanner() {
   } catch (_) {
     el.hidden = true;
   }
+}
+
+async function refreshPasswordBanner() {
+  const el = document.getElementById("password-banner");
+  if (!el) return;
+  if (!token()) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  try {
+    const me = state.me?.password_status
+      ? state.me
+      : await api("/api/auth/me");
+    if (!state.me) state.me = me;
+    else if (me.password_status) state.me.password_status = me.password_status;
+    const ps = me.password_status || state.me?.password_status;
+    if (!ps || !ps.enabled || (!ps.expired && !ps.warn)) {
+      el.hidden = true;
+      el.innerHTML = "";
+      return;
+    }
+    const days = ps.days_left;
+    let text;
+    let cls = "warn";
+    if (ps.expired) {
+      text = `登录密码已过期（有效期 ${me.password_max_age_days ?? "—"} 天），请尽快修改。`;
+    } else {
+      cls = days != null && days <= 3 ? "warn" : "info";
+      text = `登录密码将在约 ${days ?? "—"} 天后过期（${fmtTime(ps.expires_at) || "—"}），建议提前修改。`;
+    }
+    el.hidden = false;
+    el.className = `license-banner ${cls}`;
+    el.innerHTML = `<span>${text}</span><button type="button" class="ghost" id="password-banner-go">修改密码</button>`;
+    const btn = document.getElementById("password-banner-go");
+    if (btn) btn.onclick = () => openChangePasswordModal();
+  } catch (_) {
+    el.hidden = true;
+  }
+}
+
+function openChangePasswordModal() {
+  openModal(`
+    <div class="modal-head">
+      <h3>修改密码</h3>
+      <p class="desc">修改后立即生效；请使用符合复杂度要求的新密码。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>当前密码</label>
+        ${passwordFieldHtml({
+          name: "current_password",
+          attrs: `required autocomplete="current-password"`,
+          hint: false,
+        })}</div>
+      <div class="field"><label>新密码</label>
+        ${passwordFieldHtml({
+          name: "new_password",
+          attrs: `required minlength="8" autocomplete="new-password" placeholder="如 Abcd123!"`,
+        })}</div>
+      <div class="field"><label>确认新密码</label>
+        ${passwordFieldHtml({
+          name: "new_password2",
+          attrs: `required minlength="8" autocomplete="new-password"`,
+          hint: false,
+        })}</div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`);
+  document.getElementById("m-cancel").onclick = closeModal;
+  bindPasswordToggles(document.getElementById("modal-body") || document);
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const current_password = String(fd.get("current_password") || "");
+    const new_password = String(fd.get("new_password") || "").trim();
+    const new_password2 = String(fd.get("new_password2") || "").trim();
+    if (new_password !== new_password2) {
+      toast("两次输入的新密码不一致", true);
+      return;
+    }
+    const pe = validatePasswordComplexity(new_password);
+    if (pe) {
+      toast(pe, true);
+      return;
+    }
+    try {
+      const r = await api("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ current_password, new_password }),
+      });
+      if (state.me && r.password_status) {
+        state.me.password_status = r.password_status;
+      }
+      closeModal();
+      toast("密码已修改");
+      refreshPasswordBanner();
+    } catch (err) {
+      toast(err.message || "修改失败", true);
+    }
+  };
 }
 
 function applySidebarState() {
@@ -330,6 +444,22 @@ function scrubLoginQueryFromUrl() {
 }
 scrubLoginQueryFromUrl();
 
+document.getElementById("login-toggle-pw")?.addEventListener("click", () => {
+  const input = document.getElementById("password");
+  const btn = document.getElementById("login-toggle-pw");
+  if (!input || !btn) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  btn.setAttribute("aria-pressed", show ? "true" : "false");
+  const label = show ? "隐藏密码" : "显示密码";
+  btn.setAttribute("aria-label", label);
+  btn.title = label;
+  const open = btn.querySelector(".eye-open");
+  const off = btn.querySelector(".eye-off");
+  if (open) open.hidden = show;
+  if (off) off.hidden = !show;
+});
+
 document.getElementById("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   e.stopPropagation();
@@ -346,15 +476,26 @@ document.getElementById("login-form").addEventListener("submit", async (e) => {
     localStorage.setItem(TOKEN_KEY, data.token);
     localStorage.setItem(USER_KEY, data.username);
     state.me = await api("/api/auth/me");
+    if (data.password_status) {
+      state.me.password_status = data.password_status;
+    }
     showApp();
     navigate(firstAllowedPage());
-    toast("登录成功");
+    const ps = data.password_status;
+    if (ps?.expired) {
+      toast("密码已过期，请尽快修改", true);
+    } else if (ps?.warn) {
+      toast(`密码将在约 ${ps.days_left ?? "—"} 天后过期`);
+    } else {
+      toast("登录成功");
+    }
   } catch (ex) {
     err.textContent = ex.message || "登录失败";
   }
 });
 
 document.getElementById("btn-logout").addEventListener("click", () => logout());
+document.getElementById("btn-change-pw")?.addEventListener("click", () => openChangePasswordModal());
 document.getElementById("btn-sidebar").addEventListener("click", () => toggleSidebar());
 
 // ---------- Navigation ----------
@@ -516,6 +657,7 @@ const pages = {
         q: "",
         ip: "",
         store: "",
+        acked: "",
         page: 1,
       };
       navigate("alerts");
@@ -531,12 +673,27 @@ const pages = {
       const resolved = d.alerts_resolved || 0;
       const recent = d.recent_alerts || [];
       const skips = d.notify_skips || [];
-      const needsSetup =
-        !d.datasources || !d.enabled_rules || !d.channels || !d.ingress_routes;
+      const hasChannel = !!(d.channels || 0);
+      const hasIngress = !!(d.ingress_routes || 0);
+      const hasDatasources = !!(d.datasources || 0);
+      const hasEnabledRules = !!(d.enabled_rules || 0);
+      const hasRulePath = hasDatasources && hasEnabledRules;
+      const hasAlertSource = hasIngress || hasRulePath;
+      const needsSetup = !hasChannel || !hasAlertSource;
+      const inflight = d.pressure_inflight || 0;
+      const inflightMax = d.ingress_max_inflight || 0;
+      const holder = String(d.leader_holder_id || "");
+      const holderShort = holder ? holder.slice(0, 8) : "—";
+      const leaderLabel = d.cluster_enabled
+        ? d.is_leader
+          ? `本机选主 · ${holderShort}`
+          : `跟随 · 本机 ${holderShort}`
+        : "单机（未启用集群选主）";
+      const nowLabel = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 
       const hint = document.getElementById("ov-hint");
       if (hint) {
-        hint.textContent = "每 30 秒自动刷新";
+        hint.textContent = `刚刚刷新 ${nowLabel} · 每 30 秒自动`;
       }
 
       root.innerHTML = `
@@ -551,6 +708,11 @@ const pages = {
           </div>
         </div>
 
+        <div class="overview-runtime">
+          <span title="${esc(holder)}">调度 ${esc(leaderLabel)}</span>
+          <span>HTTP 接入并发 ${inflight}${inflightMax ? ` / ${inflightMax}` : ""}</span>
+        </div>
+
         <div class="stats overview-stats-primary">
           <button type="button" class="stat firing clickable" data-go-alerts="firing">
             <div class="n">${firing}</div><div class="l">正在告警</div>
@@ -563,6 +725,9 @@ const pages = {
           </button>
           <button type="button" class="stat accent clickable" data-go-page="silences">
             <div class="n">${d.active_silences || 0}</div><div class="l">生效静默</div>
+          </button>
+          <button type="button" class="stat accent clickable" data-go-page="maintenance">
+            <div class="n">${d.active_maintenance_windows || 0}</div><div class="l">生效维护窗</div>
           </button>
         </div>
 
@@ -585,12 +750,16 @@ const pages = {
           needsSetup
             ? `<div class="panel overview-setup">
                 <strong>尚未完成最小闭环</strong>
-                <p class="hint">建议先准备数据源或告警接入、通知渠道，再配置规则 / 丰富。</p>
+                <p class="hint">需要<strong>通知渠道</strong>；告警来源任选其一：① 告警接入（Webhook / Kafka / Trap）② 数据源 + 启用规则。</p>
                 <div class="overview-setup-actions">
-                  ${!d.datasources ? `<button type="button" class="ghost" data-go-page="datasources">新建数据源</button>` : ""}
-                  ${!d.ingress_routes ? `<button type="button" class="ghost" data-go-page="ingress">配置告警接入</button>` : ""}
-                  ${!d.channels ? `<button type="button" class="ghost" data-go-page="channels">新建通知渠道</button>` : ""}
-                  ${!d.enabled_rules ? `<button type="button" class="ghost" data-go-page="rules">新建规则</button>` : ""}
+                  ${!hasChannel ? `<button type="button" class="ghost" data-go-page="channels">新建通知渠道</button>` : ""}
+                  ${
+                    !hasAlertSource
+                      ? `${!hasIngress ? `<button type="button" class="ghost" data-go-page="ingress">配置告警接入</button>` : ""}
+                         ${!hasDatasources ? `<button type="button" class="ghost" data-go-page="datasources">新建数据源</button>` : ""}
+                         ${!hasEnabledRules ? `<button type="button" class="ghost" data-go-page="rules">新建规则</button>` : ""}`
+                      : ""
+                  }
                 </div>
               </div>`
             : ""
@@ -708,7 +877,11 @@ const pages = {
             <td>${esc(dsName[r.datasource_id] || r.datasource_id.slice(0, 8))}</td>
             <td class="mono">${esc(r.expr)}</td>
             <td class="mono">${esc(cmpLabel(r.comparator))} ${r.threshold}</td>
-            <td>${r.interval_seconds}s / for ${r.for_seconds}s</td>
+            <td>${r.interval_seconds}s / for ${r.for_seconds}s${
+              Number(r.escalate_after_seconds) > 0
+                ? ` · 升级 ${r.escalate_after_seconds}s`
+                : ""
+            }</td>
             <td><span class="badge ${r.enabled ? "on" : "off"}">${r.enabled ? "启用" : "停用"}</span></td>
             <td class="actions">
               <button data-run="${r.id}">试跑</button>
@@ -814,6 +987,7 @@ const pages = {
       const edgeLabel = (t, err) => {
         if (t === "became_firing") return "触发";
         if (t === "became_resolved") return "恢复";
+        if (t === "escalated") return "升级";
         if (err === "test" || String(err || "").startsWith("test")) return "测试";
         return t || "其他";
       };
@@ -982,7 +1156,7 @@ const pages = {
                   ${
                     r.token
                       ? `· 请求头需带 <code>Authorization: Bearer ***</code> 或 <code>X-Eventide-Token</code>`
-                      : "· 未配置 Token，任意来源可推送"
+                      : `· <span style="color:var(--danger,#c0392b)">未配置 Token，推送会被拒绝</span> — 请编辑并填写鉴权 Token`
                   }</div>`
                   : `<div class="hint">Brokers <code class="mono">${esc(
                       r.endpoint || "—"
@@ -1738,6 +1912,70 @@ const pages = {
       b.onclick = async () => {
         if (!confirm("确认删除该静默？")) return;
         await api(`/api/silences/${b.dataset.del}`, { method: "DELETE" });
+        toast("已删除");
+        renderPage();
+      };
+    });
+  },
+
+  async maintenance(root) {
+    const canWrite = can("maintenance:write");
+    setActions(
+      canWrite
+        ? `<button class="primary" id="btn-add">新建维护窗</button>`
+        : ""
+    );
+    const addBtn = document.getElementById("btn-add");
+    if (addBtn) addBtn.onclick = () => editMaintenance();
+    const rows = await api("/api/maintenance-windows");
+    const now = Date.now();
+    root.innerHTML = `<div class="panel">${
+      rows.length
+        ? `<table class="data"><thead><tr>
+            <th>名称</th><th>启用</th><th>规则</th><th>匹配标签</th><th>时间窗</th><th>状态</th><th></th>
+          </tr></thead>
+          <tbody>${rows
+            .map((w) => {
+              const inWindow =
+                new Date(w.starts_at) <= now && now < new Date(w.ends_at);
+              const active = w.enabled !== false && inWindow;
+              return `<tr>
+            <td>
+              <div>${esc(w.name || "—")}</div>
+              ${w.comment ? `<div class="hint">${esc(w.comment)}</div>` : ""}
+            </td>
+            <td><span class="badge ${w.enabled !== false ? "on" : "off"}">${
+              w.enabled !== false ? "开" : "关"
+            }</span></td>
+            <td class="mono">${w.rule_id ? esc(String(w.rule_id).slice(0, 8)) + "…" : "全部"}</td>
+            <td class="mono">${esc(JSON.stringify(w.matchers || {}))}</td>
+            <td>${esc(fmtTime(w.starts_at))} → ${esc(fmtTime(w.ends_at))}</td>
+            <td><span class="badge ${active ? "on" : "off"}">${
+              active ? "生效中" : inWindow ? "已禁用" : "未生效"
+            }</span></td>
+            <td class="actions">
+              ${
+                canWrite
+                  ? `<button type="button" data-edit="${w.id}">编辑</button>
+                     <button type="button" class="danger" data-del="${w.id}">删除</button>`
+                  : ""
+              }
+            </td>
+          </tr>`;
+            })
+            .join("")}</tbody></table>`
+        : `<div class="empty">暂无维护窗。可在告警详情用「据此开维护」快速创建。</div>`
+    }</div>`;
+    root.querySelectorAll("[data-edit]").forEach((b) => {
+      b.onclick = () => {
+        const row = rows.find((r) => r.id === b.dataset.edit);
+        if (row) editMaintenance(row);
+      };
+    });
+    root.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm("确认删除该维护窗？")) return;
+        await api(`/api/maintenance-windows/${b.dataset.del}`, { method: "DELETE" });
         toast("已删除");
         renderPage();
       };
@@ -3162,6 +3400,178 @@ const pages = {
     await paint();
   },
 
+  async audit(root) {
+    const f = state.auditFilters || { actor: "", action: "", resource_type: "", q: "" };
+    setActions(`<button class="ghost" id="btn-refresh">刷新</button>`);
+
+    const actionLabel = (a) => {
+      const map = {
+        "alert.ack": "确认告警",
+        "alert.unack": "取消确认",
+        "alert.close": "关闭告警",
+        "silence.create": "新建静默",
+        "silence.delete": "删除静默",
+        "maintenance.create": "新建维护窗",
+        "maintenance.update": "更新维护窗",
+        "maintenance.delete": "删除维护窗",
+        "rule.create": "新建规则",
+        "rule.update": "更新规则",
+        "rule.delete": "删除规则",
+        "channel.create": "新建渠道",
+        "channel.update": "更新渠道",
+        "channel.delete": "删除渠道",
+        "ingress.create": "新建接入",
+        "ingress.update": "更新接入",
+        "ingress.delete": "删除接入",
+        "enrich.create": "新建丰富",
+        "enrich.update": "更新丰富",
+        "enrich.delete": "删除丰富",
+        "user.create": "新建用户",
+        "user.update": "更新用户",
+        "user.delete": "删除用户",
+        "user.reset_password": "重置密码",
+        "role.create": "新建角色",
+        "role.update": "更新角色",
+        "role.delete": "删除角色",
+        "auth.change_password": "修改密码",
+        "license.create": "导入许可",
+        "license.update": "更新许可",
+        "license.delete": "清除许可",
+      };
+      return map[a] || a || "—";
+    };
+
+    const load = async () => {
+      const actor =
+        root.querySelector("#au-actor")?.value ?? state.auditFilters?.actor ?? "";
+      const action =
+        root.querySelector("#au-action")?.value ?? state.auditFilters?.action ?? "";
+      const resource_type =
+        root.querySelector("#au-rtype")?.value ?? state.auditFilters?.resource_type ?? "";
+      const q = (root.querySelector("#au-q")?.value ?? state.auditFilters?.q ?? "").trim();
+      state.auditFilters = { actor, action, resource_type, q };
+
+      const params = new URLSearchParams();
+      if (actor.trim()) params.set("actor", actor.trim());
+      if (action) params.set("action", action);
+      if (resource_type) params.set("resource_type", resource_type);
+      if (q) params.set("q", q);
+      params.set("limit", "200");
+
+      const rows = await api("/api/audit-logs?" + params.toString());
+
+      const resourceTypes = [
+        ["", "全部资源"],
+        ["alert", "告警"],
+        ["silence", "静默"],
+        ["maintenance", "维护窗"],
+        ["rule", "规则"],
+        ["channel", "渠道"],
+        ["ingress", "接入"],
+        ["enrich", "丰富"],
+        ["user", "用户"],
+        ["role", "角色"],
+        ["department", "部门"],
+        ["settings", "设置"],
+        ["license", "许可"],
+        ["auth", "认证"],
+      ];
+      const actions = [
+        ["", "全部动作"],
+        ["alert.ack", "确认告警"],
+        ["alert.unack", "取消确认"],
+        ["alert.close", "关闭告警"],
+        ["silence.create", "新建静默"],
+        ["silence.delete", "删除静默"],
+        ["maintenance.create", "新建维护窗"],
+        ["maintenance.update", "更新维护窗"],
+        ["maintenance.delete", "删除维护窗"],
+        ["rule.create", "新建规则"],
+        ["rule.update", "更新规则"],
+        ["rule.delete", "删除规则"],
+        ["user.reset_password", "重置密码"],
+        ["auth.change_password", "修改密码"],
+      ];
+
+      root.innerHTML = `
+        <div class="panel">
+          <div class="alert-toolbar">
+            <div class="alert-filters">
+              <input id="au-actor" type="search" placeholder="操作人" value="${esc(actor)}" style="max-width:9rem" />
+              <select id="au-action">
+                ${actions
+                  .map(
+                    ([v, lab]) =>
+                      `<option value="${esc(v)}" ${action === v ? "selected" : ""}>${esc(lab)}</option>`
+                  )
+                  .join("")}
+              </select>
+              <select id="au-rtype">
+                ${resourceTypes
+                  .map(
+                    ([v, lab]) =>
+                      `<option value="${esc(v)}" ${
+                        resource_type === v ? "selected" : ""
+                      }>${esc(lab)}</option>`
+                  )
+                  .join("")}
+              </select>
+              <input id="au-q" type="search" placeholder="搜索路径 / 资源 ID" value="${esc(q)}" />
+            </div>
+          </div>
+          ${
+            rows.length
+              ? `<table class="data"><thead><tr>
+                  <th>时间</th><th>操作人</th><th>动作</th><th>资源</th><th>结果</th><th>路径</th><th>IP</th>
+                </tr></thead><tbody>${rows
+                  .map((n) => {
+                    const ok = n.status_code >= 200 && n.status_code < 300;
+                    const rid = n.resource_id
+                      ? n.resource_id.length > 12
+                        ? n.resource_id.slice(0, 8) + "…"
+                        : n.resource_id
+                      : "—";
+                    return `<tr>
+                  <td>${esc(fmtTime(n.created_at))}</td>
+                  <td>${esc(n.actor_username || "—")}</td>
+                  <td>${esc(actionLabel(n.action))}<div class="hint" style="margin:0">${esc(
+                      n.action || ""
+                    )}</div></td>
+                  <td>${esc(n.resource_type || "—")}<div class="hint mono" style="margin:0" title="${esc(
+                      n.resource_id || ""
+                    )}">${esc(rid)}</div></td>
+                  <td><span class="badge ${ok ? "on" : "firing"}">${esc(
+                    String(n.status_code ?? "")
+                  )}</span></td>
+                  <td class="mono" title="${esc(n.path || "")}">${esc(
+                      (n.method || "") + " " + (n.path || "")
+                    )}</td>
+                  <td class="mono">${esc(n.client_ip || "—")}</td>
+                </tr>`;
+                  })
+                  .join("")}</tbody></table>`
+              : `<div class="empty">暂无审计记录。确认告警、改规则、改用户等写操作后会出现在这里。</div>`
+          }
+        </div>`;
+
+      root.querySelector("#au-action").onchange = () => load();
+      root.querySelector("#au-rtype").onchange = () => load();
+      const actorEl = root.querySelector("#au-actor");
+      const qEl = root.querySelector("#au-q");
+      let t;
+      const debounced = () => {
+        clearTimeout(t);
+        t = setTimeout(() => load(), 280);
+      };
+      actorEl.oninput = debounced;
+      qEl.oninput = debounced;
+    };
+
+    document.getElementById("btn-refresh").onclick = () => load();
+    state.auditFilters = { ...f };
+    await load();
+  },
+
   async settings(root) {
     const me = await api("/api/auth/me");
     state.me = me;
@@ -4117,6 +4527,8 @@ function showNotifyLogDetail(n) {
       ? "触发通知"
       : n.transition === "became_resolved"
       ? "恢复通知"
+      : n.transition === "escalated"
+      ? "升级通知"
       : n.error === "test"
       ? "渠道测试"
       : n.transition || "其他";
@@ -4679,6 +5091,34 @@ async function editRule(row) {
             row?.channel_ids || []
           )}
         </div>
+        <div class="field"><label>未接手升级（秒，0=关闭）</label>
+          <input name="escalate_after_seconds" type="number" min="0" value="${
+            row?.escalate_after_seconds ?? 0
+          }" />
+          <div class="hint">告警中超过此时长仍未接手则发送升级通知；可选抬升级别与独立渠道。</div>
+        </div>
+        <div class="row">
+          <div class="field"><label>升级级别（可选）</label>
+            <select name="escalate_severity">
+              <option value="" ${!row?.escalate_severity ? "selected" : ""}>不改级别</option>
+              ${["not_classified","information","warning","average","high","disaster"]
+                .map(
+                  (v) =>
+                    `<option value="${v}" ${
+                      row?.escalate_severity === v ? "selected" : ""
+                    }>${esc(severityLabel(v))}</option>`
+                )
+                .join("")}
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>升级通知渠道（可选，空=用上方渠道）</label>
+          ${multiSelect(
+            "escalate_channel_ids",
+            chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
+            row?.escalate_channel_ids || []
+          )}
+        </div>
         <div class="field"><label>附加标签（可选，JSON）</label>
           <textarea name="labels" rows="2" placeholder='{"team":"sre"}'>${esc(
             Object.keys(row?.labels || {}).length ? JSON.stringify(row.labels, null, 0) : ""
@@ -4735,6 +5175,9 @@ async function editRule(row) {
       labels,
       annotations,
       channel_ids: selectedValues(form, "channel_ids"),
+      escalate_after_seconds: Number(fd.get("escalate_after_seconds") || 0),
+      escalate_severity: String(fd.get("escalate_severity") || "").trim() || null,
+      escalate_channel_ids: selectedValues(form, "escalate_channel_ids"),
       enabled: form.querySelector('[name="enabled"]').checked,
     };
     if (row) await api(`/api/rules/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
@@ -4830,7 +5273,7 @@ function ingressHelpHtml(open = false) {
       </table>
       <p style="margin-top:10px">
         <b>建议顺序：</b>通知渠道 → 新建接入 → 「试推送」→ 告警事件确认 → 再接真实平台。<br/>
-        Token 仅保护 HTTP 推送；Kafka 接入靠网络与 ACL，不使用接入 Token。
+        Token <b>必填</b>：保护 HTTP 推送（Alertmanager / Generic）；Kafka 接入靠网络与 ACL，不使用接入 Token。
       </p>
     </div>
   </details>`;
@@ -5007,9 +5450,15 @@ async function editIngress(row, opts = {}) {
 
       <div class="kind-panel" data-kinds="alertmanager,generic" id="ing-http">
         <div class="field">
-          <label>鉴权 Token（可选）</label>
-          <input name="token" value="${esc(row?.token || "")}" placeholder="请求头 Bearer / X-Eventide-Token" />
-          <div class="hint">留空则不校验。保存后在卡片上复制 Webhook，或使用「试推送」验证。</div>
+          <label>鉴权 Token（必填）</label>
+          <div class="url-row" style="gap:8px">
+            <input name="token" value="${esc(
+              row?.token ||
+                (row ? "" : crypto.randomUUID?.() || `evt-${Date.now().toString(36)}`)
+            )}" placeholder="至少 8 位；请求头 Bearer / X-Eventide-Token" style="flex:1" required minlength="8" />
+            <button type="button" class="btn ghost" id="ing-gen-token">重新生成</button>
+          </div>
+          <div class="hint">HTTP 接入必须配置 Token；推送时带 <code>Authorization: Bearer …</code> 或 <code>X-Eventide-Token</code>。</div>
         </div>
         <div class="hint sample-hint" id="ing-format-hint"></div>
       </div>
@@ -5183,6 +5632,27 @@ async function editIngress(row, opts = {}) {
         </select>
         <div class="hint">未绑定渠道时告警仍会入库，但不会发送通知。</div>
       </div>
+      <div class="field">
+        <label>未接手升级（秒，0=关闭）</label>
+        <input name="escalate_after_seconds" type="number" min="0" value="${
+          row?.escalate_after_seconds ?? 0
+        }" />
+        <div class="hint">告警中超时未接手则发送升级通知（与规则同源逻辑）。</div>
+      </div>
+      <div class="field">
+        <label>升级级别（可选）</label>
+        <select name="escalate_severity">
+          <option value="" ${!row?.escalate_severity ? "selected" : ""}>不改级别</option>
+          ${["not_classified","information","warning","average","high","disaster"]
+            .map(
+              (v) =>
+                `<option value="${v}" ${
+                  row?.escalate_severity === v ? "selected" : ""
+                }>${esc(severityLabel(v))}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
     </form>
     <div class="modal-actions">
       <button type="button" class="ghost" id="m-cancel">取消</button>
@@ -5261,6 +5731,17 @@ async function editIngress(row, opts = {}) {
   }
 
   document.getElementById("m-cancel").onclick = closeModal;
+  const genTokBtn = document.getElementById("ing-gen-token");
+  if (genTokBtn) {
+    genTokBtn.onclick = () => {
+      const inp = form.querySelector('input[name="token"]');
+      if (inp) {
+        inp.value =
+          (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+          `evt-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+      }
+    };
+  }
   form.onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -5293,6 +5774,9 @@ async function editIngress(row, opts = {}) {
       const preset = String(fd.get("_preset") || "").trim();
       if (preset) options._preset = preset;
       token = "";
+    } else if (!token || token.length < 8) {
+      toast("HTTP 接入必须填写鉴权 Token（至少 8 位）", true);
+      return;
     }
     if (k === "generic" || k === "kafka") {
       const mapKeys = [
@@ -5330,6 +5814,9 @@ async function editIngress(row, opts = {}) {
       endpoint,
       options,
       channel_ids: channelIds,
+      escalate_after_seconds: Number(fd.get("escalate_after_seconds") || 0),
+      escalate_severity: String(fd.get("escalate_severity") || "").trim() || null,
+      escalate_channel_ids: [],
       enabled: form.querySelector('[name="enabled"]').checked,
     };
     let saved;
@@ -5359,7 +5846,7 @@ function showIngressSaved(route) {
   const pushUrl = `${origin}/api/ingress/${route.id}/push`;
   const tokenHint = route.token
     ? `-H "Authorization: Bearer <token>"`
-    : "# 未配置 Token，可直接推送";
+    : '# 请先在接入中配置 Token，否则推送会被拒绝';
   openModal(`
     <div class="modal-head">
       <h3>告警接入已保存</h3>
@@ -6640,6 +7127,99 @@ function editSilence(prefill) {
   };
 }
 
+function editMaintenance(prefill) {
+  const now = new Date();
+  const end = new Date(now.getTime() + 2 * 3600 * 1000);
+  const toLocal = (d) => {
+    const pad = (n) => String(n).padStart(2, "0");
+    const dt = d instanceof Date ? d : new Date(d);
+    return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(
+      dt.getHours()
+    )}:${pad(dt.getMinutes())}`;
+  };
+  const isEdit = !!(prefill && prefill.id);
+  const matchersJson = JSON.stringify(prefill?.matchers || {}, null, 2);
+  const startVal = prefill?.starts_at ? toLocal(prefill.starts_at) : toLocal(now);
+  const endVal = prefill?.ends_at ? toLocal(prefill.ends_at) : toLocal(end);
+  const enabled = prefill?.enabled !== false;
+  openModal(`
+    <div class="modal-head">
+      <h3>${isEdit ? "编辑维护窗" : "新建维护窗"}</h3>
+      <p class="desc">时间窗内抑制匹配标签的通知；告警仍入库，列表显示「维护中」。</p>
+    </div>
+    <form id="f" class="modal-body">
+      <div class="field"><label>名称</label><input name="name" required placeholder="机房 A 周末维护" value="${esc(
+        prefill?.name || ""
+      )}" /></div>
+      <div class="field"><label>注释</label><input name="comment" placeholder="可选说明" value="${esc(
+        prefill?.comment || ""
+      )}" /></div>
+      <div class="field"><label>规则 ID（可选，留空匹配全部）</label><input name="rule_id" placeholder="uuid" value="${esc(
+        prefill?.rule_id || ""
+      )}" /></div>
+      <div class="field"><label>匹配标签 JSON</label>
+        <textarea name="matchers" rows="4">${esc(matchersJson)}</textarea>
+        <div class="hint">例：{"ip":"10.0.0.1"} 或 {"trap_hosts.机房":"上海"}</div>
+      </div>
+      <div class="row">
+        <div class="field"><label>开始</label><input name="starts_at" type="datetime-local" required value="${startVal}" /></div>
+        <div class="field"><label>结束</label><input name="ends_at" type="datetime-local" required value="${endVal}" /></div>
+      </div>
+      <label class="check"><input type="checkbox" name="enabled" ${
+        enabled ? "checked" : ""
+      } /> 启用</label>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="ghost" id="m-cancel">取消</button>
+      <button class="primary" type="submit" form="f">保存</button>
+    </div>`, { wide: true });
+  document.getElementById("m-cancel").onclick = closeModal;
+  document.getElementById("f").onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fd = new FormData(form);
+    let matchers = {};
+    try {
+      matchers = JSON.parse(String(fd.get("matchers") || "{}"));
+    } catch {
+      toast("匹配标签 JSON 无效", true);
+      return;
+    }
+    const ruleId = String(fd.get("rule_id") || "").trim();
+    const body = {
+      name: String(fd.get("name") || "").trim(),
+      comment: fd.get("comment") || "",
+      rule_id: ruleId || null,
+      matchers,
+      starts_at: new Date(fd.get("starts_at")).toISOString(),
+      ends_at: new Date(fd.get("ends_at")).toISOString(),
+      enabled: form.querySelector('[name="enabled"]').checked,
+    };
+    if (!body.name) {
+      toast("名称不能为空", true);
+      return;
+    }
+    try {
+      if (isEdit) {
+        await api(`/api/maintenance-windows/${prefill.id}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        });
+      } else {
+        await api("/api/maintenance-windows", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      }
+      closeModal();
+      toast("已保存");
+      renderPage();
+    } catch (err) {
+      toast(err.message || "保存失败", true);
+    }
+  };
+}
+
 // ---------- IAM editors ----------
 async function editUser(row) {
   const [roles, depts] = await Promise.all([
@@ -6664,9 +7244,11 @@ async function editUser(row) {
           <input name="display_name" value="${esc(row?.display_name || "")}" /></div>
       </div>
       <div class="field"><label>${row ? "新密码（留空不改）" : "初始密码"}</label>
-        <input name="password" type="password" autocomplete="new-password" ${
-          row ? "" : "required minlength=6"
-        } placeholder="${row ? "留空则不修改" : "至少 6 位"}" /></div>
+        ${passwordFieldHtml({
+          attrs: row
+            ? `autocomplete="new-password" placeholder="留空则不修改" minlength="8"`
+            : `required minlength="8" autocomplete="new-password" placeholder="如 Abcd123!"`,
+        })}</div>
       <div class="field"><label>部门</label>
         <select name="department_id">
           <option value="">— 未分配 —</option>
@@ -6700,11 +7282,19 @@ async function editUser(row) {
       <button class="primary" type="submit" form="f">保存</button>
     </div>`);
   document.getElementById("m-cancel").onclick = closeModal;
+  bindPasswordToggles(document.getElementById("modal-body") || document);
   document.getElementById("f").onsubmit = async (e) => {
     e.preventDefault();
     const form = e.target;
     const fd = new FormData(form);
     const password = String(fd.get("password") || "").trim();
+    if (password) {
+      const pe = validatePasswordComplexity(password);
+      if (pe) {
+        toast(pe, true);
+        return;
+      }
+    }
     const body = {
       username: String(fd.get("username") || "").trim(),
       display_name: String(fd.get("display_name") || "").trim(),
@@ -6737,16 +7327,24 @@ function resetUserPassword(id) {
     <div class="modal-head"><h3>重置密码</h3></div>
     <form id="f" class="modal-body">
       <div class="field"><label>新密码</label>
-        <input name="password" type="password" required minlength="6" autocomplete="new-password" /></div>
+        ${passwordFieldHtml({
+          attrs: `required minlength="8" autocomplete="new-password" placeholder="如 Abcd123!"`,
+        })}</div>
     </form>
     <div class="modal-actions">
       <button type="button" class="ghost" id="m-cancel">取消</button>
       <button class="primary" type="submit" form="f">确定</button>
     </div>`);
   document.getElementById("m-cancel").onclick = closeModal;
+  bindPasswordToggles(document.getElementById("modal-body") || document);
   document.getElementById("f").onsubmit = async (e) => {
     e.preventDefault();
-    const pw = new FormData(e.target).get("password");
+    const pw = String(new FormData(e.target).get("password") || "").trim();
+    const pe = validatePasswordComplexity(pw);
+    if (pe) {
+      toast(pe, true);
+      return;
+    }
     try {
       await api(`/api/users/${id}/reset-password`, {
         method: "POST",
@@ -6926,6 +7524,7 @@ alertsMod = createAlertsModule({
   showCtxMenu,
   copyText,
   editSilence,
+  editMaintenance,
   showNotifyLogDetail,
 });
 

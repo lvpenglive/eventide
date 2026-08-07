@@ -2,7 +2,7 @@
 
 use crate::auth::AuthUser;
 use crate::iam::{catalog_json, Department, Role, UserAccount};
-use crate::password::hash_password;
+use crate::password::{hash_password, validate_password_complexity};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -326,9 +326,7 @@ pub async fn create_user(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::bad("请设置初始密码"))?;
-    if password.len() < 6 {
-        return Err(ApiError::bad("密码至少 6 位"));
-    }
+    validate_password_complexity(password).map_err(ApiError::bad)?;
     if state
         .db
         .get_user_by_username(&username)
@@ -368,6 +366,7 @@ pub async fn create_user(
         enabled: input.enabled,
         created_at: now,
         updated_at: now,
+        password_changed_at: now,
     };
     state.db.upsert_user(&u).map_err(ApiError::internal)?;
     Ok(Json(u.public_json()))
@@ -436,10 +435,9 @@ pub async fn update_user(
     u.role_ids = input.role_ids;
     u.enabled = input.enabled;
     if let Some(pw) = input.password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if pw.len() < 6 {
-            return Err(ApiError::bad("密码至少 6 位"));
-        }
+        validate_password_complexity(pw).map_err(ApiError::bad)?;
         u.password_hash = hash_password(pw);
+        u.password_changed_at = Utc::now();
     }
     u.updated_at = Utc::now();
     state.db.upsert_user(&u).map_err(ApiError::internal)?;
@@ -477,15 +475,14 @@ pub async fn reset_password(
 ) -> ApiResult<StatusCode> {
     let id = parse_id(&id)?;
     let pw = input.password.trim();
-    if pw.len() < 6 {
-        return Err(ApiError::bad("密码至少 6 位"));
-    }
+    validate_password_complexity(pw).map_err(ApiError::bad)?;
     let mut u = state
         .db
         .get_user(id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("用户不存在"))?;
     u.password_hash = hash_password(pw);
+    u.password_changed_at = Utc::now();
     u.updated_at = Utc::now();
     state.db.upsert_user(&u).map_err(ApiError::internal)?;
     Ok(StatusCode::NO_CONTENT)

@@ -213,8 +213,16 @@ fn too_many_requests() -> axum::response::Response {
 }
 
 fn check_auth(route: &IngressRoute, headers: &HeaderMap) -> Result<(), axum::response::Response> {
-    let Some(expected) = route.token.as_ref().filter(|t| !t.is_empty()) else {
-        return Ok(());
+    // HTTP ingress always requires a configured token (legacy empty-token routes are rejected).
+    let Some(expected) = route.token.as_ref().filter(|t| !t.trim().is_empty()) else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "ingress token required",
+                "hint": "configure a non-empty Token on this HTTP route in the console"
+            })),
+        )
+            .into_response());
     };
     let provided = headers
         .get("authorization")

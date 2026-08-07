@@ -10,6 +10,13 @@ username = "admin"
 password = "change-me"
 jwt_secret = "change-me-to-a-long-random-string"
 token_ttl_hours = 24
+# 登录防爆破：窗口内失败次数达阈值后锁定（按 IP + 用户名分别计数）
+login_max_failures = 5
+login_window_seconds = 900
+login_lockout_seconds = 300
+# 密码过期提醒（天）；0 = 关闭。临近 password_warn_days 天起提示
+password_max_age_days = 90
+password_warn_days = 14
 
 [storm]
 throttle_enabled = true

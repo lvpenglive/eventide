@@ -87,8 +87,18 @@ pub fn apply_evaluation(
                     ends_at: Some(now),
                     pending_since: None,
                     last_evaluated_at: now,
+                    tally: 1,
+                    last_occurrence_at: now,
                     notified_firing: false,
                     notified_resolved: false,
+                    acknowledged_at: None,
+                    acknowledged_by: None,
+                    assignee: None,
+                    ack_comment: None,
+                    closed_at: None,
+                    closed_by: None,
+                    close_comment: None,
+                    escalated_at: None,
                 };
                 (event, AlertTransition::Unchanged)
             } else if rule.for_seconds == 0 {
@@ -105,8 +115,18 @@ pub fn apply_evaluation(
                     ends_at: None,
                     pending_since: None,
                     last_evaluated_at: now,
+                    tally: 1,
+                    last_occurrence_at: now,
                     notified_firing: false,
                     notified_resolved: false,
+                    acknowledged_at: None,
+                    acknowledged_by: None,
+                    assignee: None,
+                    ack_comment: None,
+                    closed_at: None,
+                    closed_by: None,
+                    close_comment: None,
+                    escalated_at: None,
                 };
                 (event, AlertTransition::BecameFiring)
             } else {
@@ -123,8 +143,18 @@ pub fn apply_evaluation(
                     ends_at: None,
                     pending_since: Some(now),
                     last_evaluated_at: now,
+                    tally: 1,
+                    last_occurrence_at: now,
                     notified_firing: false,
                     notified_resolved: false,
+                    acknowledged_at: None,
+                    acknowledged_by: None,
+                    assignee: None,
+                    ack_comment: None,
+                    closed_at: None,
+                    closed_by: None,
+                    close_comment: None,
+                    escalated_at: None,
                 };
                 (event, AlertTransition::Unchanged)
             }
@@ -144,8 +174,10 @@ pub fn apply_evaluation(
                         event.pending_since = None;
                         event.starts_at = now;
                         event.ends_at = None;
+                        event.bump_occurrence(now);
                         AlertTransition::BecameFiring
                     } else {
+                        event.bump_occurrence(now);
                         AlertTransition::Unchanged
                     }
                 }
@@ -155,7 +187,10 @@ pub fn apply_evaluation(
                     event.pending_since = None;
                     AlertTransition::Unchanged
                 }
-                (AlertStatus::Firing, true) => AlertTransition::Unchanged,
+                (AlertStatus::Firing, true) => {
+                    event.bump_occurrence(now);
+                    AlertTransition::Unchanged
+                }
                 (AlertStatus::Firing, false) => {
                     event.status = AlertStatus::Resolved;
                     event.ends_at = Some(now);
@@ -169,6 +204,10 @@ pub fn apply_evaluation(
                         event.pending_since = None;
                         event.notified_firing = false;
                         event.notified_resolved = false;
+                        event.clear_ack();
+                        event.clear_close();
+                        event.clear_escalation();
+                        event.reset_occurrence(now);
                         AlertTransition::BecameFiring
                     } else {
                         event.status = AlertStatus::Pending;
@@ -177,6 +216,10 @@ pub fn apply_evaluation(
                         event.pending_since = Some(now);
                         event.notified_firing = false;
                         event.notified_resolved = false;
+                        event.clear_ack();
+                        event.clear_close();
+                        event.clear_escalation();
+                        event.reset_occurrence(now);
                         AlertTransition::Unchanged
                     }
                 }
@@ -256,6 +299,7 @@ pub fn format_notify_text(rule: &Rule, event: &AlertEvent, transition: AlertTran
     let status = match transition {
         AlertTransition::BecameFiring => "firing",
         AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Escalated => "escalated",
         AlertTransition::Unchanged => "unchanged",
     };
     format!(
@@ -281,6 +325,7 @@ pub fn format_notify_body(
     let transition_label = match transition {
         AlertTransition::BecameFiring => "firing",
         AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Escalated => "escalated",
         AlertTransition::Unchanged => "unchanged",
     };
     let labels_json = serde_json::to_string(&event.labels).unwrap_or_else(|_| "{}".into());
@@ -339,6 +384,7 @@ fn transition_str(transition: AlertTransition) -> &'static str {
     match transition {
         AlertTransition::BecameFiring => "firing",
         AlertTransition::BecameResolved => "resolved",
+        AlertTransition::Escalated => "escalated",
         AlertTransition::Unchanged => "unchanged",
     }
 }
@@ -441,6 +487,9 @@ mod tests {
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
             channel_ids: vec![],
+            escalate_after_seconds: 0,
+            escalate_severity: None,
+            escalate_channel_ids: vec![],
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -497,6 +546,32 @@ mod tests {
         let (resolved, t) = apply_evaluation(&rule, &sample(10.0), Some(firing), now);
         assert_eq!(resolved.status, AlertStatus::Resolved);
         assert_eq!(t, AlertTransition::BecameResolved);
+    }
+
+    #[test]
+    fn tally_bumps_while_firing_and_resets_on_refire() {
+        let rule = sample_rule(0);
+        let t0 = Utc::now();
+        let (e1, _) = apply_evaluation(&rule, &sample(90.0), None, t0);
+        assert_eq!(e1.tally, 1);
+        assert_eq!(e1.last_occurrence_at, t0);
+
+        let t1 = t0 + Duration::seconds(10);
+        let (e2, tr) = apply_evaluation(&rule, &sample(91.0), Some(e1), t1);
+        assert_eq!(tr, AlertTransition::Unchanged);
+        assert_eq!(e2.tally, 2);
+        assert_eq!(e2.last_occurrence_at, t1);
+
+        let t2 = t1 + Duration::seconds(5);
+        let (resolved, _) = apply_evaluation(&rule, &sample(1.0), Some(e2), t2);
+        assert_eq!(resolved.status, AlertStatus::Resolved);
+        assert_eq!(resolved.tally, 2); // unchanged on resolve
+
+        let t3 = t2 + Duration::seconds(5);
+        let (again, tr2) = apply_evaluation(&rule, &sample(95.0), Some(resolved), t3);
+        assert_eq!(tr2, AlertTransition::BecameFiring);
+        assert_eq!(again.tally, 1);
+        assert_eq!(again.last_occurrence_at, t3);
     }
 
     #[test]

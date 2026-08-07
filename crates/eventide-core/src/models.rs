@@ -311,9 +311,28 @@ pub struct Rule {
     pub annotations: Labels,
     /// Channel IDs that receive notifications for this rule.
     pub channel_ids: Vec<Uuid>,
+    /// Seconds after firing `starts_at` without ack before escalation notify (`0` = off).
+    #[serde(default)]
+    pub escalate_after_seconds: u64,
+    /// Optional severity bump when escalating (only applied if higher than current).
+    #[serde(default)]
+    pub escalate_severity: Option<Severity>,
+    /// Channels for escalation; empty → fall back to `channel_ids`.
+    #[serde(default)]
+    pub escalate_channel_ids: Vec<Uuid>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Rule {
+    pub fn escalate_notify_channels(&self) -> &[Uuid] {
+        if self.escalate_channel_ids.is_empty() {
+            &self.channel_ids
+        } else {
+            &self.escalate_channel_ids
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,8 +350,80 @@ pub struct AlertEvent {
     /// When the condition first became true while pending.
     pub pending_since: Option<DateTime<Utc>>,
     pub last_evaluated_at: DateTime<Utc>,
+    /// Dedup occurrence count for the current episode (Netcool-style Tally).
+    #[serde(default = "default_tally")]
+    pub tally: u32,
+    /// Last time this fingerprint was seen while still active (distinct from last_evaluated_at).
+    #[serde(default = "utc_now_default")]
+    pub last_occurrence_at: DateTime<Utc>,
     pub notified_firing: bool,
     pub notified_resolved: bool,
+    /// Operator acknowledge / take-ownership (independent of lifecycle status).
+    #[serde(default)]
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub acknowledged_by: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub ack_comment: Option<String>,
+    /// Manual close (force resolve) — for sources without recover.
+    #[serde(default)]
+    pub closed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub closed_by: Option<String>,
+    #[serde(default)]
+    pub close_comment: Option<String>,
+    /// When an unacked timeout escalation notify was sent for this episode.
+    #[serde(default)]
+    pub escalated_at: Option<DateTime<Utc>>,
+}
+
+fn default_tally() -> u32 {
+    1
+}
+
+fn utc_now_default() -> DateTime<Utc> {
+    Utc::now()
+}
+
+impl AlertEvent {
+    pub fn clear_ack(&mut self) {
+        self.acknowledged_at = None;
+        self.acknowledged_by = None;
+        self.assignee = None;
+        self.ack_comment = None;
+    }
+
+    pub fn clear_close(&mut self) {
+        self.closed_at = None;
+        self.closed_by = None;
+        self.close_comment = None;
+    }
+
+    pub fn clear_escalation(&mut self) {
+        self.escalated_at = None;
+    }
+
+    pub fn is_acknowledged(&self) -> bool {
+        self.acknowledged_at.is_some()
+    }
+
+    pub fn is_manually_closed(&self) -> bool {
+        self.closed_at.is_some()
+    }
+
+    /// Start (or restart) an episode: tally=1 at `now`.
+    pub fn reset_occurrence(&mut self, now: DateTime<Utc>) {
+        self.tally = 1;
+        self.last_occurrence_at = now;
+    }
+
+    /// Same episode seen again while still active.
+    pub fn bump_occurrence(&mut self, now: DateTime<Utc>) {
+        self.tally = self.tally.saturating_add(1).max(1);
+        self.last_occurrence_at = now;
+    }
 }
 
 /// Transition emitted by the alert state machine (edge for notifications).
@@ -343,6 +434,8 @@ pub enum AlertTransition {
     BecameFiring,
     /// Condition cleared: firing → resolved.
     BecameResolved,
+    /// Unacked timeout escalation (independent of notified_firing).
+    Escalated,
     /// Still pending / still firing / still resolved — no notify edge.
     Unchanged,
 }
@@ -356,6 +449,53 @@ pub struct Silence {
     pub ends_at: DateTime<Utc>,
     pub comment: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// Planned maintenance window — suppress notifications like Silence, with enable flag + name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceWindow {
+    pub id: Uuid,
+    pub name: String,
+    pub comment: String,
+    pub rule_id: Option<Uuid>,
+    pub matchers: Labels,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Exact AND match of every matcher key against labels.
+pub fn labels_matchers_apply(matchers: &Labels, labels: &Labels) -> bool {
+    for (k, v) in matchers {
+        match labels.get(k) {
+            Some(lv) if lv == v => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Half-open window `[starts_at, ends_at)` plus optional rule_id + label matchers.
+pub fn suppress_window_matches(
+    rule_id_filter: Option<Uuid>,
+    matchers: &Labels,
+    starts_at: DateTime<Utc>,
+    ends_at: DateTime<Utc>,
+    rule_id: Uuid,
+    labels: &Labels,
+    now: DateTime<Utc>,
+) -> bool {
+    if now < starts_at || now >= ends_at {
+        return false;
+    }
+    if let Some(rid) = rule_id_filter {
+        if rid != rule_id {
+            return false;
+        }
+    }
+    labels_matchers_apply(matchers, labels)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +522,10 @@ impl NotifyChannel {
         let specific = match transition {
             AlertTransition::BecameFiring => self.options.get("template_firing"),
             AlertTransition::BecameResolved => self.options.get("template_resolved"),
+            AlertTransition::Escalated => self
+                .options
+                .get("template_escalated")
+                .or_else(|| self.options.get("template_firing")),
             AlertTransition::Unchanged => self
                 .options
                 .get("template_firing")
@@ -398,6 +542,10 @@ impl NotifyChannel {
         let specific = match transition {
             AlertTransition::BecameFiring => self.options.get("json_firing"),
             AlertTransition::BecameResolved => self.options.get("json_resolved"),
+            AlertTransition::Escalated => self
+                .options
+                .get("json_escalated")
+                .or_else(|| self.options.get("json_firing")),
             AlertTransition::Unchanged => self
                 .options
                 .get("json_firing")
@@ -425,6 +573,13 @@ pub struct IngressRoute {
     #[serde(default)]
     pub options: BTreeMap<String, String>,
     pub channel_ids: Vec<Uuid>,
+    /// Seconds after firing without ack before escalation (`0` = off). Same semantics as Rule.
+    #[serde(default)]
+    pub escalate_after_seconds: u64,
+    #[serde(default)]
+    pub escalate_severity: Option<Severity>,
+    #[serde(default)]
+    pub escalate_channel_ids: Vec<Uuid>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -457,23 +612,124 @@ pub struct NotifyLog {
     pub created_at: DateTime<Utc>,
 }
 
+/// Console / API mutation audit trail (who did what).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditLog {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub actor_username: String,
+    pub actor_uid: Option<Uuid>,
+    /// e.g. `alert.ack`, `rule.create`, `user.reset_password`
+    pub action: String,
+    /// e.g. `alert`, `rule`, `silence`
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub status_code: i32,
+    #[serde(default)]
+    pub detail_json: Option<String>,
+    pub client_ip: Option<String>,
+}
+
 impl Silence {
     /// Returns true if this silence applies to the given rule + labels at `now`.
     pub fn matches(&self, rule_id: Uuid, labels: &Labels, now: DateTime<Utc>) -> bool {
-        if now < self.starts_at || now >= self.ends_at {
+        suppress_window_matches(
+            self.rule_id,
+            &self.matchers,
+            self.starts_at,
+            self.ends_at,
+            rule_id,
+            labels,
+            now,
+        )
+    }
+}
+
+impl MaintenanceWindow {
+    /// Returns true if this enabled window applies to the given rule + labels at `now`.
+    pub fn matches(&self, rule_id: Uuid, labels: &Labels, now: DateTime<Utc>) -> bool {
+        if !self.enabled {
             return false;
         }
-        if let Some(rid) = self.rule_id {
-            if rid != rule_id {
-                return false;
-            }
-        }
-        for (k, v) in &self.matchers {
-            match labels.get(k) {
-                Some(lv) if lv == v => {}
-                _ => return false,
-            }
-        }
-        true
+        suppress_window_matches(
+            self.rule_id,
+            &self.matchers,
+            self.starts_at,
+            self.ends_at,
+            rule_id,
+            labels,
+            now,
+        )
+    }
+}
+
+#[cfg(test)]
+mod suppress_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn labels(pairs: &[(&str, &str)]) -> Labels {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
+    }
+
+    #[test]
+    fn silence_and_mw_share_matcher_semantics() {
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let rule = Uuid::nil();
+        let m = labels(&[("ip", "10.0.0.1")]);
+        let silence = Silence {
+            id: Uuid::nil(),
+            rule_id: None,
+            matchers: m.clone(),
+            starts_at: t0,
+            ends_at: t1,
+            comment: String::new(),
+            created_at: t0,
+        };
+        let mw = MaintenanceWindow {
+            id: Uuid::nil(),
+            name: "mw".into(),
+            comment: String::new(),
+            rule_id: None,
+            matchers: m,
+            starts_at: t0,
+            ends_at: t1,
+            enabled: true,
+            created_at: t0,
+            updated_at: t0,
+        };
+        let hit = labels(&[("ip", "10.0.0.1"), ("alertname", "x")]);
+        let miss = labels(&[("ip", "10.0.0.2")]);
+        let mid = t0 + chrono::Duration::hours(1);
+        assert!(silence.matches(rule, &hit, mid));
+        assert!(mw.matches(rule, &hit, mid));
+        assert!(!silence.matches(rule, &miss, mid));
+        assert!(!mw.matches(rule, &miss, mid));
+        assert!(!mw.matches(rule, &hit, t1)); // half-open end
+    }
+
+    #[test]
+    fn disabled_mw_never_matches() {
+        let t0 = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let mw = MaintenanceWindow {
+            id: Uuid::nil(),
+            name: "off".into(),
+            comment: String::new(),
+            rule_id: None,
+            matchers: Labels::new(),
+            starts_at: t0,
+            ends_at: t1,
+            enabled: false,
+            created_at: t0,
+            updated_at: t0,
+        };
+        assert!(!mw.matches(Uuid::nil(), &Labels::new(), t0 + chrono::Duration::minutes(30)));
     }
 }

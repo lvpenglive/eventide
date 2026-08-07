@@ -172,6 +172,21 @@ pub struct AuthConfig {
     /// Token TTL in hours.
     #[serde(default = "default_token_ttl")]
     pub token_ttl_hours: u64,
+    /// Max failed logins per IP / username within `login_window_seconds` before lockout.
+    #[serde(default = "default_login_max_failures")]
+    pub login_max_failures: u32,
+    /// Sliding window for counting failures (seconds).
+    #[serde(default = "default_login_window_secs")]
+    pub login_window_seconds: u64,
+    /// Lockout duration after threshold (seconds).
+    #[serde(default = "default_login_lockout_secs")]
+    pub login_lockout_seconds: u64,
+    /// Password max age in days (0 = disable expiry reminders).
+    #[serde(default = "default_password_max_age_days")]
+    pub password_max_age_days: u64,
+    /// Warn when remaining days ≤ this (and policy enabled).
+    #[serde(default = "default_password_warn_days")]
+    pub password_warn_days: u64,
 }
 
 fn default_listen() -> String {
@@ -200,6 +215,21 @@ fn default_jwt_secret() -> String {
 }
 fn default_token_ttl() -> u64 {
     24
+}
+fn default_login_max_failures() -> u32 {
+    5
+}
+fn default_login_window_secs() -> u64 {
+    900
+}
+fn default_login_lockout_secs() -> u64 {
+    300
+}
+fn default_password_max_age_days() -> u64 {
+    90
+}
+fn default_password_warn_days() -> u64 {
+    14
 }
 fn default_true() -> bool {
     true
@@ -369,6 +399,11 @@ impl Default for AuthConfig {
             password: default_password(),
             jwt_secret: default_jwt_secret(),
             token_ttl_hours: default_token_ttl(),
+            login_max_failures: default_login_max_failures(),
+            login_window_seconds: default_login_window_secs(),
+            login_lockout_seconds: default_login_lockout_secs(),
+            password_max_age_days: default_password_max_age_days(),
+            password_warn_days: default_password_warn_days(),
         }
     }
 }

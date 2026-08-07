@@ -658,8 +658,18 @@ mod tests {
             ends_at: None,
             pending_since: None,
             last_evaluated_at: Utc::now(),
+            tally: 1,
+            last_occurrence_at: Utc::now(),
             notified_firing: false,
             notified_resolved: false,
+            acknowledged_at: None,
+            acknowledged_by: None,
+            assignee: None,
+            ack_comment: None,
+            closed_at: None,
+            closed_by: None,
+            close_comment: None,
+            escalated_at: None,
         }
     }
 
