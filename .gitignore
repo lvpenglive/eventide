@@ -11,3 +11,6 @@ scripts/emit_repo.py
 
 /logs/
 
+
+# Doc screenshots (voluntarily not tracked per user request)
+/docs/screenshots/
