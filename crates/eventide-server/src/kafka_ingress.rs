@@ -1,4 +1,4 @@
-//! Kafka ingress via Kafka consumer groups (samsa, pure Rust).
+﻿//! Kafka ingress via Kafka consumer groups (samsa, pure Rust).
 //!
 //! Multi-instance scale-out uses Kafka JoinGroup / SyncGroup / Heartbeat /
 //! OffsetCommit — no Redis partition leases.
@@ -75,8 +75,11 @@ pub fn spawn_kafka_ingress(state: Arc<AppState>) {
 }
 
 fn route_fingerprint(route: &IngressRoute) -> String {
-    format!(
-        "{}|{}|{}|{}|{}",
+    let channels = route.channel_ids.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",");
+    // 1) Core runtime knobs that affect how we consume.
+    let base = format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        route.enabled as u8,
         route.endpoint.trim(),
         route.options.get("topic").map(|s| s.as_str()).unwrap_or(""),
         route
@@ -94,7 +97,39 @@ fn route_fingerprint(route: &IngressRoute) -> String {
             .get("start")
             .map(|s| s.as_str())
             .unwrap_or("latest"),
-    )
+        channels,
+    );
+    // 2) Field mapping options. Must be a FIXED, deterministic order so the
+    //    fingerprint changes whenever any map_* is edited (otherwise the
+    //    consumer keeps running with the old mapping and the operator sees no
+    //    effect until a full process restart / enabled toggle).
+    const MAP_KEYS: &[&str] = &[
+        "map_enabled",
+        "map_list",
+        "map_status",
+        "map_fire",
+        "map_resolve",
+        "map_name",
+        "map_description",
+        "map_ip",
+        "map_value",
+        "map_fingerprint",
+        "map_severity",
+        "map_critical",
+        "map_warning",
+        "map_labels",
+    ];
+    let mut map_hash = String::with_capacity(128);
+    for (i, k) in MAP_KEYS.iter().enumerate() {
+        if i > 0 {
+            map_hash.push(',');
+        }
+        let v = route.options.get(*k).map(|s| s.as_str()).unwrap_or("");
+        map_hash.push_str(k);
+        map_hash.push('=');
+        map_hash.push_str(v);
+    }
+    format!("{}|map<{}>", base, map_hash)
 }
 
 async fn run_route_supervised(state: Arc<AppState>, route: IngressRoute) {

@@ -545,6 +545,17 @@ function alertGroup(a) {
     ""
   );
 }
+function alertInstance(a) {
+  const l = a.labels || {};
+  const s = String(l.instance || l.endpoint || l.svc || "").trim();
+  if (!s) return "";
+  const ip = alertTargetIp(a);
+  const host = alertHostname(a);
+  if (s === ip || s === host) return "";
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(s) && s === ip) return "";
+  return s;
+}
+
 
 function alertKey(a) {
   const l = a.labels || {};
@@ -573,6 +584,131 @@ function alertNoteHint(a) {
   return parts.join("\n");
 }
 
+/** Merge labels + annotations for CMDB/enrich fields (annotations win on clash). */
+function alertFieldBag(a) {
+  return { ...(a?.labels || {}), ...(a?.annotations || {}) };
+}
+
+function splitContactValues(raw) {
+  return String(raw || "")
+    .split(/[,;/|、，]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeFieldKey(k) {
+  return String(k || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+/** Find first bag value whose key equals or ends with one of the aliases. */
+function findFieldRaw(bag, aliases) {
+  const want = aliases.map(normalizeFieldKey);
+  for (const [k, v] of Object.entries(bag || {})) {
+    if (v == null || String(v).trim() === "") continue;
+    const nk = normalizeFieldKey(k);
+    const hit = want.some((w) => nk === w || nk.endsWith("." + w) || nk.endsWith(w));
+    if (hit) return String(v).trim();
+  }
+  return "";
+}
+
+/**
+ * Contacts for on-call calling — from enrich/CMDB lookup columns.
+ * Supports multiple values (comma / 、 / ; separated) and role pairs (硬件/应用).
+ */
+function alertContacts(a) {
+  const bag = alertFieldBag(a);
+  const roles = [
+    {
+      role: "硬件",
+      names: ["硬件负责人", "hw_owner", "hardware_owner", "hwowner", "hwcontact"],
+      phones: ["硬件电话", "硬件手机", "hw_phone", "hardware_phone", "hwphone", "hwmobile"],
+    },
+    {
+      role: "应用",
+      names: ["应用负责人", "app_owner", "application_owner", "appowner", "appcontact"],
+      phones: ["应用电话", "应用手机", "app_phone", "application_phone", "appphone", "appmobile"],
+    },
+    {
+      role: "",
+      names: [
+        "联系人",
+        "contacts",
+        "contact",
+        "owner",
+        "值班人",
+        "负责人",
+        "oncall",
+        "on_call",
+      ],
+      phones: [
+        "手机号",
+        "手机",
+        "电话",
+        "联系电话",
+        "phone",
+        "phones",
+        "mobile",
+        "tel",
+        "telephone",
+        "cellphone",
+      ],
+    },
+  ];
+  const out = [];
+  const seen = new Set();
+  for (const r of roles) {
+    const names = splitContactValues(findFieldRaw(bag, r.names));
+    const phones = splitContactValues(findFieldRaw(bag, r.phones));
+    if (!names.length && !phones.length) continue;
+    const n = Math.max(names.length, phones.length);
+    for (let i = 0; i < n; i++) {
+      const name = names[i] || "";
+      const phone = phones[i] || "";
+      if (!name && !phone) continue;
+      const key = `${r.role}|${name}|${phone}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ role: r.role, name, phone });
+    }
+  }
+  return out;
+}
+
+function telHref(phone) {
+  const digits = String(phone || "").replace(/[^\d+]/g, "");
+  return digits ? `tel:${digits}` : "";
+}
+
+function alertContactsHtml(a, { compact = false } = {}) {
+  const list = alertContacts(a);
+  if (!list.length) {
+    return compact ? "" : `<span class="hint">—</span>`;
+  }
+  return `<div class="alert-contacts${compact ? " compact" : ""}">${list
+    .map((c) => {
+      const role = c.role
+        ? `<span class="ac-role">${esc(c.role)}</span>`
+        : "";
+      const name = c.name ? `<span class="ac-person">${esc(c.name)}</span>` : "";
+      const href = telHref(c.phone);
+      const phone = c.phone
+        ? href
+          ? `<a class="ac-phone" href="${esc(href)}" title="拨打 ${esc(
+              c.phone
+            )}">${esc(c.phone)}</a>`
+          : `<span class="ac-phone">${esc(c.phone)}</span>`
+        : "";
+      return `<div class="ac-contact-row">${role}${name}${
+        name && phone ? `<span class="dot">·</span>` : ""
+      }${phone}</div>`;
+    })
+    .join("")}</div>`;
+}
+
 function alertCards(rows, ingressMap) {
   const sel = typeof selectedAlertIds === "function" ? selectedAlertIds() : new Set();
   const canWrite = typeof canWriteAlerts === "function" && canWriteAlerts();
@@ -584,14 +720,17 @@ function alertCards(rows, ingressMap) {
     .map((a, i) => {
       const name = alertDisplayName(a);
       const summary = alertSummary(a);
-      const preview = alertSummaryPreview(a, 100);
+      const preview = alertSummaryPreview(a, 160);
       const dur = alertDuration(a);
       const src = alertSourceLabel(a, ingressMap);
       const ip = alertTargetIp(a);
       const host = alertHostname(a);
+      const inst = alertInstance(a);
       const group = alertGroup(a);
       const key = alertKey(a);
       const note = alertNoteHint(a);
+      const tally = alertTally(a);
+      const contactsHtml = alertContactsHtml(a, { compact: true });
       const checked = sel.has(a.id);
       const chips = labelChips(
         a.labels,
@@ -615,6 +754,37 @@ function alertCards(rows, ingressMap) {
         ],
         3
       );
+      const tallyBadge = tally > 1
+        ? `<span class="badge tally" title="重复次数 ×${tally}">×${tally}</span>`
+        : "";
+      // Primary info row: 定位 + 程度
+      const primaryBits = [];
+      if (ip) primaryBits.push(`<span class="ac-tag mono" title="告警 IP">IP ${esc(ip)}</span>`);
+      if (host && host !== ip) primaryBits.push(`<span class="ac-tag" title="主机名">主机 ${esc(host)}</span>`);
+      if (inst) primaryBits.push(`<span class="ac-tag mono" title="实例 / 端口">实例 ${esc(inst)}</span>`);
+      primaryBits.push(`<span class="ac-tag emph" title="已持续">⏱ ${esc(dur)}</span>`);
+      // Secondary info row: 来源 / 时间 / 组键 / 评估
+      const secBits = [];
+      secBits.push(`<span>${esc(src)}</span>`);
+      secBits.push(`<span title="开始时间">起 ${esc(fmtTime(a.starts_at))}</span>`);
+      secBits.push(`<span title="末次发生">末 ${esc(fmtTime(a.last_occurrence_at || a.starts_at))}</span>`);
+      if (group) secBits.push(`<span title="AlertGroup">组 ${esc(group)}</span>`);
+      if (key && key !== group) secBits.push(`<span class="mono" title="AlertKey">键 ${esc(key)}</span>`);
+      secBits.push(`<span title="最后评估">评 ${esc(fmtTime(a.last_evaluated_at))}</span>`);
+      const secHtml = secBits.length
+        ? `<div class="ac-meta ac-meta-sec">${secBits.join(' <span class="dot">·</span> ')}</div>`
+        : "";
+      // Footer tags (handled 接手/维护/升级/备注/次数 全部后置)
+      const footerTags = [
+        ackBadgeHtml(a),
+        mwBadgeHtml(a),
+        escalatedBadgeHtml(a),
+        note ? `<span class="badge note" title="${esc(note)}">备注</span>` : "",
+        tallyBadge,
+      ].filter(Boolean);
+      const footerHtml = footerTags.length
+        ? `<div class="ac-footer-tags">${footerTags.join("")}</div>`
+        : "";
       return `<article class="alert-card status-${esc(a.status)} sev-${esc(
         a.severity
       )}${checked ? " is-selected" : ""}${alertIsAcked(a) ? " is-acked" : ""}" data-alert-idx="${i}" tabindex="0" role="button">
@@ -628,53 +798,21 @@ function alertCards(rows, ingressMap) {
         }
         <div class="ac-body">
           <div class="ac-top">
-            <div class="ac-title-row">
-              <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
-              <span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span>
-              ${ackBadgeHtml(a)}
-              ${mwBadgeHtml(a)}
-              ${escalatedBadgeHtml(a)}
-              ${
-                note
-                  ? `<span class="badge note" title="${esc(note)}">备注</span>`
-                  : ""
-              }
-              <span class="badge tally" title="重复次数">×${alertTally(a)}</span>
-              <h3 class="ac-name">${esc(name)}</h3>
+            <div class="ac-headline">
+              <h3 class="ac-name" title="${esc(name)}">${esc(name)}</h3>
+              <div class="ac-tags">
+                <span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span>
+                <span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span>
+              </div>
             </div>
             <button type="button" class="ghost ac-detail" data-alert-detail="${i}">详情</button>
           </div>
+          <div class="ac-meta ac-meta-pri">${primaryBits.join("")}</div>
           <p class="ac-summary" title="${esc(summary || "")}">${esc(preview || "无描述")}</p>
-          <div class="ac-meta">
-            <span>${esc(src)}</span>
-            ${
-              host
-                ? `<span class="dot">·</span><span title="主机名">${esc(host)}</span>`
-                : ""
-            }
-            ${
-              ip
-                ? `<span class="dot">·</span><span class="ac-ip" title="告警 IP">IP ${esc(ip)}</span>`
-                : ""
-            }
-            ${
-              group
-                ? `<span class="dot">·</span><span title="AlertGroup">${esc(group)}</span>`
-                : ""
-            }
-            ${
-              key && key !== group
-                ? `<span class="dot">·</span><span class="mono" title="AlertKey">${esc(key)}</span>`
-                : ""
-            }
-            <span class="dot">·</span>
-            <span>持续 ${esc(dur)}</span>
-            <span class="dot">·</span>
-            <span title="末次发生">末次 ${esc(fmtTime(a.last_occurrence_at || a.starts_at))}</span>
-            <span class="dot">·</span>
-            <span title="最后评估">评估 ${esc(fmtTime(a.last_evaluated_at))}</span>
-          </div>
+          ${contactsHtml ? `<div class="ac-contacts-line">${contactsHtml}</div>` : ""}
+          ${secHtml}
           <div class="alert-labels">${chips}</div>
+          ${footerHtml}
         </div>
       </article>`;
     })
@@ -791,7 +929,7 @@ function bindAlertCards(container, rows, ingressMap, reload) {
   const open = (i) => showAlertDetail(rows[i], ingressMap || {});
   container.querySelectorAll(".alert-card").forEach((card) => {
     card.addEventListener("click", (e) => {
-      if (e.target.closest("[data-alert-detail], .ac-check, .alert-select, .alert-select-all-row"))
+      if (e.target.closest("[data-alert-detail], .ac-check, .alert-select, .alert-select-all-row, a.ac-phone, .alert-contacts"))
         return;
       open(Number(card.dataset.alertIdx));
     });
@@ -823,28 +961,54 @@ function alertTableGrid(rows, ingressMap) {
         ? `<th class="col-check"><input type="checkbox" id="alert-select-all" title="本页全选" /></th>`
         : ""
     }
-    <th class="col-st">状态</th><th class="col-sev">级别</th><th class="col-mw">维护</th><th class="col-ack">接手</th><th class="col-note">备注</th>
-    <th class="col-tally">次数</th>
-    <th class="col-name">告警名称</th><th class="col-group">组</th><th class="col-key">键</th>
+    <th class="col-st">状态</th>
+    <th class="col-sev">级别</th>
+    <th class="col-name">告警名称</th>
+    <th class="col-ip">告警 IP</th>
+    <th class="col-host">主机名</th>
     <th class="col-sum">告警描述</th>
-    <th class="col-host">主机名</th><th class="col-ip">告警 IP</th>
+    <th class="col-contact">联系人</th>
     <th class="col-src">来源</th>
-    <th class="col-time">开始时间</th><th class="col-dur">持续</th>
-    <th class="col-time">末次发生</th><th class="col-time">最后评估</th>
+    <th class="col-dur">持续</th>
+    <th class="col-time">开始时间</th>
+    <th class="col-time">末次发生</th>
+    <th class="col-group">组</th>
+    <th class="col-key">键</th>
+    <th class="col-time">最后评估</th>
+    <th class="col-ack">接手</th>
+    <th class="col-mw">维护</th>
+    <th class="col-note">备注</th>
+    <th class="col-tally">次数</th>
     <th class="col-act"></th>
   </tr></thead><tbody>${rows
     .map((a, i) => {
       const name = alertDisplayName(a);
       const summary = alertSummary(a);
-      const preview = alertSummaryPreview(a, 80);
+      const preview = alertSummaryPreview(a, 100);
       const dur = alertDuration(a);
       const src = alertSourceLabel(a, ingressMap);
       const ip = alertTargetIp(a);
       const host = alertHostname(a);
+      const inst = alertInstance(a);
       const group = alertGroup(a);
       const key = alertKey(a);
       const note = alertNoteHint(a);
+      const tally = alertTally(a);
       const checked = sel.has(a.id);
+      const instChip = inst
+        ? `<div class="table-sub mono" title="实例 / 端口">实例：${esc(inst)}</div>`
+        : "";
+      const ackCell = alertIsAcked(a)
+        ? `<span class="badge ack" title="${esc(a.ack_comment || "")}">${esc(
+            a.assignee || a.acknowledged_by || "已确认"
+          )}</span>`
+        : `<span class="hint">—</span>`;
+      const mwCell =
+        [mwBadgeHtml(a), escalatedBadgeHtml(a)].filter(Boolean).join(" ") ||
+        `<span class="hint">—</span>`;
+      const noteCell = note
+        ? `<span class="badge note" title="${esc(note)}">有</span>`
+        : `<span class="hint">—</span>`;
       return `<tr data-alert-idx="${i}" class="${alertIsAcked(a) ? "is-acked" : ""}${
         checked ? " is-selected" : ""
       }">
@@ -857,29 +1021,9 @@ function alertTableGrid(rows, ingressMap) {
     }
     <td class="col-st"><span class="badge ${esc(a.status)}">${esc(statusLabel(a.status))}</span></td>
     <td class="col-sev"><span class="sev sev-${esc(a.severity)}">${esc(severityLabel(a.severity))}</span></td>
-    <td class="col-mw">${
-      [
-        mwBadgeHtml(a),
-        escalatedBadgeHtml(a),
-      ]
-        .filter(Boolean)
-        .join(" ") || `<span class="hint">—</span>`
-    }</td>
-    <td class="col-ack">${
-      alertIsAcked(a)
-        ? `<span class="badge ack" title="${esc(a.ack_comment || "")}">${esc(
-            a.assignee || a.acknowledged_by || "已确认"
-          )}</span>`
-        : `<span class="hint">—</span>`
-    }</td>
-    <td class="col-note">${
-      note
-        ? `<span class="badge note" title="${esc(note)}">有</span>`
-        : `<span class="hint">—</span>`
-    }</td>
-    <td class="col-tally mono">${alertTally(a)}</td>
     <td class="col-name">
       <div class="alert-name" title="${esc(name)}">${esc(name)}</div>
+      ${instChip}
       <div class="alert-labels">${labelChips(
         a.labels,
         [
@@ -903,18 +1047,23 @@ function alertTableGrid(rows, ingressMap) {
         3
       )}</div>
     </td>
+    <td class="col-ip mono">${ip ? esc(ip) : '<span class="hint">—</span>'}</td>
+    <td class="col-host" title="${esc(host)}">${host ? esc(host) : '<span class="hint">—</span>'}</td>
+    <td class="col-sum" title="${esc(summary)}"><div class="alert-summary-text">${esc(
+      preview || '<span class="hint">—</span>'
+    )}</div></td>
+    <td class="col-contact">${alertContactsHtml(a)}</td>
+    <td class="col-src"><span class="source-tag" title="${esc(src)}">${esc(src)}</span></td>
+    <td class="col-dur">${esc(dur)}</td>
+    <td class="col-time">${esc(fmtTime(a.starts_at))}</td>
+    <td class="col-time">${esc(fmtTime(a.last_occurrence_at || a.starts_at))}</td>
     <td class="col-group" title="${esc(group)}">${esc(group || "—")}</td>
     <td class="col-key mono" title="${esc(key)}">${esc(key || "—")}</td>
-    <td class="col-sum" title="${esc(summary)}"><div class="alert-summary-text">${esc(
-      preview || "—"
-    )}</div></td>
-    <td class="col-host" title="${esc(host)}">${esc(host || "—")}</td>
-    <td class="col-ip mono">${esc(ip || "—")}</td>
-    <td class="col-src"><span class="source-tag" title="${esc(src)}">${esc(src)}</span></td>
-    <td class="col-time">${esc(fmtTime(a.starts_at))}</td>
-    <td class="col-dur">${esc(dur)}</td>
-    <td class="col-time">${esc(fmtTime(a.last_occurrence_at || a.starts_at))}</td>
     <td class="col-time">${esc(fmtTime(a.last_evaluated_at))}</td>
+    <td class="col-ack">${ackCell}</td>
+    <td class="col-mw">${mwCell}</td>
+    <td class="col-note">${noteCell}</td>
+    <td class="col-tally mono">${tally}</td>
     <td class="col-act"><button type="button" data-alert-detail="${i}">详情</button></td>
   </tr>`;
     })
@@ -1302,6 +1451,14 @@ async function showAlertDetail(a, ingressMap = {}) {
       </p>
     </div>
     <div class="modal-body alert-detail">
+      <div class="field alert-contact-box">
+        <label>联系人 / 手机号</label>
+        ${
+          alertContacts(a).length
+            ? alertContactsHtml(a)
+            : `<div class="hint">暂无。请在「告警丰富」台账中配置联系人、手机号（多人可用逗号或顿号分隔）。</div>`
+        }
+      </div>
       <div class="detail-grid">
         <div><label>主机名</label><div>${esc(alertHostname(a) || "—")}</div></div>
         <div><label>告警 IP</label><div class="mono">${esc(ip || "—")}</div></div>

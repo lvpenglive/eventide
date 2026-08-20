@@ -1,4 +1,4 @@
-/* Eventide console SPA (ES modules) */
+﻿/* Eventide console SPA (ES modules) */
 import { api, token, TOKEN_KEY, USER_KEY, setUnauthorizedHandler } from "./js/api.js";
 import {
   severityOptions,
@@ -16,6 +16,26 @@ import {
   validatePasswordComplexity,
 } from "./js/ui.js";
 import { createAlertsModule, ALERT_PAGE_SIZE } from "./js/pages/alerts.js?v=95";
+
+// ============================================================
+// APP.JS 快速索引（已按功能分区）
+// ============================================================
+// 全局/入口    : tryBoot() L417 | navigate() L554 | renderPage() L583
+// 权限/登录    : can() L118 | showLogin() L145 | applyNavPermissions() L132
+// 主题/侧栏    : applyTheme() L346 | toggleSidebar() L328 | applySidebarState() L320
+// 通用组件    : createModalApi() L598 | multiSelect() L623 | askPolicyImportMode() L600
+// 页面入口    : pages = { ... } L645  ← 所有页面渲染函数都在这
+// 告警事件    : alertTable() L7626 | showAlertDetail() L7632 | bindAlertTable() L7629
+// 规则管理    : editRule() L5055
+// 接入管理    : editIngress() L5391 | openIngressTest() L4280 | ingressHelpHtml() L5275
+// 渠道管理    : editChannel() L4699 | testChannel() L4685 | showChannelTestResult() L4641
+// 数据源      : editDatasource() L4396
+// 丰富/Lookup : editEnrich() L6452 | openEnrichPreviewModal() L6230 | editLookup() L5989
+// 静默/维护   : editSilence() L7161 | editMaintenance() L7225
+// 用户/权限   : editUser() L7319 | editRole() L7456 | editDepartment() L7546
+// 通知日志    : showNotifyLogDetail() L4575
+// 工具函数    : prettyJson() L4624 | licenseKindLabel() L166
+// ============================================================
 
 const SIDEBAR_KEY = "eventide_sidebar_collapsed";
 const NAV_GROUPS_KEY = "eventide_nav_groups";
@@ -632,7 +652,7 @@ function multiSelect(name, options, selected = []) {
       )
       .join("")}
   </select>
-  <div style="font-size:0.75rem;color:var(--muted);margin-top:0.25rem">按住 Ctrl/⌘ 多选</div>`;
+  <div class="ms-hint">按住 <b>Ctrl</b>（Windows）或 <b>⌘</b>（Mac）点击可多选；已选中的再点一次即取消。</div>`;
 }
 
 function selectedValues(form, name) {
@@ -1120,6 +1140,32 @@ const pages = {
         const chNames = (r.channel_ids || [])
           .map((id) => (chMap[id] ? chMap[id].name : id.slice(0, 8)))
           .join("、") || "未绑定渠道";
+        const channelChips = (r.channel_ids || []).length
+          ? `<div class="ic-channel-list">${(r.channel_ids || [])
+              .map(
+                (id) =>
+                  `<span class="chip" title="${esc(
+                    chMap[id] ? `${chMap[id].name} (${chMap[id].kind})` : id
+                  )}">${esc(chMap[id] ? chMap[id].name : id.slice(0, 8))}</span>`
+              )
+              .join("")}</div>`
+          : `<span class="ic-channel-empty">未绑定渠道</span>`;
+        const escalateOn = r.escalate_after_seconds && r.escalate_after_seconds > 0;
+        const escalateSevChip = r.escalate_severity
+          ? `<span class="chip sev-chip sev-${esc(r.escalate_severity)}">${esc(
+              severityLabel(r.escalate_severity)
+            )}</span>`
+          : `<span class="chip">级别不变</span>`;
+        const escChannelChips = (r.escalate_channel_ids && r.escalate_channel_ids.length)
+          ? `<div class="ic-escalate-list">${r.escalate_channel_ids
+              .map(
+                (id) =>
+                  `<span class="chip" title="${esc(
+                    chMap[id] ? `${chMap[id].name} (${chMap[id].kind})` : id
+                  )}">${esc(chMap[id] ? chMap[id].name : id.slice(0, 8))}</span>`
+              )
+              .join("")}</div>`
+          : `<span class="ic-escalate-empty">同通知渠道</span>`;
         const kindHint =
           r.kind === "alertmanager"
             ? "接收 Prometheus Alertmanager webhook"
@@ -1142,8 +1188,8 @@ const pages = {
             </div>
           </div>
           <div class="ic-body">
-            <div class="field">
-              <label>接入地址</label>
+            <div class="field" style="margin:0">
+              <div class="label" style="display:block;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:0 0 6px">接入地址</div>
               <div class="url-row">
                 <code class="mono url-box">${esc(url)}</code>
                 <button data-copy="${esc(url)}">复制</button>
@@ -1165,9 +1211,34 @@ const pages = {
                     )}</code> · 起始 ${(r.options && r.options.start) || "latest"}</div>`
               }
             </div>
-            <div class="field" style="margin:0">
-              <label>通知渠道</label>
-              <div>${esc(chNames)}</div>
+            <div class="ic-meta">
+              <div>
+                <span class="label">通知渠道</span>
+                <div class="value">${channelChips}</div>
+              </div>
+              <div>
+                <span class="label">未接手升级</span>
+                <div class="value">
+                  ${
+                    escalateOn
+                      ? `<div class="ic-escalate-summary">
+                          <span class="t">${r.escalate_after_seconds}s</span>
+                          <span>后触发升级</span>
+                        </div>
+                        <div style="height:6px"></div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                          <span style="font-size:12px;color:var(--muted);font-weight:600">级别：</span>
+                          ${escalateSevChip}
+                        </div>
+                        <div style="height:6px"></div>
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                          <span style="font-size:12px;color:var(--muted);font-weight:600">渠道：</span>
+                          <div style="flex:1;min-width:0">${escChannelChips}</div>
+                        </div>`
+                      : `<span class="ic-escalate-empty">未开启</span>`
+                  }
+                </div>
+              </div>
             </div>
           </div>
         </article>`;
@@ -4447,6 +4518,7 @@ function editDatasource(row, opts = {}) {
     </div>`, { wide: true });
 
   const form = document.getElementById("f");
+  form.noValidate = true;
   const syncKind = () => {
     form.querySelectorAll(".kind-panel").forEach((p) => {
       const kinds = (p.dataset.kinds || "").split(",");
@@ -4506,7 +4578,7 @@ function editDatasource(row, opts = {}) {
       return;
     }
     const body = {
-      name: fd.get("name"),
+      name,
       kind: k,
       url,
       options,
@@ -4985,7 +5057,7 @@ function editChannel(row) {
     }
 
     const body = {
-      name: fd.get("name"),
+      name,
       kind,
       url: fd.get("url"),
       secret: secret || null,
@@ -5164,7 +5236,7 @@ async function editRule(row) {
       }
     }
     const body = {
-      name: fd.get("name"),
+      name,
       datasource_id: fd.get("datasource_id"),
       expr: fd.get("expr"),
       comparator: fd.get("comparator"),
@@ -5388,9 +5460,14 @@ async function editIngress(row, opts = {}) {
       }</p>
     </div>
     <form id="f" class="modal-body">
+      <section class="form-section">
+        <div class="form-section-head">
+          <h4 class="form-section-title">基础信息</h4>
+          <span class="form-section-tag">1 / 4</span>
+        </div>
       <div class="field">
         <label>名称</label>
-        <input name="name" required placeholder="例如：生产 AM" value="${esc(
+        <input name="name" placeholder="例如：生产 AM" value="${esc(
           row?.name || (snmpPreset ? "SNMP Trap (Kafka)" : "")
         )}" />
       </div>
@@ -5413,17 +5490,22 @@ async function editIngress(row, opts = {}) {
           }
         </div>
       </div>
-      <div class="field">
+      <div class="field" style="margin-bottom:4px">
         <label class="check-row">
           <input type="checkbox" name="enabled" ${!row || row.enabled ? "checked" : ""} />
           <span>启用此接入路由</span>
         </label>
       </div>
+      </section>
 
       ${
         snmpPreset
-          ? `<div class="panel" style="margin:0 0 14px;padding:12px;background:var(--surface-2,rgba(0,0,0,.04))">
-        <div class="seg-title" style="margin:0 0 8px">Trap → Kafka 字段对照（无需再 map）</div>
+          ? `<section class="form-section">
+        <div class="form-section-head">
+          <h4 class="form-section-title">SNMP Trap 预映射说明</h4>
+          <span class="form-section-tag">参考</span>
+        </div>
+        <div class="panel" style="margin:0;padding:12px;background:var(--surface-2,rgba(0,0,0,.04))">
         <table class="map-help-table" style="width:100%;font-size:12px">
           <thead><tr><th>Trap JSON</th><th>告警含义</th></tr></thead>
           <tbody>
@@ -5444,10 +5526,16 @@ async function editIngress(row, opts = {}) {
             sampleJson
           )}</pre>
         </details>
-      </div>`
+      </div>
+      </section>`
           : ""
       }
 
+      <section class="form-section">
+        <div class="form-section-head">
+          <h4 class="form-section-title">接入参数</h4>
+          <span class="form-section-tag">2 / 4</span>
+        </div>
       <div class="kind-panel" data-kinds="alertmanager,generic" id="ing-http">
         <div class="field">
           <label>鉴权 Token（必填）</label>
@@ -5455,7 +5543,7 @@ async function editIngress(row, opts = {}) {
             <input name="token" value="${esc(
               row?.token ||
                 (row ? "" : crypto.randomUUID?.() || `evt-${Date.now().toString(36)}`)
-            )}" placeholder="至少 8 位；请求头 Bearer / X-Eventide-Token" style="flex:1" required minlength="8" />
+            )}" placeholder="至少 8 位；请求头 Bearer / X-Eventide-Token" style="flex:1" />
             <button type="button" class="btn ghost" id="ing-gen-token">重新生成</button>
           </div>
           <div class="hint">HTTP 接入必须配置 Token；推送时带 <code>Authorization: Bearer …</code> 或 <code>X-Eventide-Token</code>。</div>
@@ -5486,7 +5574,7 @@ async function editIngress(row, opts = {}) {
           <input name="group_id" placeholder="默认 eventide-ingress-{route_id}" value="${esc(opt.group_id || "")}" />
           <div class="hint">多实例共用同一 group_id 自动分摊分区；改 group_id 会按「起始位点」重新消费。</div>
         </div>
-        <div class="field">
+        <div class="field" style="margin-bottom:4px">
           <label>分区数（订阅范围）</label>
           <div class="row" style="align-items:center;gap:8px">
             <input name="partitions" type="number" min="1" placeholder="自动探测" value="${esc(opt.partitions || "")}" style="flex:1" />
@@ -5495,10 +5583,15 @@ async function editIngress(row, opts = {}) {
           <div class="hint" id="ing-parts-hint">须覆盖 Topic 全部分区（优先 metadata 探测）。消费位点由 Kafka consumer group 管理，不再依赖 Redis 租约。</div>
         </div>
       </div>
+      </section>
 
-      <div class="kind-panel" data-kinds="generic,kafka" id="ing-mapping" hidden>
+      <section class="form-section">
+        <div class="form-section-head">
+          <h4 class="form-section-title">字段映射</h4>
+          <span class="form-section-tag">3 / 4 · 通用 / Kafka 可选</span>
+        </div>
+      <div class="kind-panel" data-kinds="generic,kafka" id="ing-mapping">
         <div class="seg">
-          <div class="seg-title">字段映射（可选）</div>
           <div class="hint" style="margin-bottom:12px">
             ${
               snmpPreset
@@ -5616,43 +5709,55 @@ async function editIngress(row, opts = {}) {
           </div>
         </div>
       </div>
+      </section>
 
+      <section class="form-section">
+        <div class="form-section-head">
+          <h4 class="form-section-title">通知与升级</h4>
+          <span class="form-section-tag">4 / 4</span>
+        </div>
       <div class="field">
         <label>通知渠道</label>
-        <select name="channel_id">
-          <option value="">不绑定渠道</option>
-          ${chs
-            .map((c) => {
-              const selected = (row?.channel_ids || [])[0] === c.id ? "selected" : "";
-              return `<option value="${esc(c.id)}" ${selected}>${esc(c.name)}（${esc(
-                c.kind
-              )}）</option>`;
-            })
-            .join("")}
-        </select>
-        <div class="hint">未绑定渠道时告警仍会入库，但不会发送通知。</div>
+        ${multiSelect(
+          "channel_ids",
+          chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
+          row?.channel_ids || []
+        )}
+        <div class="hint">可多选，告警同时推送到所有绑定渠道。未绑定渠道时告警仍会入库，但不会发送通知。</div>
       </div>
       <div class="field">
         <label>未接手升级（秒，0=关闭）</label>
         <input name="escalate_after_seconds" type="number" min="0" value="${
           row?.escalate_after_seconds ?? 0
         }" />
-        <div class="hint">告警中超时未接手则发送升级通知（与规则同源逻辑）。</div>
+        <div class="hint">告警 firing 超过此时长仍未接手则发送升级通知；可抬升级别与选择独立升级渠道。</div>
       </div>
-      <div class="field">
-        <label>升级级别（可选）</label>
-        <select name="escalate_severity">
-          <option value="" ${!row?.escalate_severity ? "selected" : ""}>不改级别</option>
-          ${["not_classified","information","warning","average","high","disaster"]
-            .map(
-              (v) =>
-                `<option value="${v}" ${
-                  row?.escalate_severity === v ? "selected" : ""
-                }>${esc(severityLabel(v))}</option>`
-            )
-            .join("")}
-        </select>
+      <div class="row">
+        <div class="field">
+          <label>升级级别（可选）</label>
+          <select name="escalate_severity">
+            <option value="" ${!row?.escalate_severity ? "selected" : ""}>不改级别</option>
+            ${["not_classified","information","warning","average","high","disaster"]
+              .map(
+                (v) =>
+                  `<option value="${v}" ${
+                    row?.escalate_severity === v ? "selected" : ""
+                  }>${esc(severityLabel(v))}</option>`
+              )
+              .join("")}
+          </select>
+        </div>
       </div>
+      <div class="field" style="margin-bottom:4px">
+        <label>升级通知渠道（可选，空=用上方渠道）</label>
+        ${multiSelect(
+          "escalate_channel_ids",
+          chs.map((c) => ({ value: c.id, label: `${c.name} (${c.kind})` })),
+          row?.escalate_channel_ids || []
+        )}
+        <div class="hint">留空则超时时使用上方相同的「通知渠道」；一般可升级时改推不同的领导/总值班渠道。</div>
+      </div>
+      </section>
     </form>
     <div class="modal-actions">
       <button type="button" class="ghost" id="m-cancel">取消</button>
@@ -5660,6 +5765,7 @@ async function editIngress(row, opts = {}) {
     </div>`, { wide: true });
 
   const form = document.getElementById("f");
+  form.noValidate = true;
   const syncKind = () => {
     const k = form.querySelector('input[name="kind"]')?.value || "alertmanager";
     form.querySelectorAll(".kind-panel").forEach((p) => {
@@ -5748,9 +5854,13 @@ async function editIngress(row, opts = {}) {
     const k = String(fd.get("kind") || "alertmanager");
     const options = {};
     let endpoint = "";
+    const name = String(fd.get("name") || "").trim();
+    if (!name) {
+      toast("请填写接入名称", true);
+      return;
+    }
     let token = String(fd.get("token") || "").trim();
-    const channelId = String(fd.get("channel_id") || "").trim();
-    const channelIds = channelId ? [channelId] : [];
+    const channelIds = selectedValues(form, "channel_ids");
     if (!channelIds.length && !confirm("尚未绑定通知渠道，告警只会入库不会通知。仍要保存吗？")) {
       return;
     }
@@ -5808,7 +5918,7 @@ async function editIngress(row, opts = {}) {
       }
     }
     const body = {
-      name: fd.get("name"),
+      name,
       kind: k,
       token: token || null,
       endpoint,
@@ -5816,14 +5926,19 @@ async function editIngress(row, opts = {}) {
       channel_ids: channelIds,
       escalate_after_seconds: Number(fd.get("escalate_after_seconds") || 0),
       escalate_severity: String(fd.get("escalate_severity") || "").trim() || null,
-      escalate_channel_ids: [],
+      escalate_channel_ids: selectedValues(form, "escalate_channel_ids"),
       enabled: form.querySelector('[name="enabled"]').checked,
     };
     let saved;
-    if (row) {
-      saved = await api(`/api/ingress/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
-    } else {
-      saved = await api("/api/ingress", { method: "POST", body: JSON.stringify(body) });
+    try {
+      if (row) {
+        saved = await api(`/api/ingress/${row.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        saved = await api("/api/ingress", { method: "POST", body: JSON.stringify(body) });
+      }
+    } catch (err) {
+      toast(err.message || "保存失败", true);
+      return;
     }
     closeModal();
     showIngressSaved(saved || { ...body, id: row?.id });
@@ -6005,7 +6120,7 @@ async function editLookup(row) {
       return;
     }
     const body = {
-      name: fd.get("name"),
+      name,
       description: fd.get("description") || "",
       key_label: fd.get("key_label") || parsed.keyHint || "ip",
       rows: parsed.rows,
