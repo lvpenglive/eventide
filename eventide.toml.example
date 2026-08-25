@@ -3,6 +3,9 @@ listen = "0.0.0.0:8080"
 mysql_url = "mysql://user:password@127.0.0.1:3306/eventide"
 redis_url = "redis://127.0.0.1:6379/"
 static_dir = "static"
+# 新版 Vue3 影子前端静态资源目录（可选；默认值，若不存在自动忽略，旧版行为不受影响）
+# 启用方式：在 console-vue 下 `npm ci && npm run build` 生成 dist/，再取消下行注释
+# v2_static_dir = "console-vue/dist"
 scheduler_tick_seconds = 5
 
 [auth]

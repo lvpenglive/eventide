@@ -17,6 +17,11 @@ cp "${BIN_DIR}/eventide-license" "${STAGE}/"
 chmod +x "${STAGE}/eventide" "${STAGE}/eventide-trap" "${STAGE}/eventide-license"
 
 cp -r static/* "${STAGE}/static/"
+# 新版 Vue3 影子前端产物（若存在则一并打包，缺失不影响旧版可用）
+if [ -d "console-vue/dist" ]; then
+  mkdir -p "${STAGE}/console-vue"
+  cp -r console-vue/dist "${STAGE}/console-vue/"
+fi
 cp eventide.toml.example "${STAGE}/"
 cp eventide-trap.toml.example "${STAGE}/"
 cp keys/license_public.pem "${STAGE}/keys/"
@@ -29,6 +34,10 @@ cp keys/README.md "${STAGE}/keys/"
   echo "  eventide           — 主服务（控制台 + API）"
   echo "  eventide-trap      — SNMP Trap 接收服务"
   echo "  eventide-license   — 厂商侧签发 / 校验许可证"
+  echo
+  echo "Frontend:"
+  echo "  static/                       — 旧版内嵌控制台（默认）"
+  echo "  console-vue/dist/             — Vue3 影子前端（可选，需在 eventide.toml 取消 v2_static_dir 注释）"
   echo
   echo "Quick start:"
   echo "  1. cp eventide.toml.example eventide.toml"

@@ -1,0 +1,74 @@
+@import "./variables.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--text);
+  background:
+    radial-gradient(900px 420px at 12% -10%, var(--body-glow-1), transparent 55%),
+    radial-gradient(700px 380px at 100% 0%, var(--body-glow-2), transparent 50%),
+    var(--bg);
+  min-height: 100%;
+  font-size: var(--fs-base);
+  line-height: var(--lh);
+  letter-spacing: 0.005em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background-color 0.22s ease, color 0.22s ease;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+a {
+  color: var(--primary-hover);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--primary-soft);
+}
+
+.panel {
+  background: var(--panel-surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 0 var(--overlay-soft) inset;
+}
+
+.panel.empty {
+  color: var(--muted);
+  padding: 28px 8px;
+  text-align: center;
+}
+
+.empty {
+  color: var(--muted);
+  padding: 28px 8px;
+  text-align: center;
+}
+
+.main-layout {
+  min-height: 100vh;
+}
+
+.severity-badge {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 20px;
+  border: 1px solid transparent;
+  font-weight: 600;
+}

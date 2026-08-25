@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub redis_url: String,
     #[serde(default = "default_static")]
     pub static_dir: String,
+    #[serde(default = "default_v2_static")]
+    pub v2_static_dir: Option<String>,
     /// Global scheduler tick in seconds (rules still have their own interval).
     #[serde(default = "default_tick")]
     pub scheduler_tick_seconds: u64,
@@ -200,6 +202,9 @@ fn default_redis() -> String {
 }
 fn default_static() -> String {
     "static".into()
+}
+fn default_v2_static() -> Option<String> {
+    Some("console-vue/dist".to_string())
 }
 fn default_tick() -> u64 {
     5
@@ -415,6 +420,7 @@ impl Default for AppConfig {
             mysql_url: default_mysql(),
             redis_url: default_redis(),
             static_dir: default_static(),
+            v2_static_dir: default_v2_static(),
             scheduler_tick_seconds: default_tick(),
             auth: AuthConfig::default(),
             storm: StormConfig::default(),

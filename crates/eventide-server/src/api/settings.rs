@@ -287,3 +287,76 @@ fn storm_view(state: &AppState) -> StormSettingsView {
         source: source.into(),
     }
 }
+
+/// v2 Console Beta toggle
+#[derive(Debug, Serialize)]
+pub struct UiBetaToggleView {
+    /// Whether v2 console dist is present and served on this backend
+    pub v2_available: bool,
+    /// Current user-facing preference (1 = on, 0 = off)
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UiBetaToggleUpdate {
+    /// true = use v2 console; false = legacy console
+    pub enabled: bool,
+    /// Optional max-age seconds override
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
+}
+
+pub(crate) fn v2_available(state: &AppState) -> bool {
+    state
+        .config
+        .v2_static_dir
+        .as_deref()
+        .and_then(|d| std::path::Path::new(d).try_exists().ok())
+        .unwrap_or(false)
+}
+
+pub async fn get_ui_beta_toggle(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> Json<UiBetaToggleView> {
+    let enabled = req
+        .headers()
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .map(|p| p.trim())
+        .any(|kv| match kv.strip_prefix("eventide_use_v2=") {
+            Some(v) => v == "1" || v.starts_with("1&") || v.starts_with("1;"),
+            None => false,
+        });
+    Json(UiBetaToggleView {
+        v2_available: v2_available(&state),
+        enabled,
+    })
+}
+
+pub async fn put_ui_beta_toggle(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UiBetaToggleUpdate>,
+) -> impl IntoResponse {
+    let val = if body.enabled { "1" } else { "0" };
+    let max_age = body
+        .max_age_seconds
+        .unwrap_or(3600 * 24 * 30); // default 30 days
+    // HttpOnly 关，因为前台 JS 也会读这个 Cookie 做即时跳；Path=/；SameSite=Lax
+    let cookie = format!(
+        "eventide_use_v2={}; Path=/; Max-Age={}; SameSite=Lax",
+        val, max_age
+    );
+    let view = UiBetaToggleView {
+        v2_available: v2_available(&state),
+        enabled: body.enabled,
+    };
+    let mut resp = (axum::http::StatusCode::OK, Json(view)).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&cookie).unwrap(),
+    );
+    resp
+}

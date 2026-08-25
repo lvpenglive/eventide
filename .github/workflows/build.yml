@@ -28,6 +28,18 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: console-vue/package-lock.json
+
+      - name: Build Vue frontend
+        run: |
+          npm --prefix console-vue ci
+          npm --prefix console-vue run build
+
       - name: Build
         run: cargo build --release ${{ env.BUILD_PACKAGES }}
 
@@ -49,6 +61,11 @@ jobs:
   # GitHub 无官方麒麟 runner：在社区 Kylin V10 SP3 容器内编译，
   # 以贴近银河麒麟高级服务器操作系统 V10 SP3 的 glibc / 依赖环境。
   # 参考：https://github.com/lvpenglive/axleops/blob/main/.github/workflows/build-linux.yml
+  #
+  # Vue 前端（console-vue/dist）由 Linux job 先行构建并通过 artifact 共享，
+  # 麒麟容器常离线且无 Node 工具链，不在容器内重复构建。
+  # 如需在麒麟 artifact 中包含新版前端，请在 release job 中合并 linux-x86_64
+  # 产物里的 console-vue/dist，或外机构建后注入工作区。
   kylin-v10-sp3-x86_64:
     name: Kylin V10 SP3 x86_64
     runs-on: ubuntu-latest
@@ -121,6 +138,19 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: console-vue/package-lock.json
+
+      - name: Build Vue frontend
+        shell: bash
+        run: |
+          npm --prefix console-vue ci
+          npm --prefix console-vue run build
+
       - name: Build
         shell: bash
         run: cargo build --release ${{ env.BUILD_PACKAGES }}
@@ -132,12 +162,16 @@ jobs:
           $name = 'eventide-windows-x86_64'
           $out = "dist\$name"
           $bin = 'target\release'
-          New-Item -ItemType Directory -Force -Path "$out\static", "$out\keys" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$out\static", "$out\console-vue\dist", "$out\keys" | Out-Null
 
           Copy-Item "$bin\eventide.exe" $out
           Copy-Item "$bin\eventide-trap.exe" $out
           Copy-Item "$bin\eventide-license.exe" $out
           Copy-Item -Recurse static\* "$out\static\"
+          # 新版 Vue3 影子前端产物（若存在则一并打包，缺失不影响旧版可用）
+          if (Test-Path "console-vue\dist") {
+            Copy-Item -Recurse "console-vue\dist" "$out\console-vue\"
+          }
           Copy-Item eventide.toml.example $out
           Copy-Item eventide-trap.toml.example $out
           Copy-Item keys\license_public.pem "$out\keys\"
@@ -150,6 +184,10 @@ jobs:
             '  eventide.exe'
             '  eventide-trap.exe'
             '  eventide-license.exe'
+            ''
+            'Frontend:'
+            '  static/                       — 旧版内嵌控制台（默认）'
+            '  console-vue/dist/             — Vue3 影子前端（可选，需在 eventide.toml 取消 v2_static_dir 注释）'
             ''
             'Quick start:'
             '  1. copy eventide.toml.example eventide.toml'

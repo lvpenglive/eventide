@@ -1,4 +1,4 @@
-﻿/* Eventide console SPA (ES modules) */
+/* Eventide console SPA (ES modules) */
 import { api, token, TOKEN_KEY, USER_KEY, setUnauthorizedHandler } from "./js/api.js";
 import {
   severityOptions,
@@ -443,7 +443,9 @@ async function tryBoot() {
     state.me = await api("/api/auth/me");
     localStorage.setItem(USER_KEY, state.me.username);
     showApp();
-    const page = canPage(state.page) ? state.page : firstAllowedPage();
+    // 从 URL hash 读取初始页面（支持刷新保持 / 分享链接）
+    const hashPage = location.hash.slice(1);
+    const page = (hashPage && canPage(hashPage)) ? hashPage : (canPage(state.page) ? state.page : firstAllowedPage());
     navigate(page);
   } catch {
     showLogin();
@@ -463,6 +465,46 @@ function scrubLoginQueryFromUrl() {
   } catch (_) {}
 }
 scrubLoginQueryFromUrl();
+
+// ============================================================
+// T6: hash 路由双写兼容 — Beta 开关时旧版 hash 自动重定向到 /v2/
+// ============================================================
+// 旧版 page key → 新版 Vue Router path 映射（大多 1:1，仅 users/roles/departments 合并为 iam_users）
+const V2_ROUTE_MAP = {
+  overview: "overview", alerts: "alerts", silences: "silences", maintenance: "maintenance",
+  datasources: "datasources", rules: "rules", ingress: "ingress",
+  kafka: "kafka", trap: "trap", mib: "mib", policies: "policies",
+  channels: "channels", notifies: "notifies", enrich: "enrich",
+  users: "iam_users", roles: "iam_users", departments: "iam_users",
+  settings: "settings", audit: "settings",
+};
+
+(function redirectV2IfNeeded() {
+  // 检测 Beta Cookie eventide_use_v2=1
+  const cookieHit = document.cookie.split(";").map(s => s.trim()).some(kv => {
+    const m = kv.match(/^eventide_use_v2=(.+)/);
+    return m && (m[1] === "1" || m[1].startsWith("1&") || m[1].startsWith("1;"));
+  });
+  if (!cookieHit) return;
+
+  // 旧版 hash page → 新版 /v2/#/path
+  const hashPage = location.hash.slice(1);
+  const v2Path = (hashPage && V2_ROUTE_MAP[hashPage]) || "overview";
+  // 避免重复跳转
+  if (location.pathname === "/v2/") return;
+  const target = "/v2/#/" + v2Path;
+  location.replace(target);
+})();
+
+// hashchange 监听：浏览器前进/后退按钮同步页面
+window.addEventListener("hashchange", () => {
+  const p = location.hash.slice(1);
+  if (p && p !== state.page && canPage(p)) {
+    navigate(p);
+  } else if (!p && state.page !== "overview") {
+    navigate("overview");
+  }
+});
 
 document.getElementById("login-toggle-pw")?.addEventListener("click", () => {
   const input = document.getElementById("password");
@@ -579,6 +621,10 @@ function navigate(page) {
   if (page !== "overview") stopOverviewTimer();
   if (page !== "alerts") stopAlertsTimer();
   state.page = page;
+  // hash 路由双写：让 URL 可分享 / 刷新保持当前页面
+  if (location.hash.slice(1) !== page) {
+    history.replaceState(null, "", "#" + page);
+  }
   applyNavPermissions();
   document.querySelectorAll(".nav-item").forEach((b) => {
     b.classList.toggle("active", b.dataset.page === page);
@@ -3764,6 +3810,14 @@ const pages = {
         <div id="settings-theme"></div>
       </div>
       <div class="panel" style="max-width:720px;margin-bottom:16px">
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">新版控制台 (Beta)</h3>
+        <p class="hint" style="margin:0 0 12px">
+          开启后会写入本机 Cookie <code>eventide_use_v2=1</code>，刷新页面即进入新版 Vue3 控制台。
+          任何时候不喜欢，回到这里关闭即可一键回退（NFR-6 保证）。
+        </p>
+        <div id="settings-betatoggle"><p class="hint">读取中...</p></div>
+      </div>
+      <div class="panel" style="max-width:720px;margin-bottom:16px">
         <h3 style="margin:0 0 0.75rem;font-size:1rem">抗告警风暴</h3>
         <p class="hint" style="margin:0 0 12px">
           节流 / 聚合 / 接入削峰。保存后<strong>当前进程立即生效</strong>（写入 MySQL；多实例其他节点需重启或各自保存一次）。
@@ -3927,6 +3981,48 @@ const pages = {
         </p>
       </div>`;
     bindThemeHost(document.getElementById("settings-theme"), "cards");
+
+    // ---------- Beta toggle 绑定 ----------
+    const betaHost = document.getElementById("settings-betatoggle");
+    const renderBeta = (view) => {
+      if (!betaHost) return;
+      if (!view.v2_available) {
+        betaHost.innerHTML = `<p class="hint" style="color:var(--muted)">当前进程未发现 v2 静态资源目录（v2_static_dir 未构建或 dist 缺失），无法切换。构建命令：<code>npm -C console-vue run build</code></p>`;
+        return;
+      }
+      betaHost.innerHTML = `
+        <label class="check-row" style="margin:0">
+          <input type="checkbox" id="beta-toggle-on" ${view.enabled ? "checked" : ""} ${dis} />
+          <span>启用新版控制台 (Beta) · 刷新后生效</span>
+        </label>
+        <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+          <button class="primary" id="beta-save" ${dis}>保存并刷新</button>
+          <button id="beta-open-v2">直接打开 /v2/ (新窗口)</button>
+          <p class="hint" style="margin:0;flex-basis:100%">Cookie 有效期 30 天；关闭则立即返回旧版。</p>
+        </div>`;
+      const sw = document.getElementById("beta-toggle-on");
+      const saveBtn = document.getElementById("beta-save");
+      const openBtn = document.getElementById("beta-open-v2");
+      if (openBtn) openBtn.onclick = () => window.open("/v2/", "_blank", "noopener,noreferrer");
+      if (saveBtn) saveBtn.onclick = async () => {
+        try {
+          const enabled = !!sw?.checked;
+          await api("/api/settings/ui-betatoggle", { method: "PUT", body: JSON.stringify({ enabled }) });
+          toast(enabled ? "已切换到新版控制台，刷新生效" : "已切回旧版控制台，刷新生效");
+          setTimeout(() => location.reload(), 400);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+    };
+    (async () => {
+      try {
+        const view = await api("/api/settings/ui-betatoggle");
+        renderBeta(view);
+      } catch (e) {
+        if (betaHost) betaHost.innerHTML = `<p class="hint" style="color:var(--danger)">读取失败: ${esc(e.message)}</p>`;
+      }
+    })();
 
     const downloadTextFile = (filename, text, mime = "application/json") => {
       const blob = new Blob([text], { type: mime });

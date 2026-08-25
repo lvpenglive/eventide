@@ -11,6 +11,9 @@ scripts/emit_repo.py
 
 /logs/
 
+# Vue3 影子前端构建产物（console-vue/.gitignore 已忽略；根目录重复声明以防 git add -f 误入）
+/console-vue/node_modules/
+/console-vue/dist/
 
 # Doc screenshots (voluntarily not tracked per user request)
 /docs/screenshots/

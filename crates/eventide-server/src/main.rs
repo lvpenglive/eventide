@@ -24,8 +24,9 @@ mod trap_token;
 mod storm_sync;
 
 use anyhow::Context;
-use axum::Router;
+use axum::{middleware, response::IntoResponse, Router};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -274,15 +275,89 @@ async fn main() -> anyhow::Result<()> {
     crate::notify_pipeline::spawn_aggregate_flusher(state.clone());
 
     let static_dir = config.static_dir.clone();
+
+    // ---- v2 静态目录存在性检查 ----
+    let mut v2_static_dir = config.v2_static_dir.clone();
+    if let Some(dir) = v2_static_dir.as_deref() {
+        match std::path::Path::new(dir).try_exists() {
+            Ok(true) => {}
+            _ => {
+                tracing::warn!(
+                    "v2 console skipped: {dir} does not exist; falling back to legacy static only"
+                );
+                v2_static_dir = None;
+            }
+        }
+    }
+
+    // A. API router — 与之前 merge(api::router(state.clone())) 完全等价
+    let api_router = api::router(state.clone());
+
+    // B. v2 router — /v2/* 前缀路由 + 根路径智能分发中间件（Cookie eventide_use_v2=1）
+    let v2_router = match &v2_static_dir {
+        Some(dir) => {
+            let v2_index = PathBuf::from(dir).join("index.html");
+            // 根路径智能分发：若 GET / 且 Cookie eventide_use_v2=1 命中 → 直接返回 v2 index.html；
+            // 否则交给 fallback_service（老版 static 目录，即 NFR-7 兜底）。
+            Router::new()
+                .nest_service("/v2", ServeDir::new(dir.clone()))
+                .route_layer(middleware::from_fn(
+                    move |req: axum::extract::Request, next: middleware::Next| {
+                        let v2_index = v2_index.clone();
+                        async move {
+                        if req.method() == axum::http::Method::GET
+                            && req.uri().path() == "/"
+                        {
+                            let cookie_hit = req
+                                .headers()
+                                .get_all(axum::http::header::COOKIE)
+                                .iter()
+                                .filter_map(|v| v.to_str().ok())
+                                .flat_map(|s| s.split(';'))
+                                .map(|p| p.trim())
+                                .any(|kv| {
+                                    // 严格匹配 eventide_use_v2=1；容忍后续 & 或空串
+                                    match kv.strip_prefix("eventide_use_v2=") {
+                                        Some(v) => v == "1" || v.starts_with("1&") || v.starts_with("1;"),
+                                        None => false,
+                                    }
+                                });
+                            if cookie_hit {
+                                return match tokio::fs::read_to_string(&v2_index).await {
+                                    Ok(body) => axum::response::Html(body).into_response(),
+                                    Err(e) => (
+                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        format!("v2 index read error: {e}"),
+                                    )
+                                        .into_response(),
+                                };
+                            }
+                        }
+                        next.run(req).await
+                    }
+                }
+                ))
+        }
+        None => Router::new(),
+    };
+
+    // C. fallback 仍然是老版 static 目录，保证非 API / 非 v2 请求全部回落到旧版（NFR-7）
+    let fallback_svc = ServeDir::new(&static_dir);
+
     let app = Router::new()
-        .merge(api::router(state.clone()))
-        .fallback_service(ServeDir::new(&static_dir))
+        .merge(api_router)
+        .merge(v2_router)
+        .fallback_service(fallback_svc)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
     let addr: SocketAddr = config.listen.parse().context("parse listen addr")?;
     tracing::info!("eventide listening on http://{addr}");
     tracing::info!("static console from {static_dir}");
+    match &config.v2_static_dir {
+        Some(dir) => tracing::info!("v2 console available at /v2/ (dir={dir})"),
+        None => tracing::info!("v2 console skipped (dist directory missing)"),
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

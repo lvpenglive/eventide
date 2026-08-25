@@ -160,6 +160,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(settings::get_storm).put(settings::put_storm),
         )
         .route(
+            "/api/settings/ui-betatoggle",
+            get(settings::get_ui_beta_toggle).put(settings::put_ui_beta_toggle),
+        )
+        .route(
             "/api/license",
             get(license_api::get_license)
                 .put(license_api::put_license)

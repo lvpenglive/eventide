@@ -35,8 +35,9 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
 - [14. 开发与构建](#14-开发与构建)
   - [14.1 CI 多平台打包](#141-ci-多平台打包)
   - [14.2 控制台前端演进](#142-控制台前端演进)
-  - [14.3 本地调试日志](#143-本地调试日志)
-  - [14.4 控制台 E2E](#144-控制台-e2e)
+  - [14.3 构建影子前端（Vue3）](#143-构建影子前端vue3)
+  - [14.4 本地调试日志](#144-本地调试日志)
+  - [14.5 控制台 E2E](#145-控制台-e2e)
 
 ---
 
@@ -425,6 +426,33 @@ cargo run -p eventide-server -- eventide.toml
 默认监听：`http://0.0.0.0:8080`  
 控制台：浏览器打开 `http://127.0.0.1:8080`  
 默认账号：`admin` / `admin123`（见配置，**上线务必修改**）
+
+> **不构建 Vue3 前端也能直接运行**：服务默认走 `static/` 旧版控制台；只有想体验 Vue3 影子前端时才需执行下面的 `npm` 步骤。
+
+#### 9.2.1 （可选）启用 Vue3 影子前端
+
+仓库内置 `console-vue/` 工程为影子前端，与旧版 `static/` 并存。启用步骤：
+
+```bash
+# 1. 构建 Vue3 前端（需 Node 20+）
+npm --prefix console-vue ci
+npm --prefix console-vue run build
+# 产物输出到 console-vue/dist/
+
+# 2. 在 eventide.toml 中取消注释
+#    v2_static_dir = "console-vue/dist"
+
+# 3. 启动服务（或重启）
+cargo run -p eventide-server -- eventide.toml
+```
+
+启用后：
+- 浏览器首次访问 `http://127.0.0.1:8080` 仍走旧版控制台
+- 登录后到 **系统设置 → UI Beta**，勾选「启用新版控制台」并刷新
+- Cookie 写入后浏览器被自动重定向到 `/v2/` 前缀的新版控制台
+- 取消勾选或清除 Cookie 即可回退到旧版
+
+> CI 已在 Linux / Windows job 内自动执行 `npm ci && npm run build`，release tar.gz / zip 内同时包含 `static/` 与 `console-vue/dist/`，**解压即可启用**。麒麟容器常离线无 Node，其 artifact 不含 `console-vue/dist/`，需要时请从 Linux artifact 复制。
 
 ### 9.3 产品许可（试用 + 离线授权）
 
@@ -1213,6 +1241,14 @@ cargo build -p eventide-trap --release
 # 运行
 ./target/release/eventide eventide.toml
 ./target/release/eventide-trap eventide-trap.toml
+
+# （可选）构建 Vue3 影子前端，产物在 console-vue/dist/
+# 不构建也能运行：服务自动回退到 static/ 旧版控制台
+npm --prefix console-vue ci
+npm --prefix console-vue run build
+
+# （可选）开发模式：Vite dev server 5173 + 反代 /api → 8080
+npm --prefix console-vue run dev
 ```
 
 ### 14.1 CI 多平台打包
@@ -1226,7 +1262,7 @@ GitHub Actions：[`.github/workflows/build.yml`](.github/workflows/build.yml)
 | `eventide-kylin-v10-sp3-x86_64` | 银河麒麟 V10 SP3 容器内编译（贴近真机 glibc） |
 | `eventide-windows-x86_64` | Windows MSVC |
 
-每个包含：`eventide` / `eventide-trap` / `eventide-license`、控制台 `static/`、示例配置 `*.toml.example`。
+每个包含：`eventide` / `eventide-trap` / `eventide-license`、控制台 `static/`、示例配置 `*.toml.example`。Linux / Windows artifact 同时含 Vue3 影子前端 `console-vue/dist/`（CI 自动 `npm ci && npm run build`）；麒麟容器离线无 Node，仅含 `static/`。
 
 - **push / PR / 手动**：上传 Actions Artifacts（保留 30 天）
 - **打 tag（`v*`）**：汇总进 GitHub Release，例如 `git tag v0.1.0 && git push origin v0.1.0`
@@ -1240,18 +1276,23 @@ cp eventide-trap.toml.example eventide-trap.toml
 
 ### 14.2 控制台前端演进
 
-**原则**：继续「单二进制 + 无 Node 构建」交付；先把关键路径做成像样的产品壳，再谈换栈。不要为了「看起来现代」提前上 monorepo / 微前端。
+**原则**：继续「单二进制交付」；先把关键路径做成像样的产品壳，再谈换栈。不要为了「看起来现代」提前上 monorepo / 微前端。
 
-#### 现状
+#### 现状（影子前端模式）
+
+仓库已落 **旧版 `static/` + 新版 `console-vue/`** 双前端，旧版仍为默认、新版为影子（按需启用），并已覆盖 18/19 个页面。详见 [§14.3 构建影子前端（Vue3）](#143-构建影子前端vue3)。
 
 | 项 | 说明 |
 |----|------|
-| 形态 | `static/` 内嵌 SPA；`ServeDir` 直出 |
-| 入口 | `index.html` → `type="module"` 加载 `assets/app.js` |
-| 已拆模块 | `assets/js/api.js`（鉴权请求）、`ui.js`（toast / modal / esc 等）、`pages/alerts.js`（告警列表与详情） |
-| 其余页面 | 仍集中在 `app.js`（路由 + Trap / 规则 / 丰富 / IAM 等） |
+| 旧版形态 | `static/` 内嵌 SPA；`ServeDir` 直出 |
+| 旧版入口 | `index.html` → `type="module"` 加载 `assets/app.js` |
+| 旧版已拆模块 | `assets/js/api.js`（鉴权请求）、`ui.js`（toast / modal / esc 等）、`pages/alerts.js`（告警列表与详情） |
+| 旧版其余页面 | 仍集中在 `app.js`（路由 + Trap / 规则 / 丰富 / IAM 等） |
+| 新版形态 | `console-vue/` Vue3 + Vite + TS + Pinia + Element Plus；`v2_static_dir = "console-vue/dist"` 启用 |
+| 新版入口 | 服务按 Cookie 自动分发到 `/`（旧）或 `/v2/`（新）；前端路由 hash 模式以兼容旧链接 |
+| 双版切换 | 登录后 **系统设置 → UI Beta** 切换；旧版 hash 路由 `#page` → 新版 `/#/page` 自动桥接 |
 
-内嵌静态页**够用**（配置、查看、操作都能完成）；对标商业控制台时，短板主要在**体验一致性**与**长期扩展成本**（大文件难协作），而不是「技术过时」。
+内嵌静态页**够用**（配置、查看、操作都能完成）；新版 Vue3 已覆盖 B1–B4（告警 / 接入 / 规则 / 静默 / 维护 / 数据源 / Kafka / Trap / MIB / 策略 / 丰富 / IAM / 设置 / 通知）共 18 页，对照商业控制台短板从「体验一致性」转为「打磨 + 收尾」。
 
 #### 阶段 0 — 体验打磨（不换栈）
 
@@ -1260,7 +1301,7 @@ cp eventide-trap.toml.example eventide-trap.toml
 3. **性能**：告警大列表坚持服务端分页；减少整页无意义重绘；接口失败有明确提示。  
 4. **视觉收敛**：保持现有品牌字体与 dusk 风格，克制堆卡片/特效。
 
-#### 阶段 1 — ES modules 模块化（进行中）
+#### 阶段 1 — 旧版 ES modules 模块化（进行中）
 
 目标结构（无构建工具，浏览器原生 `import`）：
 
@@ -1284,18 +1325,25 @@ static/
 优先级：告警相关 ✅ → Trap / MIB / 策略 → 丰富与台账 → 系统设置（许可）→ 其余 CRUD 页。  
 可选辅助脚本：`scripts/split-console-modules.mjs`（对照拆分，非常规构建步骤）。
 
-#### 阶段 2 — 有信号再换栈（可选）
+#### 阶段 2 — 影子前端已落地（Vue3，已上线）
 
-出现以下信号再考虑 Vue 3 / React + Vite：
+新版 Vue3 影子前端已按下列形态落地：
 
-- 要做复杂仪表盘、可配置工作台、大量表单校验与草稿  
+- 单独 `console-vue/` 工程，`npm run build` → 产物写到 `console-vue/dist/`（**不**覆盖 `static/`）  
+- 服务端 `main.rs` 双 `ServeDir`：`static_dir`（默认） + `v2_static_dir`（可选）；缺失自动回退  
+- 浏览器侧靠 Cookie 智能分发：旧版默认 → 用户在系统设置开启 Beta → 后端 Set-Cookie + 旧版 app.js 注入 Beta 开关 → 重定向 `/v2/`  
+- 旧版 hash 路由（`#alerts` 等）自动桥接为新版 `/#/alerts`，避免迁移期链接断裂  
+- 详见 [§14.3](#143-构建影子前端vue3) 构建命令与常见问题
+
+#### 阶段 3 — 更后可演进
+
+出现以下信号再考虑把 Vue3 升为默认：
+
+- 新版在生产稳定运行一段周期、客户反馈无重大回归  
 - 2 人以上长期改前端  
-- 客户明确对比竞品 UI，且成交卡在「看起来不专业」
+- 客户明确要求弃用旧版
 
-推荐仍贴合当前部署：
-
-- 单独 `console/` 工程，`npm run build` → 产物写入 `static/`  
-- 服务端继续 `ServeDir`，**不**拆成第二个部署包  
+升级路径：把 `console-vue/dist` 设为默认 `static_dir`，或在 `main.rs` 中调整为「新版优先、旧版兜底」。
 
 #### 性价比排序
 
@@ -1304,7 +1352,8 @@ static/
 | 1 | 告警列表 / 详情体验 | 用户每天都看 |
 | 2 | 继续拆 `app.js`（Trap、丰富、设置） | 后续改动的基础 |
 | 3 | 统一表格 / 表单 / Toast 约定 | 商业感来自一致性 |
-| 4 | （可选）Vite + Vue/React | 有客户与人力再上 |
+| 4 | 影子前端打磨（Vue3，已上线） | 不阻塞旧版用户；按需启用 |
+| 5 | 影子前端设为默认 | 新版稳定 + 客户信号齐后再切 |
 
 #### 明确不做（现阶段）
 
@@ -1312,7 +1361,74 @@ static/
 - 为换栈停功能开发  
 - 前后端分离成两个独立部署单元（牺牲「单二进制」卖点）
 
-### 14.3 本地调试日志
+### 14.3 构建影子前端（Vue3）
+
+Vue3 影子前端位于 `console-vue/`，默认不构建、不启用，按需开关。
+
+#### 前置依赖
+
+- Node.js **20+**（建议 LTS；CI 中通过 `actions/setup-node@v4` 自动安装）
+- npm 10+（随 Node 安装）
+- 仓库根 `package-lock.json` 不存在，依赖锁定文件在 `console-vue/package-lock.json`
+
+#### 本地构建
+
+```bash
+# 在仓库根目录执行
+npm --prefix console-vue ci          # 安装依赖（首次或 lockfile 变更后）
+npm --prefix console-vue run build   # 产物输出到 console-vue/dist/
+```
+
+#### 开发模式（HMR）
+
+```bash
+npm --prefix console-vue run dev
+# Vite dev server 监听 5173，已配置 /api /trap-api 反代到 127.0.0.1:8080
+# 浏览器打开 http://127.0.0.1:5173/
+```
+
+#### 启用与切换
+
+1. 构建产物：`console-vue/dist/`
+2. 在 `eventide.toml` 中取消注释 `v2_static_dir = "console-vue/dist"`
+3. 启动 / 重启服务：`cargo run -p eventide-server -- eventide.toml`
+4. 登录后到 **系统设置 → UI Beta**，勾选「启用新版控制台」并刷新
+5. 取消勾选或清除 Cookie 即可回退到旧版
+
+> 不构建 Vue3 也能直接运行服务：`main.rs` 检测 `v2_static_dir` 不存在时自动忽略，仅提供旧版控制台，行为与迁移前完全一致。
+
+#### CI 集成
+
+GitHub Actions 的 **Linux / Windows job** 在 `cargo build` 之前自动执行：
+
+```yaml
+- name: Set up Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: 20
+    cache: 'npm'
+    cache-dependency-path: console-vue/package-lock.json
+
+- name: Build Vue frontend
+  run: |
+    npm --prefix console-vue ci
+    npm --prefix console-vue run build
+```
+
+因此 release artifact（tar.gz / zip）内同时含 `static/` 与 `console-vue/dist/`，解压即可启用。
+
+#### 常见问题
+
+| 现象 | 原因 / 解决 |
+|------|-------------|
+| `npm ci` 报 `package-lock.json` 不一致 | 本地改过 `package.json` 但未同步 lockfile；跑 `npm --prefix console-vue install` 重新生成 |
+| 启用后页面 404 | `console-vue/dist/` 未构建或 `v2_static_dir` 路径写错；删除配置行回退旧版即可 |
+| 浏览器仍打开旧版 | Beta Cookie 未写入；重新到 **系统设置 → UI Beta** 勾选并刷新，或清除 Cookie 重试 |
+| 旧版 hash 链接（`#alerts`）失效 | 已通过 `app.js` 的 hash 双写 + `hashchange` 监听桥接到新版 `/#/alerts`；若仍未跳转，确认 `static/assets/app.js` 是最新版本 |
+| 麒麟 artifact 缺 `console-vue/dist/` | 麒麟容器离线无 Node，CI 不在容器内构建；如需，从 `eventide-linux-x86_64` artifact 复制 `console-vue/dist/` 进对应目录 |
+| npm 在离线环境装不上依赖 | 在联网机器 `npm --prefix console-vue ci` 后，把整个 `console-vue/node_modules/` 与 `console-vue/dist/` 一起拷贝到目标机（注意 `node_modules` 跨平台 ABI 差异，纯 JS 工程可跨，含 native 模块需在目标平台重新安装） |
+
+### 14.4 本地调试日志
 
 ```bash
 # Windows PowerShell
@@ -1322,7 +1438,7 @@ cargo run -p eventide-server -- eventide.toml
 
 核心单测集中在 `eventide-core`（比较符、`for` 状态机、告警标识、Ingress 解析与字段映射、模板截取、告警丰富）。
 
-### 14.4 控制台 E2E
+### 14.5 控制台 E2E
 
 依赖本机已启动的 Eventide（默认 `http://127.0.0.1:8080`）与 Playwright：
 
