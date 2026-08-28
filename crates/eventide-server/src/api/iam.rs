@@ -207,8 +207,7 @@ pub struct RoleInput {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub permissions: Vec<String>,
+    pub permissions: Option<Vec<String>>,
 }
 
 pub async fn list_roles(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Role>>> {
@@ -228,7 +227,7 @@ pub async fn create_role(
         id: Uuid::new_v4(),
         name,
         description: input.description,
-        permissions: input.permissions,
+        permissions: input.permissions.unwrap_or_default(),
         is_system: false,
         created_at: now,
         updated_at: now,
@@ -259,15 +258,18 @@ pub async fn update_role(
     if name.is_empty() {
         return Err(ApiError::bad("角色名称不能为空"));
     }
-    // System admin role must keep *
-    if r.is_system && r.name == "admin" {
-        if !input.permissions.iter().any(|p| p == "*") {
-            return Err(ApiError::bad("系统管理员角色必须保留 * 权限"));
+    // System role permissions cannot be modified
+    if r.is_system {
+        if let Some(ref perms) = input.permissions {
+            if perms != &r.permissions {
+                return Err(ApiError::bad("系统角色的权限不可修改"));
+            }
         }
+    } else if let Some(perms) = input.permissions {
+        r.permissions = perms;
     }
     r.name = name;
     r.description = input.description;
-    r.permissions = input.permissions;
     r.updated_at = Utc::now();
     state.db.upsert_role(&r).map_err(ApiError::internal)?;
     Ok(Json(r))
@@ -278,6 +280,14 @@ pub async fn delete_role(
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     let id = parse_id(&id)?;
+    let role = state
+        .db
+        .get_role(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("角色不存在"))?;
+    if role.is_system {
+        return Err(ApiError::bad("系统角色不可删除"));
+    }
     match state.db.delete_role(id) {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(ApiError::not_found("角色不存在")),
@@ -294,8 +304,7 @@ pub struct UserInput {
     pub display_name: String,
     pub password: Option<String>,
     pub department_id: Option<Uuid>,
-    #[serde(default)]
-    pub role_ids: Vec<Uuid>,
+    pub role_ids: Option<Vec<Uuid>>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -345,7 +354,7 @@ pub async fn create_user(
             return Err(ApiError::bad("部门不存在"));
         }
     }
-    for rid in &input.role_ids {
+    for rid in input.role_ids.as_deref().unwrap_or(&[]) {
         if state
             .db
             .get_role(*rid)
@@ -362,7 +371,7 @@ pub async fn create_user(
         display_name: input.display_name,
         password_hash: hash_password(password),
         department_id: input.department_id,
-        role_ids: input.role_ids,
+        role_ids: input.role_ids.unwrap_or_default(),
         enabled: input.enabled,
         created_at: now,
         updated_at: now,
@@ -404,7 +413,16 @@ pub async fn update_user(
         return Err(ApiError::bad("不能禁用当前登录账号"));
     }
 
-    if would_lose_last_admin(&state, id, input.enabled, &input.role_ids)? {
+    // admin user must keep at least one role
+    if u.username == "admin" {
+        if let Some(roles) = &input.role_ids {
+            if roles.is_empty() {
+                return Err(ApiError::bad("admin 用户至少需要保留一个角色"));
+            }
+        }
+    }
+
+    if would_lose_last_admin(&state, id, input.enabled, input.role_ids.as_deref().unwrap_or(&[]))? {
         return Err(ApiError::bad("不能移除最后一个拥有全部权限的管理员"));
     }
 
@@ -418,7 +436,7 @@ pub async fn update_user(
             return Err(ApiError::bad("部门不存在"));
         }
     }
-    for rid in &input.role_ids {
+    for rid in input.role_ids.as_deref().unwrap_or(&[]) {
         if state
             .db
             .get_role(*rid)
@@ -432,7 +450,9 @@ pub async fn update_user(
     u.username = username;
     u.display_name = input.display_name;
     u.department_id = input.department_id;
-    u.role_ids = input.role_ids;
+    if let Some(roles) = input.role_ids {
+        u.role_ids = roles;
+    }
     u.enabled = input.enabled;
     if let Some(pw) = input.password.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         validate_password_complexity(pw).map_err(ApiError::bad)?;

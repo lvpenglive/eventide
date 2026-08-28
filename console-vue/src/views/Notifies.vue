@@ -592,13 +592,23 @@ onMounted(() => {
           </ElDescriptionsItem>
 
           <ElDescriptionsItem label="transition">
-            <ElTag :type="TRANSITION_TAG_TYPE[normalizeTransition(currentItem.transition)]">
+            <ElTag
+              :type="TRANSITION_TAG_TYPE[normalizeTransition(currentItem.transition)]"
+              size="large"
+              effect="dark"
+              style="font-weight: 600; padding: 6px 14px;"
+            >
               {{ transitionText(currentItem.transition) }}
             </ElTag>
           </ElDescriptionsItem>
 
           <ElDescriptionsItem label="渠道">
-            <ElTag :type="channelKindTagType(currentItem.channel_kind || 'webhook')" effect="light">
+            <ElTag
+              :type="channelKindTagType(currentItem.channel_kind || 'webhook')"
+              size="large"
+              effect="dark"
+              style="font-weight: 600; padding: 6px 14px;"
+            >
               {{ channelKindLabel(currentItem.channel_kind || 'webhook') }}
             </ElTag>
             <span style="margin-left: 8px">{{ currentItem.channel_name || '-' }}</span>
@@ -608,7 +618,12 @@ onMounted(() => {
           </ElDescriptionsItem>
 
           <ElDescriptionsItem label="success">
-            <ElTag :type="currentItem.success ? 'success' : 'danger'">
+            <ElTag
+              :type="currentItem.success ? 'success' : 'danger'"
+              size="large"
+              effect="dark"
+              style="font-weight: 600; padding: 6px 14px;"
+            >
               {{ currentItem.success ? '成功' : '失败' }}
             </ElTag>
           </ElDescriptionsItem>

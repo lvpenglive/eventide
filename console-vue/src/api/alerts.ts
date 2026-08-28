@@ -53,6 +53,7 @@ export function ackAlert(id: string, body: AckInput): Promise<AlertEvent> {
 export function unackAlert(id: string): Promise<AlertEvent> {
   return request<AlertEvent>(`/api/alerts/${encodeURIComponent(id)}/unack`, {
     method: 'POST',
+    body: JSON.stringify({}),
   })
 }
 

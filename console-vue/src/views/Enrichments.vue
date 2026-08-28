@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, reactive, ref, markRaw } from 'vue'
 import {
   ElAffix,
@@ -601,8 +601,8 @@ async function onDelete(row: EnrichRow) {
     <!-- 吸附工具栏 -->
     <ElAffix :offset="0" class="affix-wrap">
       <div class="toolbar">
-        <ElButton type="primary" :icon="Plus" @click="openCreate">新建丰富规则</ElButton>
-        <ElButton :icon="Refresh" @click="loadAll" :loading="loading">刷新</ElButton>
+        <button class="primary" @click="openCreate">新建丰富规则</button>
+        <button class="ghost" @click="loadAll" :disabled="loading">刷新</button>
 
         <div class="toolbar-filters">
           <ElSelect
@@ -716,20 +716,11 @@ async function onDelete(row: EnrichRow) {
 
       <ElTableColumn label="操作" width="240" fixed="right">
         <template #default="{ row }">
-          <ElButton
-            link
-            type="primary"
-            :icon="VideoPlay"
-            @click="previewOpen(asEnrich(row))"
-          >
-            试跑
-          </ElButton>
-          <ElButton link type="primary" :icon="Edit" @click="openEdit(asEnrich(row).id)">
-            编辑
-          </ElButton>
-          <ElButton link type="danger" :icon="Delete" @click="onDelete(asEnrich(row))">
-            删除
-          </ElButton>
+          <div class="actions">
+            <button @click="previewOpen(asEnrich(row))">试跑</button>
+            <button @click="openEdit(asEnrich(row).id)">编辑</button>
+            <button class="danger" @click="onDelete(asEnrich(row))">删除</button>
+          </div>
         </template>
       </ElTableColumn>
     </ElTable>
@@ -740,7 +731,7 @@ async function onDelete(row: EnrichRow) {
       description="尚无告警丰富规则，可先创建 AnnotationTemplate / LabelMap / Lookup 类型。"
     >
       <template #extra>
-        <ElButton type="primary" :icon="Plus" @click="openCreate">新建丰富规则</ElButton>
+        <button class="primary" @click="openCreate">新建丰富规则</button>
       </template>
     </ElEmpty>
 
@@ -756,7 +747,7 @@ async function onDelete(row: EnrichRow) {
         <!-- 左侧 Form：输入 matchers / labels / annotations ... -->
         <ElCol :span="11">
           <h3 style="margin: 0 0 8px 0">执行预览 · 输入</h3>
-          <ElForm label-width="110px" label-position="right">
+          <ElForm label-position="top">
             <ElFormItem label="kind">
               <ElTag :color="KIND_COLORS[(enrichments.find(e => e.id === previewEnrichId)?.kind || 'AnnotationTemplate') as EnrichKind]" effect="dark" style="color:#fff">
                 {{ KIND_NAMES[(enrichments.find(e => e.id === previewEnrichId)?.kind || 'AnnotationTemplate') as EnrichKind] }}
@@ -820,8 +811,20 @@ async function onDelete(row: EnrichRow) {
           <div v-loading="previewLoading" style="min-height: 400px">
             <template v-if="previewResult">
               <div class="eval-head">
-                <ElTag v-if="previewResult.ok" type="success" effect="light">执行成功</ElTag>
-                <ElTag v-else type="danger" effect="light">执行失败</ElTag>
+                <ElTag
+                  v-if="previewResult.ok"
+                  type="success"
+                  size="large"
+                  effect="dark"
+                  style="font-weight: 600; padding: 6px 14px;"
+                >执行成功</ElTag>
+                <ElTag
+                  v-else
+                  type="danger"
+                  size="large"
+                  effect="dark"
+                  style="font-weight: 600; padding: 6px 14px;"
+                >执行失败</ElTag>
                 <span v-if="previewResult.error" style="margin-left: 8px; color: #f56c6c">
                   {{ previewResult.error }}
                 </span>
@@ -859,7 +862,7 @@ async function onDelete(row: EnrichRow) {
         :model="dlg"
         :rules="dlgFormRules"
         label-width="130px"
-        label-position="right"
+        label-position="top"
       >
         <ElCollapse v-model="activePanel">
           <!-- 面板1：基础 -->
@@ -1081,15 +1084,15 @@ async function onDelete(row: EnrichRow) {
 .enrichments-view { padding: 16px 20px 32px; }
 .page-header { margin-bottom: 12px; }
 .page-title { margin: 0 0 4px; font-size: 22px; }
-.page-sub { margin: 0; color: #606266; font-size: 13px; }
+.page-sub { margin: 0; color: var(--el-text-color-secondary, var(--muted)); font-size: 13px; }
 .affix-wrap { z-index: 10; }
 .toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: #fff;
-  border: 1px solid #ebeef5;
+  background: var(--el-bg-color, var(--panel));
+  border: 1px solid var(--el-border-color-lighter, var(--line-soft));
   border-radius: 4px;
 }
 .toolbar-filters {
@@ -1109,30 +1112,30 @@ async function onDelete(row: EnrichRow) {
   align-items: center;
   margin-bottom: 6px;
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary, var(--heading));
 }
 .kv-row {
   display: flex;
   align-items: center;
   margin-bottom: 6px;
 }
-.form-tip { font-size: 12px; color: #909399; margin-top: 4px; }
+.form-tip { font-size: 12px; color: var(--el-text-color-secondary, var(--muted)); margin-top: 4px; }
 .panel-tip {
-  background: #f4f8fc;
+  background: var(--el-color-primary-light-9, var(--primary-bg));
   padding: 8px 10px;
   border-radius: 4px;
   margin-bottom: 8px;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular, var(--text));
 }
 .panel-tip code { background: #eef; padding: 1px 4px; border-radius: 3px; }
 .eval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .diff-title {
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-regular, var(--text));
   margin-bottom: 4px;
   padding: 2px 6px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light, var(--inset-bg));
   border-radius: 3px;
 }
 .json-pre {
@@ -1150,7 +1153,7 @@ async function onDelete(row: EnrichRow) {
   border-radius: 4px;
   padding: 10px;
   margin-bottom: 8px;
-  background: #fafafa;
+  background: var(--el-fill-color-light, var(--inset-bg));
 }
 .mapping-head {
   display: flex;
@@ -1159,10 +1162,10 @@ async function onDelete(row: EnrichRow) {
   flex-wrap: wrap;
   gap: 6px;
 }
-.mapping-match-label { font-size: 13px; color: #303133; }
+.mapping-match-label { font-size: 13px; color: var(--el-text-color-primary, var(--heading)); }
 .mapping-inner { padding-left: 4px; }
 .raw-pre {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light, var(--inset-bg));
   padding: 6px 8px;
   border-radius: 3px;
   max-height: 240px;

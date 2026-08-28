@@ -10,7 +10,7 @@ listen_udp = "0.0.0.0:1162"
 # ha_vip = "10.0.0.100"   # LB front IP (display)
 heartbeat_secs = 5
 
-kafka_brokers = "120.26.105.115:9092"
+kafka_brokers = "120.26.67.180:9092"
 kafka_topic = "eventide.snmptrap"
 # Must match topic partition count + Kafka Ingress options.partitions
 kafka_partitions = 6
@@ -30,13 +30,13 @@ recent_limit = 50
 # priv_password = "privpass"
 
 # Same MySQL as eventide.toml
-mysql_url = "mysql://root:886363@120.26.105.115:3306/eventide"
+mysql_url = "mysql://root:886363@120.26.67.180:3306/eventide"
 
 # Same Redis as eventide.toml — policy snapshot + pub/sub
 redis_url = "redis://123.207.158.181:6379/"
 
 # Same RustFS as eventide.toml [trap]
-s3_endpoint = "http://120.26.105.115:9000"
+s3_endpoint = "http://120.26.67.180:9000"
 s3_access_key = "admin"
 s3_secret_key = "admin123"
 s3_bucket = "eventide-mibs"

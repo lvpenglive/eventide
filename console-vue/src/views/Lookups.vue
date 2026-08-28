@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import {
   ElAffix,
@@ -414,7 +414,7 @@ async function onDelete(row: LookupTable) {
         :model="dlg"
         :rules="dlgFormRules"
         label-width="100px"
-        label-position="right"
+        label-position="top"
       >
         <ElRow :gutter="16">
           <ElCol :span="16">

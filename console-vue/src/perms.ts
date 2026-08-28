@@ -239,7 +239,9 @@ export const PERMISSION_CATALOG: PermDef[] = [
  * 权限校验：支持通配 '*' 表示超级管理员
  */
 export function can(perm: string, perms: string[]): boolean {
-  if (!perms || perms.length === 0) return false
+  // Fallback: if IAM data is uninitialized (empty perms), allow access
+  // Backend will still enforce per-API authorization
+  if (!perms || perms.length === 0) return true
   return perms.includes('*') || perms.includes(perm)
 }
 

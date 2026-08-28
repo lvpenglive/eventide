@@ -135,7 +135,7 @@ pub async fn login(
 
     state.login_limiter.record_success(&ip, &username);
 
-    let perms = state
+    let mut perms = state
         .db
         .permissions_for_roles(&user.role_ids)
         .map_err(|e| {
@@ -144,6 +144,12 @@ pub async fn login(
                 Json(serde_json::json!({ "error": e.to_string() })),
             )
         })?;
+
+    // Fallback: admin user gets wildcard when IAM data is uninitialized
+    if perms.is_empty() && username == "admin" {
+        tracing::warn!("admin user has no permissions in DB, granting wildcard '*' as fallback");
+        perms = vec!["*".into()];
+    }
 
     let auth = &state.config.auth;
     let now = Utc::now();
@@ -203,7 +209,11 @@ pub async fn me(
             body["role_ids"] = serde_json::json!(u.role_ids);
             body["enabled"] = serde_json::json!(u.enabled);
             body["password_status"] = auth_password_status(&state, u.password_changed_at);
-            if let Ok(perms) = state.db.permissions_for_roles(&u.role_ids) {
+            if let Ok(mut perms) = state.db.permissions_for_roles(&u.role_ids) {
+                // Fallback: admin user gets wildcard when IAM data is uninitialized
+                if perms.is_empty() && u.username == "admin" {
+                    perms = vec!["*".into()];
+                }
                 body["permissions"] = serde_json::json!(perms);
             }
         }

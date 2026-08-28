@@ -1,4 +1,4 @@
-// B3 批次：Settings（AlertHistory / TrapToken / Storm / UiBetaToggle）
+// B3 批次：Settings（AlertHistory / TrapToken / Storm / UiBetaToggle / License）
 import { request } from './request'
 import type {
   AlertHistorySettingsView,
@@ -7,6 +7,9 @@ import type {
   StormSettingsView,
   StormSettingsUpdate,
   UiBetaSettingsView,
+  LicenseSnapshot,
+  LicenseRequest,
+  LicenseImportBody,
 } from './types'
 
 // —— 1. Alert History ——
@@ -70,5 +73,32 @@ export function putUiBetaToggle(
   return request<UiBetaSettingsView>('/api/settings/ui-betatoggle', {
     method: 'PUT',
     body: JSON.stringify(body),
+  })
+}
+
+// —— 5. License ——
+export function getLicense(): Promise<LicenseSnapshot> {
+  return request<LicenseSnapshot>('/api/license', {
+    method: 'GET',
+  })
+}
+
+export function getLicenseRequest(customer?: string): Promise<LicenseRequest> {
+  const params = customer ? `?customer=${encodeURIComponent(customer)}` : ''
+  return request<LicenseRequest>(`/api/license/request${params}`, {
+    method: 'GET',
+  })
+}
+
+export function importLicense(body: LicenseImportBody): Promise<LicenseSnapshot> {
+  return request<LicenseSnapshot>('/api/license', {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+export function clearLicense(): Promise<LicenseSnapshot> {
+  return request<LicenseSnapshot>('/api/license', {
+    method: 'DELETE',
   })
 }

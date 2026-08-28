@@ -39,6 +39,14 @@ const { theme, setTheme, initTheme } = useTheme()
 
 onMounted(() => initTheme())
 
+// --- 侧栏收起 ---
+const SIDEBAR_KEY = 'eventide_sidebar_collapsed'
+const sidebarCollapsed = ref(localStorage.getItem(SIDEBAR_KEY) === '1')
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
+}
+
 // --- BetaToggle ---
 const betaAvailable = ref(false)
 const betaEnabled = ref(false)
@@ -68,6 +76,57 @@ async function onBetaToggleChange(val: string | number | boolean) {
   }
 }
 onMounted(loadBetaToggle)
+
+// --- 许可证横幅 ---
+import { getLicense, type LicenseInfo } from '@/api/license'
+const licenseBanner = ref<{ show: boolean; cls: string; text: string }>({ show: false, cls: 'info', text: '' })
+
+function fmtTime(s?: string): string {
+  if (!s) return '—'
+  try {
+    const d = new Date(s)
+    return d.toLocaleString('zh-CN', { hour12: false })
+  } catch {
+    return s
+  }
+}
+
+async function loadLicenseBanner() {
+  if (!auth.token) return
+  try {
+    const lic = await getLicense()
+    updateLicenseBanner(lic)
+  } catch {
+    licenseBanner.value.show = false
+  }
+}
+
+function updateLicenseBanner(lic: LicenseInfo) {
+  const days = lic.days_left
+  let show = false
+  let cls = 'info'
+  let text = ''
+  if (lic.kind === 'expired' || lic.writable === false) {
+    show = true
+    cls = 'warn'
+    text = lic.reason || '许可证无效或已过期，当前为只读宽限。可查看数据，配置变更已禁用。'
+  } else if (lic.kind === 'trial') {
+    show = true
+    cls = days != null && days <= 7 ? 'warn' : 'info'
+    text = `试用中，剩余约 ${days ?? '—'} 天（到期 ${fmtTime(lic.expires_at)}）。`
+  } else if (lic.kind === 'licensed' && days != null && days <= 7) {
+    show = true
+    cls = 'warn'
+    text = `许可证即将到期：剩余约 ${days} 天（${lic.customer || ''} · ${fmtTime(lic.expires_at)}）。`
+  }
+  licenseBanner.value = { show, cls, text }
+}
+
+function goImportLicense() {
+  router.push('/settings')
+}
+
+onMounted(loadLicenseBanner)
 
 // --- 修改密码 ---
 const changePwdVisible = ref(false)
@@ -146,7 +205,10 @@ function pageHref(key: PageKey): string {
   return `/overview?todo=${key}`
 }
 function canView(key: PageKey): boolean {
-  return rawCan(PAGE_PERM[key], auth.permissions)
+  const perms = auth.permissions
+  // 已登录但权限数组为空（me() 未完成或后端未返回）→ 默认展示所有菜单，路由守卫会拦截实际访问
+  if (!perms || perms.length === 0) return auth.isLoggedIn
+  return rawCan(PAGE_PERM[key], perms)
 }
 
 // 当前激活页所属的分组（用于首次加载自动展开）
@@ -198,7 +260,7 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
 </script>
 
 <template>
-  <div class="main-layout">
+  <div class="main-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <!-- 左侧固定侧栏（宽 220px，TR-4.4） -->
     <aside class="sidebar">
       <div class="sidebar-brand">
@@ -272,6 +334,16 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
       <!-- 顶栏 -->
       <header class="topbar">
         <div class="topbar-left">
+          <el-button
+            class="sidebar-toggle"
+            :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+            @click="toggleSidebar"
+          >
+            <el-icon :size="16">
+              <ArrowRight v-if="sidebarCollapsed" />
+              <ArrowDown v-else />
+            </el-icon>
+          </el-button>
           <span class="crumb-title">{{ String(route.meta?.title || '总览') }}</span>
         </div>
         <div class="topbar-right">
@@ -341,6 +413,12 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
         </el-alert>
       </div>
 
+      <!-- 许可证横幅 -->
+      <div v-if="licenseBanner.show" :class="['license-banner', licenseBanner.cls]">
+        <span>{{ licenseBanner.text }}</span>
+        <el-button size="small" type="primary" plain @click="goImportLicense">去导入许可证</el-button>
+      </div>
+
       <!-- 页面内容区 -->
       <main class="page-area">
         <RouterView v-slot="{ Component }">
@@ -406,6 +484,56 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
   position: sticky;
   top: 0;
   box-shadow: inset -1px 0 0 var(--line);
+}
+
+/* ===== 侧栏收起态 ===== */
+.main-layout.sidebar-collapsed .sidebar {
+  flex: 0 0 68px;
+  width: 68px;
+}
+.main-layout.sidebar-collapsed .sidebar-brand {
+  padding: 18px 8px 14px;
+  justify-content: center;
+}
+.main-layout.sidebar-collapsed .brand-title,
+.main-layout.sidebar-collapsed .brand-badge {
+  display: none;
+}
+.main-layout.sidebar-collapsed .sidebar-nav {
+  padding: 10px 6px 12px;
+}
+.main-layout.sidebar-collapsed .nav-item {
+  width: calc(100% - 12px);
+  margin: 3px 6px;
+  padding: 10px 0;
+  justify-content: center;
+  gap: 0;
+}
+.main-layout.sidebar-collapsed .nav-label,
+.main-layout.sidebar-collapsed .nav-soon {
+  display: none;
+}
+.main-layout.sidebar-collapsed .nav-group-btn {
+  display: none;
+}
+.main-layout.sidebar-collapsed .nav-sub {
+  display: flex;
+  padding: 0;
+  margin-left: 0;
+  border-left: none;
+}
+.main-layout.sidebar-collapsed .nav-sub .nav-item {
+  margin: 3px 6px;
+}
+.main-layout.sidebar-collapsed .sidebar-foot {
+  padding: 10px 8px 16px;
+  justify-content: center;
+}
+.main-layout.sidebar-collapsed .sidebar-foot span:not(.foot-dot) {
+  display: none;
+}
+.sidebar-toggle {
+  margin-right: 8px;
 }
 .sidebar-brand {
   display: flex;
@@ -645,7 +773,10 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
   text-overflow: ellipsis;
 }
 .password-warn {
-  padding: 10px 20px 0;
+  padding: 10px 24px 0;
+}
+.license-banner {
+  margin: 0 24px 12px;
 }
 .page-area {
   flex: 1;

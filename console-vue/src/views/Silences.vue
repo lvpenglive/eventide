@@ -5,7 +5,7 @@
  * 严格独立，不修改任何其他文件。
  * ========================================================= */
 
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 // --- Element Plus 按需 ---
 import {
@@ -139,27 +139,13 @@ const dialogMode = ref<'create' | 'edit'>('create')
 const editingId = ref<string | null>(null)
 const formRef = ref<FormInstance | null>(null)
 
-interface FormRow {
-  key: string
-  value: string
-}
-
 const form = reactive({
   comment: '',
   rule_id: '' as string,
   starts_at: '' as string,
   ends_at: '' as string,
-  matchers: [{ key: '', value: '' }] as FormRow[],
+  matchersJson: '{}' as string,
 })
-const dateRange = ref<[string, string]>(['', ''])
-watch(
-  dateRange,
-  (val: [string, string] | null | undefined) => {
-    form.starts_at = (val && val[0]) || ''
-    form.ends_at = (val && val[1]) || ''
-  },
-  { deep: true }
-)
 
 function resetForm() {
   form.comment = ''
@@ -169,8 +155,7 @@ function resetForm() {
   const plus2 = new Date(now.getTime() + 2 * 60 * 60 * 1000)
   form.starts_at = formatDateTimePicker(now)
   form.ends_at = formatDateTimePicker(plus2)
-  dateRange.value = [form.starts_at, form.ends_at]
-  form.matchers = [{ key: '', value: '' }]
+  form.matchersJson = '{}'
   editingId.value = null
   formRef.value?.clearValidate()
 }
@@ -182,11 +167,11 @@ function pad(n: number): string {
   return String(n).padStart(2, '0')
 }
 
-// ElDatePicker value-format 要求：YYYY-MM-DDTHH:mm:ssZ（UTC）
+// ElDatePicker value-format 要求：YYYY-MM-DDTHH:mm:ss（本地时间）
 function formatDateTimePicker(d: Date): string {
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(
-    d.getUTCHours()
-  )}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}Z`
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 // 展示用截断：ISO -> YYYY-MM-DD HH:mm:ss
@@ -307,11 +292,13 @@ function openEdit(r: unknown) {
   form.rule_id = row.rule_id || ''
   form.starts_at = row.starts_at || ''
   form.ends_at = row.ends_at || ''
-  dateRange.value = [form.starts_at, form.ends_at]
-  const mList = normalizeMatchers(row.matchers)
-  form.matchers = mList.length > 0
-    ? mList.map((m) => ({ key: m.key, value: m.value }))
-    : [{ key: '', value: '' }]
+  // 将 matchers 转为 JSON 字符串
+  try {
+    const mObj = matchersToObject(row.matchers)
+    form.matchersJson = JSON.stringify(mObj, null, 2)
+  } catch {
+    form.matchersJson = '{}'
+  }
   dialogVisible.value = true
 }
 
@@ -319,29 +306,56 @@ function closeDialog() {
   dialogVisible.value = false
 }
 
-// 匹配器行增删
-function addMatcherRow() {
-  form.matchers.push({ key: '', value: '' })
+// 格式化 matchers 为 JSON 字符串显示
+function formatMatchersJson(m: LocalMatcher[] | Record<string, string> | undefined): string {
+  try {
+    const obj = matchersToObject(m)
+    return JSON.stringify(obj)
+  } catch {
+    return '{}'
+  }
 }
 
-function removeMatcherRow(idx: number) {
-  if (form.matchers.length <= 1) {
-    form.matchers[0] = { key: '', value: '' }
-    return
+// 将 matchers 转为 Record 对象
+function matchersToObject(m: LocalMatcher[] | Record<string, string> | undefined): Record<string, string> {
+  if (!m) return {}
+  if (Array.isArray(m)) {
+    const obj: Record<string, string> = {}
+    for (const item of m) {
+      if (item && item.key) obj[item.key] = item.value
+    }
+    return obj
   }
-  form.matchers.splice(idx, 1)
+  return { ...m }
 }
 
 // 保存
 async function handleSave() {
-  // 基础校验
-  // 1. matchers：至少 1 条 或 rule_id 至少有值（至少 1 个条件）
-  const validMatchers = form.matchers.filter((m) => m.key.trim() !== '')
-  if (validMatchers.length === 0 && !form.rule_id) {
+  // 1. 解析 matchers JSON
+  let matchersObj: Record<string, string> = {}
+  try {
+    const parsed = JSON.parse(form.matchersJson || '{}')
+    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+      ElMessage.error('匹配标签 JSON 必须是对象')
+      return
+    }
+    matchersObj = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      matchersObj[String(k)] = String(v)
+    }
+  } catch {
+    ElMessage.error('匹配标签 JSON 格式错误')
+    return
+  }
+
+  // 2. 至少 1 个匹配器 或 绑定 1 条规则
+  const hasMatchers = Object.keys(matchersObj).length > 0
+  if (!hasMatchers && !form.rule_id) {
     ElMessage.error('请至少填写一个匹配器或绑定一条规则')
     return
   }
-  // 2. starts_at < ends_at
+
+  // 3. starts_at < ends_at
   if (!form.starts_at || !form.ends_at) {
     ElMessage.error('请选择开始时间和结束时间')
     return
@@ -362,7 +376,7 @@ async function handleSave() {
     rule_id: form.rule_id || null,
     starts_at: form.starts_at,
     ends_at: form.ends_at,
-    matchers: validMatchers.map((m) => ({ key: m.key.trim(), value: m.value })),
+    matchers: Object.entries(matchersObj).map(([key, value]) => ({ key, value })),
   }
 
   try {
@@ -483,105 +497,24 @@ function getMatchersByIndex(idx: number): LocalMatcher[] {
         border
         style="width: 100%; background: #fff; border-radius: 8px; overflow: hidden"
       >
-        <!-- 时间段 + 剩余/状态 -->
-        <ElTableColumn label="时间段" min-width="320">
-          <template #default="{ row, $index }">
-            <div style="line-height: 1.5">
-              <div style="font-size: 13px; color: #1f2937; margin-bottom: 2px">
-                {{ fmtDisplay(row.starts_at) }}
-                <span style="color: #9ca3af; margin: 0 4px">～</span>
-                {{ fmtDisplay(row.ends_at) }}
-              </div>
-              <div style="display: flex; align-items: center; gap: 8px">
-                <ElBadge
-                  :type="statusBadgeMap[getStatus(row)].type"
-                  is-dot
-                  style="margin-right: 4px"
-                />
-                <span
-                  style="
-                    display: inline-block;
-                    padding: 1px 8px;
-                    font-size: 12px;
-                    border-radius: 10px;
-                    background: #f3f4f6;
-                    color: #4b5563;
-                  "
-                >
-                  {{ remainingText(row) }}
-                </span>
-                <ElTag :type="statusBadgeMap[getStatus(row)].type" size="small" effect="light">
-                  {{ statusBadgeMap[getStatus(row)].text }}
-                </ElTag>
-              </div>
-            </div>
-            <!-- 消除未使用变量警告（实际上面没用 $index，这里占位即可） -->
-            <span style="display: none">{{ $index }}</span>
+        <!-- 注释 -->
+        <ElTableColumn label="注释" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span style="font-size: 13px; color: #1f2937">
+              {{ row.comment || '—' }}
+            </span>
           </template>
         </ElTableColumn>
 
-        <!-- 匹配器 Matchers -->
-        <ElTableColumn label="匹配器" min-width="280">
-          <template #default="{ $index }">
-            <div style="display: flex; flex-wrap: wrap; gap: 4px; align-items: center">
-              <template
-                v-for="(m, i) in getMatchersByIndex($index).slice(0, 5)"
-                :key="`${m.key}-${m.value}-${i}`"
-              >
-                <ElTag size="small" type="info" effect="plain">
-                  {{ m.key }}={{ m.value }}
-                </ElTag>
-              </template>
-              <ElTooltip
-                v-if="getMatchersByIndex($index).length > 5"
-                :show-after="200"
-              >
-                <template #content>
-                  <div style="max-width: 320px">
-                    <div
-                      v-for="(m, i) in getMatchersByIndex($index)"
-                      :key="`tip-${m.key}-${i}`"
-                      style="padding: 2px 0; font-size: 12px"
-                    >
-                      <span style="color: #60a5fa">{{ m.key }}</span>
-                      <span style="color: #9ca3af"> = </span>
-                      <span style="color: #fbbf24">{{ m.value }}</span>
-                    </div>
-                  </div>
-                </template>
-                <ElTag size="small" type="warning" effect="light">
-                  +{{ getMatchersByIndex($index).length - 5 }} 更多
-                </ElTag>
-              </ElTooltip>
-              <span
-                v-if="getMatchersByIndex($index).length === 0"
-                style="color: #9ca3af; font-size: 12px"
-              >
-                无匹配器（按规则绑定生效）
-              </span>
-            </div>
-          </template>
-        </ElTableColumn>
-
-        <!-- 规则绑定 -->
+        <!-- 规则 -->
         <ElTableColumn label="规则" width="140">
           <template #default="{ row }">
             <template v-if="!row.rule_id">
-              <ElTag size="small" effect="plain">全部规则</ElTag>
+              <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: #6b7280">全部</span>
             </template>
             <template v-else>
-              <ElTooltip :content="row.rule_id" :show-after="200">
-                <span
-                  style="
-                    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                    font-size: 12px;
-                    background: #eff6ff;
-                    color: #1d4ed8;
-                    padding: 2px 8px;
-                    border-radius: 4px;
-                    cursor: pointer;
-                  "
-                >
+              <ElTooltip :content="row.rule_id" :show-after="300">
+                <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: #1f2937; cursor: pointer">
                   {{ shortId(row.rule_id) }}…
                 </span>
               </ElTooltip>
@@ -589,20 +522,31 @@ function getMatchersByIndex(idx: number): LocalMatcher[] {
           </template>
         </ElTableColumn>
 
-        <!-- 备注 -->
-        <ElTableColumn label="备注" min-width="180" show-overflow-tooltip>
+        <!-- 匹配标签 -->
+        <ElTableColumn label="匹配标签" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
-            <span style="font-size: 13px; color: #374151">
-              {{ row.comment || '-' }}
+            <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: #1f2937">
+              {{ formatMatchersJson(row.matchers) }}
             </span>
           </template>
         </ElTableColumn>
 
-        <!-- 创建时间 -->
-        <ElTableColumn label="创建时间" width="170">
+        <!-- 时间窗 -->
+        <ElTableColumn label="时间窗" min-width="300">
           <template #default="{ row }">
-            <span style="font-size: 12px; color: #6b7280">
-              {{ fmtDisplay(row.created_at) }}
+            <span style="font-size: 13px; color: #1f2937">
+              {{ fmtDisplay(row.starts_at) }}
+              <span style="color: #9ca3af; margin: 0 4px">→</span>
+              {{ fmtDisplay(row.ends_at) }}
+            </span>
+          </template>
+        </ElTableColumn>
+
+        <!-- 状态 -->
+        <ElTableColumn label="状态" width="100" align="center">
+          <template #default="{ row }">
+            <span :class="['status-badge', getStatus(row) === 'active' ? 'on' : 'off']">
+              {{ getStatus(row) === 'active' ? '生效中' : '未生效' }}
             </span>
           </template>
         </ElTableColumn>
@@ -636,108 +580,69 @@ function getMatchersByIndex(idx: number): LocalMatcher[] {
     <!-- 新建/编辑 Dialog -->
     <ElDialog
       v-model="dialogVisible"
-      :title="dialogMode === 'create' ? '新建静默策略' : '编辑静默策略'"
-      width="640px"
+      :title="dialogMode === 'create' ? '新建静默' : '编辑静默'"
+      width="560px"
       :close-on-click-modal="false"
       @closed="resetForm"
     >
+      <div class="dialog-desc">在时间窗内抑制匹配标签的通知。</div>
       <ElForm
         ref="formRef"
-        label-width="96px"
+        label-position="top"
         style="padding-top: 4px"
       >
-        <!-- 备注 -->
-        <ElFormItem label="备注">
+        <!-- 注释 -->
+        <ElFormItem label="注释">
           <ElInput
             v-model="form.comment"
-            type="textarea"
-            :rows="2"
-            placeholder="备注说明，建议填写此次静默的变更单号或原因"
+            placeholder="维护窗口"
             maxlength="200"
             show-word-limit
           />
         </ElFormItem>
 
-        <!-- 规则绑定 -->
-        <ElFormItem label="绑定规则">
-          <ElSelect
+        <!-- 规则 ID -->
+        <ElFormItem label="规则 ID（可选，留空匹配全部）">
+          <ElInput
             v-model="form.rule_id"
-            placeholder="选择或输入规则 ID，不选则对全部规则生效"
-            style="width: 100%"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-          >
-            <ElOption value="" label="全部规则（不绑定特定规则）" />
-            <ElOption
-              v-for="r in rules"
-              :key="r.id"
-              :value="r.id"
-              :label="r.name ? `${r.name} (${shortId(r.id)})` : shortId(r.id)"
-            />
-          </ElSelect>
-        </ElFormItem>
-
-        <!-- 时间窗 -->
-        <ElFormItem label="时间窗" required>
-          <ElDatePicker
-            v-model="dateRange"
-            type="datetimerange"
-            range-separator="至"
-            start-placeholder="开始时间"
-            end-placeholder="结束时间"
-            value-format="YYYY-MM-DDTHH:mm:ss[Z]"
-            style="width: 100%"
-            format="YYYY-MM-DD HH:mm:ss"
+            placeholder="uuid"
           />
         </ElFormItem>
 
-        <!-- 匹配器动态行 -->
-        <ElFormItem label="匹配器" required>
-          <div style="width: 100%">
-            <div
-              v-for="(m, idx) in form.matchers"
-              :key="idx"
-              style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center"
-            >
-              <ElInput
-                v-model="m.key"
-                placeholder="标签键，如 alertname / instance"
-                style="flex: 1"
-              />
-              <ElInput
-                v-model="m.value"
-                placeholder="精确匹配值"
-                style="flex: 1"
-              />
-              <ElButton
-                :icon="CircleClose"
-                circle
-                size="small"
-                type="danger"
-                link
-                @click="removeMatcherRow(idx)"
-                :title="form.matchers.length <= 1 ? '清空此行为空' : '删除此行'"
-              />
-            </div>
-            <ElButton
-              type="primary"
-              plain
-              link
-              :icon="Plus"
-              size="small"
-              @click="addMatcherRow"
-            >
-              添加匹配器
-            </ElButton>
-            <div
-              style="font-size: 12px; color: #9ca3af; margin-top: 4px"
-            >
-              至少需要 1 个匹配器（键名非空） 或 绑定 1 条规则
-            </div>
-          </div>
+        <!-- 匹配标签 JSON -->
+        <ElFormItem label="匹配标签 JSON" required>
+          <ElInput
+            v-model="form.matchersJson"
+            type="textarea"
+            :rows="4"
+            placeholder='{"ip":"10.0.0.1"}'
+          />
+          <div class="form-hint">例：{"ip":"10.0.0.1"} 或 {"alertname":"CPU High"}</div>
         </ElFormItem>
+
+        <!-- 时间窗 -->
+        <div class="form-row">
+          <ElFormItem label="开始时间" required style="flex: 1">
+            <ElDatePicker
+              v-model="form.starts_at"
+              type="datetime"
+              placeholder="开始时间"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+              style="width: 100%"
+              format="YYYY-MM-DD HH:mm:ss"
+            />
+          </ElFormItem>
+          <ElFormItem label="结束时间" required style="flex: 1">
+            <ElDatePicker
+              v-model="form.ends_at"
+              type="datetime"
+              placeholder="结束时间"
+              value-format="YYYY-MM-DDTHH:mm:ss"
+              style="width: 100%"
+              format="YYYY-MM-DD HH:mm:ss"
+            />
+          </ElFormItem>
+        </div>
       </ElForm>
 
       <template #footer>
@@ -754,5 +659,42 @@ function getMatchersByIndex(idx: number): LocalMatcher[] {
 /* 局部样式，避免污染全局，保持克制 */
 .silences-view :deep(.el-affix) {
   z-index: 10;
+}
+
+/* 状态徽章 - 与老版对齐 */
+.status-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  font-size: 12px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.status-badge.on {
+  background: #dcfce7;
+  color: #16a34a;
+}
+.status-badge.off {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+/* 对话框描述 */
+.dialog-desc {
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 12px;
+}
+
+/* 表单行 */
+.form-row {
+  display: flex;
+  gap: 16px;
+}
+
+/* 表单提示 */
+.form-hint {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 4px;
 }
 </style>

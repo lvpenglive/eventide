@@ -4,32 +4,18 @@ import { useRouter } from 'vue-router'
 import {
   ElAffix,
   ElButton,
-  ElCollapse,
-  ElCollapseItem,
   ElDescriptions,
   ElDescriptionsItem,
   ElDialog,
   ElDrawer,
   ElEmpty,
-  ElForm,
-  ElFormItem,
-  ElInput,
-  ElInputNumber,
   ElMessage,
   ElMessageBox,
-  ElOption,
-  ElRow,
-  ElCol,
-  ElSelect,
-  ElSwitch,
   ElTable,
   ElTableColumn,
   ElTag,
-  ElTooltip,
 } from 'element-plus'
-import type { FormInstance, FormRules } from 'element-plus'
 import {
-  CircleCheck,
   Delete,
   Edit,
   Plus,
@@ -42,7 +28,7 @@ import type { NotifyChannel } from '@/api/types'
 // 本地补齐类型（不改动 types.ts）
 // ============================================================
 export type RuleSeverity = 'disaster' | 'high' | 'average' | 'warning' | 'information' | 'not_classified'
-export type Comparator = '>' | '>=' | '<' | '<=' | '==' | '!='
+export type Comparator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq'
 
 export interface DatasourceRow {
   id: string
@@ -198,20 +184,20 @@ const SEVERITY_NAMES: Record<RuleSeverity, string> = {
   not_classified: '未分类',
 }
 const SEVERITY_OPTIONS: { value: RuleSeverity; label: string }[] = [
-  { value: 'disaster', label: '灾害 (disaster)' },
-  { value: 'high', label: '严重 (high)' },
-  { value: 'average', label: '一般 (average)' },
-  { value: 'warning', label: '警告 (warning)' },
-  { value: 'information', label: '信息 (information)' },
-  { value: 'not_classified', label: '未分类 (not_classified)' },
+  { value: 'not_classified', label: '未分类' },
+  { value: 'information', label: '信息' },
+  { value: 'warning', label: '警告' },
+  { value: 'average', label: '一般' },
+  { value: 'high', label: '严重' },
+  { value: 'disaster', label: '灾害' },
 ]
 const COMPARATOR_OPTIONS: { value: Comparator; label: string }[] = [
-  { value: '>', label: '> (大于)' },
-  { value: '>=', label: '>= (大于等于)' },
-  { value: '<', label: '< (小于)' },
-  { value: '<=', label: '<= (小于等于)' },
-  { value: '==', label: '== (等于)' },
-  { value: '!=', label: '!= (不等于)' },
+  { value: 'gt', label: '>' },
+  { value: 'gte', label: '>=' },
+  { value: 'lt', label: '<' },
+  { value: 'lte', label: '<=' },
+  { value: 'eq', label: '==' },
+  { value: 'neq', label: '!=' },
 ]
 
 // ============================================================
@@ -245,9 +231,7 @@ const datasourceMap = computed(() => {
   return m
 })
 
-// Dialog 折叠面板状态
-const activePanel = ref<string>('basic')
-const escalateActive = ref<string>('')
+const annotationsHint = computed(() => '通知前自动渲染 {{labels.x}} / {{value}} / {{severity}} 等变量。')
 
 // 模板插槽 row 类型兜底（DefaultRow -> LocalRule / 索引类型修复）
 function asRule(r: unknown): LocalRule { return r as LocalRule }
@@ -263,12 +247,31 @@ function truncateExpr(expr: string): string {
   if (!expr) return ''
   return expr.length > 50 ? expr.slice(0, 50) + '…' : expr
 }
-function formatCondition(r: LocalRule): string {
-  const thr = (r.threshold ?? 0).toFixed(2)
-  return `${r.comparator} ${thr}`
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    // fallback: select + execCommand
+    const ta = document.createElement('textarea')
+    ta.value = text
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+      ElMessage.success('已复制到剪贴板')
+    } catch {
+      ElMessage.error('复制失败，请手动复制')
+    }
+    document.body.removeChild(ta)
+  }
 }
-function formatForInterval(r: LocalRule): string {
-  return `持续 ${r.for_seconds ?? 0}s / 每 ${r.interval_seconds ?? 0}s 评估`
+function formatCondition(r: LocalRule): string {
+  const map: Record<string, string> = {
+    gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '==', neq: '!=',
+  }
+  const op = map[r.comparator] || r.comparator
+  return `${op} ${r.threshold ?? 0}`
 }
 function formatTime(s: string | null | undefined): string {
   if (!s) return '—'
@@ -383,7 +386,6 @@ function labelsToString(l: Record<string, string> | undefined): string {
 // ============================================================
 // 新建 / 编辑 Dialog
 // ============================================================
-interface KvRow { key: string; value: string }
 interface DialogState {
   visible: boolean
   mode: 'create' | 'edit'
@@ -397,24 +399,12 @@ interface DialogState {
   severity: RuleSeverity
   for_seconds: number
   interval_seconds: number
-  labels: KvRow[]
-  annotations: KvRow[]
+  labelsText: string
+  annotationsText: string
   channel_ids: string[]
   escalate_after_seconds: number
   escalate_severity: RuleSeverity | ''
   escalate_channel_ids: string[]
-}
-function emptyKv(): KvRow[] { return [{ key: '', value: '' }] }
-function mapToRows(m: Record<string, string> | undefined): KvRow[] {
-  if (!m || Object.keys(m).length === 0) return emptyKv()
-  return Object.entries(m).map(([k, v]) => ({ key: k, value: v }))
-}
-function rowsToMap(rows: KvRow[]): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const r of rows) {
-    if (r.key.trim()) out[r.key.trim()] = r.value
-  }
-  return out
 }
 
 const dlg = reactive<DialogState>({
@@ -425,26 +415,18 @@ const dlg = reactive<DialogState>({
   datasource_id: '',
   enabled: true,
   expr: '',
-  comparator: '>=',
+  comparator: 'gt',
   threshold: null,
   severity: 'warning',
-  for_seconds: 60,
+  for_seconds: 0,
   interval_seconds: 30,
-  labels: emptyKv(),
-  annotations: emptyKv(),
+  labelsText: '',
+  annotationsText: '',
   channel_ids: [],
   escalate_after_seconds: 0,
   escalate_severity: '',
   escalate_channel_ids: [],
 })
-
-const dlgFormRef = ref<FormInstance | null>(null)
-const dlgFormRules: FormRules<DialogState> = {
-  name: [{ required: true, message: '请输入规则名称', trigger: 'blur' }],
-  datasource_id: [{ required: true, message: '请选择数据源', trigger: 'change' }],
-  expr: [{ required: true, message: '请输入 expr（PromQL / LogQL 等）', trigger: 'blur' }],
-  threshold: [{ required: true, message: '请输入阈值 threshold', trigger: 'change' }],
-}
 
 async function openCreate() {
   dlg.visible = true
@@ -454,19 +436,21 @@ async function openCreate() {
   dlg.datasource_id = ''
   dlg.enabled = true
   dlg.expr = ''
-  dlg.comparator = '>='
+  dlg.comparator = 'gt'
   dlg.threshold = null
   dlg.severity = 'warning'
-  dlg.for_seconds = 60
+  dlg.for_seconds = 0
   dlg.interval_seconds = 30
-  dlg.labels = emptyKv()
-  dlg.annotations = emptyKv()
+  dlg.labelsText = ''
+  dlg.annotationsText = ''
   dlg.channel_ids = []
   dlg.escalate_after_seconds = 0
   dlg.escalate_severity = ''
   dlg.escalate_channel_ids = []
-  activePanel.value = 'basic'
-  escalateActive.value = ''
+  // 默认选中第一个数据源
+  if (datasources.value.length > 0) {
+    dlg.datasource_id = datasources.value[0].id
+  }
 }
 async function openEdit(id: string) {
   let rule: LocalRule | null = null
@@ -486,36 +470,63 @@ async function openEdit(id: string) {
   dlg.comparator = rule.comparator
   dlg.threshold = rule.threshold
   dlg.severity = rule.severity
-  dlg.for_seconds = rule.for_seconds ?? 60
+  dlg.for_seconds = rule.for_seconds ?? 0
   dlg.interval_seconds = rule.interval_seconds ?? 30
-  dlg.labels = mapToRows(rule.labels)
-  dlg.annotations = mapToRows(rule.annotations)
+  // labels / annotations 转为 JSON 字符串
+  dlg.labelsText = rule.labels && Object.keys(rule.labels).length > 0
+    ? JSON.stringify(rule.labels, null, 0)
+    : ''
+  dlg.annotationsText = rule.annotations && Object.keys(rule.annotations).length > 0
+    ? JSON.stringify(rule.annotations, null, 2)
+    : ''
   dlg.channel_ids = rule.channel_ids ? [...rule.channel_ids] : []
   dlg.escalate_after_seconds = rule.escalate_after_seconds ?? 0
   dlg.escalate_severity = rule.escalate_severity ?? ''
   dlg.escalate_channel_ids = rule.escalate_channel_ids ? [...rule.escalate_channel_ids] : []
-  activePanel.value = 'basic'
-  escalateActive.value = rule.escalate_after_seconds > 0 ? 'escalate' : ''
 }
-function kvAdd(target: 'labels' | 'annotations') {
-  dlg[target].push({ key: '', value: '' })
-}
-function kvRemove(target: 'labels' | 'annotations', idx: number) {
-  const arr = dlg[target]
-  if (arr.length <= 1) {
-    arr[0] = { key: '', value: '' }
-  } else {
-    arr.splice(idx, 1)
-  }
-}
-
 async function onDlgSave() {
-  const valid = await dlgFormRef.value?.validate().catch(() => false)
-  if (!valid) return
-  if (dlg.threshold === null || Number.isNaN(dlg.threshold)) {
-    ElMessage.warning('请填写阈值 threshold')
+  // 手动校验
+  if (!dlg.name.trim()) {
+    ElMessage.error('请输入规则名称')
     return
   }
+  if (!dlg.datasource_id) {
+    ElMessage.error('请选择数据源')
+    return
+  }
+  if (!dlg.expr.trim()) {
+    ElMessage.error('请输入查询表达式')
+    return
+  }
+  if (dlg.threshold === null || Number.isNaN(dlg.threshold)) {
+    ElMessage.error('请填写阈值')
+    return
+  }
+
+  // 解析 labels JSON
+  let labels: Record<string, string> = {}
+  const rawLabels = dlg.labelsText.trim()
+  if (rawLabels) {
+    try {
+      labels = JSON.parse(rawLabels)
+    } catch {
+      ElMessage.error('标签 JSON 无效')
+      return
+    }
+  }
+
+  // 解析 annotations JSON
+  let annotations: Record<string, string> = {}
+  const rawAnn = dlg.annotationsText.trim()
+  if (rawAnn) {
+    try {
+      annotations = JSON.parse(rawAnn)
+    } catch {
+      ElMessage.error('注解 JSON 无效')
+      return
+    }
+  }
+
   const body: RuleInput = {
     name: dlg.name.trim(),
     datasource_id: dlg.datasource_id,
@@ -525,8 +536,8 @@ async function onDlgSave() {
     severity: dlg.severity,
     for_seconds: dlg.for_seconds,
     interval_seconds: dlg.interval_seconds,
-    labels: rowsToMap(dlg.labels),
-    annotations: rowsToMap(dlg.annotations),
+    labels,
+    annotations,
     channel_ids: dlg.channel_ids,
     escalate_after_seconds: dlg.escalate_after_seconds,
     escalate_severity: dlg.escalate_severity || null,
@@ -536,10 +547,10 @@ async function onDlgSave() {
   try {
     if (dlg.mode === 'create') {
       await createRule(body)
-      ElMessage.success('规则已创建')
+      ElMessage.success('已保存')
     } else {
       await updateRule(dlg.id, body)
-      ElMessage.success('规则已更新')
+      ElMessage.success('已保存')
     }
     dlg.visible = false
     await loadAll()
@@ -639,7 +650,7 @@ function goDatasources() {
     </ElEmpty>
 
     <!-- 表格 -->
-    <ElTable
+    <el-table
       v-else
       :data="filteredRules"
       v-loading="loading"
@@ -647,86 +658,62 @@ function goDatasources() {
       style="width: 100%; margin-top: 12px"
       empty-text="暂无匹配的规则，试试调整筛选条件或点击新建。"
     >
-      <ElTableColumn label="名称" min-width="180">
+      <el-table-column label="名称" width="140">
         <template #default="{ row }">
-          <ElTooltip :content="asRule(row).name" placement="top">
-            <a class="name-link" @click="openEdit(asRule(row).id)">{{ asRule(row).name }}</a>
-          </ElTooltip>
+          <span class="rule-name" :title="asRule(row).name" @click="openEdit(asRule(row).id)">{{ asRule(row).name }}</span>
         </template>
-      </ElTableColumn>
+      </el-table-column>
 
-      <ElTableColumn label="数据源" min-width="160">
+      <el-table-column label="数据源" width="120">
         <template #default="{ row }">
           {{ formatDatasource(asRule(row).datasource_id) }}
         </template>
-      </ElTableColumn>
+      </el-table-column>
 
-      <ElTableColumn label="表达式 (expr)" min-width="260">
+      <el-table-column label="表达式" min-width="180">
         <template #default="{ row }">
-          <ElTooltip :content="asRule(row).expr" placement="top" :show-after="300">
-            <code class="expr-cell">{{ truncateExpr(asRule(row).expr) }}</code>
-          </ElTooltip>
-        </template>
-      </ElTableColumn>
-
-      <ElTableColumn label="条件" width="130">
-        <template #default="{ row }">
-          <code>{{ formatCondition(asRule(row)) }}</code>
-        </template>
-      </ElTableColumn>
-
-      <ElTableColumn label="严重级别" width="120">
-        <template #default="{ row }">
-          <ElTag
-            :color="SEVERITY_COLORS[sev(asRule(row).severity)]"
-            effect="dark"
-            style="color: #fff"
+          <el-tooltip
+            v-if="asRule(row).expr && asRule(row).expr.length > 50"
+            :content="asRule(row).expr"
+            placement="top"
+            :show-after="300"
           >
-            {{ SEVERITY_NAMES[sev(asRule(row).severity)] }}
-          </ElTag>
+            <span class="mono-cell" @click="copyText(asRule(row).expr)">{{ truncateExpr(asRule(row).expr) }}</span>
+          </el-tooltip>
+          <span v-else class="mono-cell">{{ truncateExpr(asRule(row).expr) }}</span>
         </template>
-      </ElTableColumn>
+      </el-table-column>
 
-      <ElTableColumn label="持续 / 评估周期" width="190">
+      <el-table-column label="条件" width="100">
         <template #default="{ row }">
-          {{ formatForInterval(asRule(row)) }}
+          <span class="mono-cell">{{ formatCondition(asRule(row)) }}</span>
         </template>
-      </ElTableColumn>
+      </el-table-column>
 
-      <ElTableColumn label="启用" width="80" align="center">
+      <el-table-column label="间隔" width="150">
         <template #default="{ row }">
-          <ElSwitch
-            :model-value="asRule(row).enabled"
-            @update:model-value="(v) => { asRule(row).enabled = Boolean(v); onToggleEnabled(asRule(row)) }"
-          />
+          {{ asRule(row).interval_seconds }}s / for {{ asRule(row).for_seconds }}s{{ Number(asRule(row).escalate_after_seconds) > 0 ? ' · 升级 ' + asRule(row).escalate_after_seconds + 's' : '' }}
         </template>
-      </ElTableColumn>
+      </el-table-column>
 
-      <ElTableColumn label="最近更新" width="170">
+      <el-table-column label="状态" width="90" align="center" class-name="col-status">
         <template #default="{ row }">
-          {{ formatTime(asRule(row).updated_at) }}
+          <span :class="['badge', asRule(row).enabled ? 'on' : 'off']">
+            {{ asRule(row).enabled ? '启用' : '停用' }}
+          </span>
         </template>
-      </ElTableColumn>
+      </el-table-column>
 
-      <ElTableColumn label="操作" width="220" fixed="right">
+      <el-table-column label="操作" width="170" fixed="right" class-name="col-actions">
         <template #default="{ row }">
-          <ElButton
-            link
-            type="primary"
-            :icon="VideoPlay"
-            @click="onEvaluate(asRule(row))"
-          >
-            试跑
-          </ElButton>
-          <ElButton link type="primary" :icon="Edit" @click="openEdit(asRule(row).id)">
-            编辑
-          </ElButton>
-          <ElButton link type="danger" :icon="Delete" @click="onDelete(asRule(row))">
-            删除
-          </ElButton>
+          <div class="actions">
+            <button @click="onEvaluate(asRule(row))">试跑</button>
+            <button @click="openEdit(asRule(row).id)">编辑</button>
+            <button class="danger" @click="onDelete(asRule(row))">删除</button>
+          </div>
         </template>
-      </ElTableColumn>
-    </ElTable>
+      </el-table-column>
+    </el-table>
 
     <!-- 试跑 Drawer -->
     <ElDrawer
@@ -741,12 +728,19 @@ function goDatasources() {
             <ElTag
               v-if="evaluateResult.ok"
               type="success"
-              :icon="CircleCheck"
-              effect="light"
+              size="large"
+              effect="dark"
+              style="font-weight: 600; padding: 6px 14px;"
             >
               执行成功
             </ElTag>
-            <ElTag v-else type="danger" effect="light">
+            <ElTag
+              v-else
+              type="danger"
+              size="large"
+              effect="dark"
+              style="font-weight: 600; padding: 6px 14px;"
+            >
               执行失败
             </ElTag>
             <span class="eval-counts">
@@ -818,233 +812,153 @@ function goDatasources() {
     </ElDrawer>
 
     <!-- 新建 / 编辑 Dialog -->
-    <ElDialog
+    <el-dialog
       v-model="dlg.visible"
-      :title="dlg.mode === 'create' ? '新建规则' : '编辑规则'"
-      width="780px"
+      width="880px"
       :close-on-click-modal="false"
-      destroy-on-close
+      append-to-body
+      :show-close="false"
     >
-      <ElForm
-        ref="dlgFormRef"
-        :model="dlg"
-        :rules="dlgFormRules"
-        label-width="130px"
-        label-position="right"
-      >
-        <ElCollapse v-model="activePanel" accordion>
-          <!-- 基础 -->
-          <ElCollapseItem title="基础信息" name="basic">
-            <ElRow :gutter="16">
-              <ElCol :span="16">
-                <ElFormItem label="规则名称" prop="name">
-                  <ElInput v-model="dlg.name" placeholder="例如：CPU 使用率过高" />
-                </ElFormItem>
-              </ElCol>
-              <ElCol :span="8">
-                <ElFormItem label="启用" prop="enabled">
-                  <ElSwitch v-model="dlg.enabled" />
-                </ElFormItem>
-              </ElCol>
-            </ElRow>
-            <ElFormItem label="数据源" prop="datasource_id">
-              <ElSelect
-                v-model="dlg.datasource_id"
-                placeholder="请选择数据源（Prometheus / Kafka / Loki 等）"
-                clearable
-                filterable
-                style="width: 100%"
-              >
-                <ElOption
-                  v-for="d in datasources"
-                  :key="d.id"
-                  :label="`${d.name} (${d.kind})`"
-                  :value="d.id"
-                />
-              </ElSelect>
-            </ElFormItem>
-          </ElCollapseItem>
-
-          <!-- 触发与评估 -->
-          <ElCollapseItem title="触发与评估" name="trigger">
-            <ElFormItem label="表达式 expr" prop="expr">
-              <ElInput
-                v-model="dlg.expr"
-                type="textarea"
-                :rows="4"
-                placeholder="PromQL / LogQL / Kafka topic:tag-key"
-              />
-            </ElFormItem>
-            <ElRow :gutter="16">
-              <ElCol :span="8">
-                <ElFormItem label="比较符" prop="comparator">
-                  <ElSelect v-model="dlg.comparator" style="width: 100%">
-                    <ElOption
-                      v-for="c in COMPARATOR_OPTIONS"
-                      :key="c.value"
-                      :label="c.label"
-                      :value="c.value"
-                    />
-                  </ElSelect>
-                </ElFormItem>
-              </ElCol>
-              <ElCol :span="8">
-                <ElFormItem label="阈值 threshold" prop="threshold">
-                  <ElInputNumber
-                    v-model="dlg.threshold"
-                    :step="0.01"
-                    :precision="2"
-                    style="width: 100%"
-                    controls-position="right"
-                  />
-                </ElFormItem>
-              </ElCol>
-              <ElCol :span="8">
-                <ElFormItem label="严重级别" prop="severity">
-                  <ElSelect v-model="dlg.severity" style="width: 100%">
-                    <ElOption
-                      v-for="s in SEVERITY_OPTIONS"
-                      :key="s.value"
-                      :label="s.label"
-                      :value="s.value"
-                    />
-                  </ElSelect>
-                </ElFormItem>
-              </ElCol>
-            </ElRow>
-            <ElRow :gutter="16">
-              <ElCol :span="12">
-                <ElFormItem label="持续 (for_seconds)">
-                  <ElInputNumber
-                    v-model="dlg.for_seconds"
-                    :min="0"
-                    :step="5"
-                    style="width: 100%"
-                    controls-position="right"
-                  />
-                  <div class="form-tip">达到阈值后持续 N 秒才触发，默认 60s</div>
-                </ElFormItem>
-              </ElCol>
-              <ElCol :span="12">
-                <ElFormItem label="评估周期 (interval)">
-                  <ElInputNumber
-                    v-model="dlg.interval_seconds"
-                    :min="5"
-                    :step="5"
-                    style="width: 100%"
-                    controls-position="right"
-                  />
-                  <div class="form-tip">每隔 N 秒评估一次，最小 5s，默认 30s</div>
-                </ElFormItem>
-              </ElCol>
-            </ElRow>
-
-            <!-- Labels 动态行 -->
-            <div class="kv-section">
-              <div class="kv-title">
-                <span>标签 Labels（如 instance、team 等）</span>
-                <ElButton size="small" :icon="Plus" link type="primary" @click="kvAdd('labels')">新增一行</ElButton>
-              </div>
-              <div v-for="(r, idx) in dlg.labels" :key="'lb-'+idx" class="kv-row">
-                <ElInput v-model="r.key" placeholder="key" style="width: 40%; margin-right: 8px" />
-                <ElInput v-model="r.value" placeholder="value" style="width: 40%; margin-right: 8px" />
-                <ElButton link type="danger" :icon="Delete" @click="kvRemove('labels', idx)">删除</ElButton>
-              </div>
-            </div>
-
-            <!-- Annotations 动态行 -->
-            <div class="kv-section" style="margin-top: 8px">
-              <div class="kv-title">
-                <span>注解 Annotations（如 summary、runbook_url）</span>
-                <ElButton size="small" :icon="Plus" link type="primary" @click="kvAdd('annotations')">新增一行</ElButton>
-              </div>
-              <div v-for="(r, idx) in dlg.annotations" :key="'an-'+idx" class="kv-row">
-                <ElInput v-model="r.key" placeholder="key" style="width: 40%; margin-right: 8px" />
-                <ElInput v-model="r.value" placeholder="value" style="width: 40%; margin-right: 8px" />
-                <ElButton link type="danger" :icon="Delete" @click="kvRemove('annotations', idx)">删除</ElButton>
-              </div>
-            </div>
-          </ElCollapseItem>
-
-          <!-- 通知与升级 -->
-          <ElCollapseItem title="通知与升级" name="notify">
-            <ElFormItem label="通知渠道">
-              <ElSelect
-                v-model="dlg.channel_ids"
-                multiple
-                filterable
-                placeholder="选择要投递的渠道（可多选）"
-                style="width: 100%"
-              >
-                <ElOption
-                  v-for="c in channels"
-                  :key="c.id"
-                  :label="`${c.name} (${c.kind})`"
-                  :value="c.id"
-                />
-              </ElSelect>
-            </ElFormItem>
-
-            <ElCollapse v-model="escalateActive" accordion class="nested-collapse">
-              <ElCollapseItem title="升级策略（默认折叠）" name="escalate">
-                <ElFormItem label="升级延迟秒数">
-                  <ElInputNumber
-                    v-model="dlg.escalate_after_seconds"
-                    :min="0"
-                    :step="300"
-                    style="width: 100%"
-                    controls-position="right"
-                  />
-                  <div class="form-tip">默认 0 = 关闭；填写 300 表示持续 5 分钟未恢复则升级（step=5min）</div>
-                </ElFormItem>
-                <ElRow :gutter="16">
-                  <ElCol :span="12">
-                    <ElFormItem label="升级后严重级别">
-                      <ElSelect
-                        v-model="dlg.escalate_severity"
-                        clearable
-                        placeholder="不选则保留 rule.severity"
-                        style="width: 100%"
-                      >
-                        <ElOption
-                          v-for="s in SEVERITY_OPTIONS"
-                          :key="s.value"
-                          :label="s.label"
-                          :value="s.value"
-                        />
-                      </ElSelect>
-                    </ElFormItem>
-                  </ElCol>
-                  <ElCol :span="12">
-                    <ElFormItem label="升级渠道">
-                      <ElSelect
-                        v-model="dlg.escalate_channel_ids"
-                        multiple
-                        filterable
-                        placeholder="空 = 沿用通知渠道"
-                        style="width: 100%"
-                      >
-                        <ElOption
-                          v-for="c in channels"
-                          :key="c.id"
-                          :label="`${c.name} (${c.kind})`"
-                          :value="c.id"
-                        />
-                      </ElSelect>
-                    </ElFormItem>
-                  </ElCol>
-                </ElRow>
-              </ElCollapseItem>
-            </ElCollapse>
-          </ElCollapseItem>
-        </ElCollapse>
-      </ElForm>
-
-      <template #footer>
-        <ElButton @click="dlg.visible = false">取消</ElButton>
-        <ElButton type="primary" @click="onDlgSave">保存</ElButton>
+      <template #header>
+        <div class="ds-modal-head">
+          <h3>{{ dlg.mode === 'create' ? '新建告警规则' : '编辑规则' }}</h3>
+          <p class="ds-modal-desc">绑定数据源，配置阈值条件与通知渠道。</p>
+        </div>
       </template>
-    </ElDialog>
+      <div class="ds-modal-body">
+        <!-- 规则 -->
+        <div class="ds-seg">
+          <div class="ds-seg-title">规则</div>
+          <div class="ds-field">
+            <label>名称</label>
+            <input v-model="dlg.name" type="text" required placeholder="例如：API 不可用" />
+          </div>
+          <div class="ds-field">
+            <label>数据源</label>
+            <select v-model="dlg.datasource_id">
+              <option
+                v-for="d in datasources"
+                :key="d.id"
+                :value="d.id"
+              >{{ d.name }} · {{ d.kind }}</option>
+            </select>
+          </div>
+          <div class="ds-field">
+            <label>查询表达式</label>
+            <input v-model="dlg.expr" type="text" required placeholder="PromQL / LogQL / JSON 字段路径" />
+            <div class="ds-hint">Prometheus/VM 用 PromQL；Loki 用 LogQL；Kafka 填数值字段路径（可覆盖数据源 field，如 latency_ms）。</div>
+          </div>
+        </div>
+
+        <!-- 阈值条件 -->
+        <div class="ds-seg">
+          <div class="ds-seg-title">阈值条件</div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>比较符</label>
+              <select v-model="dlg.comparator">
+                <option
+                  v-for="c in COMPARATOR_OPTIONS"
+                  :key="c.value"
+                  :value="c.value"
+                >{{ c.label }}</option>
+              </select>
+            </div>
+            <div class="ds-field">
+              <label>阈值</label>
+              <input v-model.number="dlg.threshold" type="number" step="any" required />
+            </div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>持续 for（秒）</label>
+              <input v-model.number="dlg.for_seconds" type="number" min="0" />
+            </div>
+            <div class="ds-field">
+              <label>评估间隔（秒）</label>
+              <input v-model.number="dlg.interval_seconds" type="number" min="5" />
+            </div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>严重级别</label>
+              <select v-model="dlg.severity">
+                <option
+                  v-for="s in SEVERITY_OPTIONS"
+                  :key="s.value"
+                  :value="s.value"
+                >{{ s.label }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="ds-field">
+            <label class="ds-check-row">
+              <input v-model="dlg.enabled" type="checkbox" />
+              <span>启用此规则</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 通知与标签 -->
+        <div class="ds-seg">
+          <div class="ds-seg-title">通知与标签</div>
+          <div class="ds-field">
+            <label>通知渠道</label>
+            <select v-model="dlg.channel_ids" multiple :size="Math.min(6, Math.max(3, channels.length || 3))">
+              <option
+                v-for="c in channels"
+                :key="c.id"
+                :value="c.id"
+              >{{ c.name }} ({{ c.kind }})</option>
+            </select>
+            <div class="ds-ms-hint">按住 <b>Ctrl</b>（Windows）或 <b>⌘</b>（Mac）点击可多选；已选中的再点一次即取消。</div>
+          </div>
+          <div class="ds-field">
+            <label>未接手升级（秒，0=关闭）</label>
+            <input v-model.number="dlg.escalate_after_seconds" type="number" min="0" />
+            <div class="ds-hint">告警中超过此时长仍未接手则发送升级通知；可选抬升级别与独立渠道。</div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>升级级别（可选）</label>
+              <select v-model="dlg.escalate_severity">
+                <option value="">不改级别</option>
+                <option
+                  v-for="s in SEVERITY_OPTIONS"
+                  :key="s.value"
+                  :value="s.value"
+                >{{ s.label }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="ds-field">
+            <label>升级通知渠道（可选，空=用上方渠道）</label>
+            <select v-model="dlg.escalate_channel_ids" multiple :size="Math.min(6, Math.max(3, channels.length || 3))">
+              <option
+                v-for="c in channels"
+                :key="c.id"
+                :value="c.id"
+              >{{ c.name }} ({{ c.kind }})</option>
+            </select>
+          </div>
+          <div class="ds-field">
+            <label>附加标签（可选，JSON）</label>
+            <textarea v-model="dlg.labelsText" rows="2" placeholder='{"team":"sre"}'></textarea>
+          </div>
+          <div class="ds-field">
+            <label>注解 annotations（可选，JSON，支持模板）</label>
+            <textarea v-model="dlg.annotationsText" rows="3" placeholder='{"summary":"..."}'></textarea>
+            <div class="ds-hint">{{ annotationsHint }}</div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <div class="ds-modal-actions">
+          <button type="button" class="ds-btn-ghost" @click="dlg.visible = false">取消</button>
+          <button type="button" class="ds-btn-primary" @click="onDlgSave">保存</button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1059,11 +973,11 @@ function goDatasources() {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary, var(--heading));
 }
 .page-sub {
   margin: 4px 0 0 0;
-  color: #909399;
+  color: var(--el-text-color-secondary, var(--muted));
   font-size: 13px;
 }
 .affix-wrap {
@@ -1074,41 +988,245 @@ function goDatasources() {
   align-items: center;
   gap: 8px;
   padding: 10px 0;
-  background: #fff;
-  border-bottom: 1px solid #ebeef5;
+  background: var(--el-bg-color, var(--panel));
+  border-bottom: 1px solid var(--el-border-color-lighter, var(--line-soft));
 }
 .toolbar-filters {
   display: flex;
   gap: 8px;
   margin-left: auto;
 }
-.name-link {
-  color: #409eff;
+
+/* ============================================================
+ * 表格样式
+ * ============================================================ */
+.rule-name {
+  font-weight: 500;
+  color: var(--el-text-color-primary, var(--heading));;
   cursor: pointer;
-  text-decoration: none;
 }
-.name-link:hover {
-  text-decoration: underline;
+.rule-name:hover {
+  color: var(--el-color-primary, var(--primary));;
 }
-.expr-cell {
-  font-family: Consolas, Monaco, monospace;
-  background: #f5f7fa;
-  padding: 2px 6px;
-  border-radius: 4px;
+.mono-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
-  color: #606266;
+  color: var(--el-text-color-primary, var(--heading));;
 }
-.labels-cell {
+
+/* ============================================================
+ * Dialog 样式（与老版 .modal 一致）
+ * ============================================================ */
+.ds-modal-head {
+  padding: 20px 28px 16px;
+  border-bottom: 1px solid var(--el-border-color, var(--line));;
+  flex-shrink: 0;
+  margin: -20px -20px 0 -20px;
+}
+.ds-modal-head h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--el-text-color-primary, var(--heading));;
+}
+.ds-modal-desc {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary, var(--muted));;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ds-modal-body {
+  padding: 20px 28px 12px;
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.ds-modal-actions {
+  padding: 14px 28px;
+  border-top: 1px solid var(--el-border-color, var(--line));
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0 -20px -20px -20px;
+  background: var(--el-bg-color, var(--panel));
+}
+
+/* Seg (分组) */
+.ds-seg {
+  margin: 0 0 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.ds-seg-title {
   font-size: 12px;
-  color: #606266;
+  font-weight: 600;
+  color: var(--el-color-primary, var(--primary));;
+  margin: 0 0 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
+
+/* Field / Row */
+.ds-field {
+  margin-bottom: 16px;
+}
+.ds-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--el-text-color-primary, var(--heading));;
+  margin-bottom: 6px;
+}
+.ds-field input[type="text"],
+.ds-field input[type="number"],
+.ds-field select,
+.ds-field textarea {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--el-text-color-primary, var(--heading));
+  background: var(--el-bg-color, var(--panel));
+  border: 1px solid var(--el-border-color, var(--line));
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+.ds-field input:focus,
+.ds-field select:focus,
+.ds-field textarea:focus {
+  border-color: var(--el-color-primary, var(--primary));;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.15);
+}
+.ds-field textarea {
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.ds-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+.ds-row .ds-field {
+  flex: 1;
+  min-width: 140px;
+}
+
+/* Check Row */
+.ds-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 400;
+  margin-bottom: 0 !important;
+}
+.ds-check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--el-color-primary, var(--primary));;
+  cursor: pointer;
+}
+
+/* Hint */
+.ds-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, var(--muted));;
+  line-height: 1.5;
+}
+
+/* Multi-select hint */
+.ds-ms-hint {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light, var(--inset-bg));;
+  border: 1px dashed var(--el-border-color, var(--line));;
+  color: var(--el-text-color-secondary, var(--muted));;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ds-ms-hint b {
+  color: var(--el-color-primary, var(--primary));;
+  font-weight: 600;
+}
+
+/* Multi-select styling */
+.ds-field select[multiple] {
+  min-height: 140px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--el-fill-color-light, var(--inset-bg));
+  border: 1px solid var(--el-border-color-lighter, var(--line-soft));
+  line-height: 1.45;
+  scrollbar-width: thin;
+}
+.ds-field select[multiple]:hover {
+  border-color: var(--el-color-primary-light-5, var(--primary));
+}
+.ds-field select[multiple]:focus {
+  border-color: var(--el-color-primary, var(--primary));
+  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.15);
+}
+.ds-field select[multiple] option {
+  padding: 7px 10px;
+  border-radius: 6px;
+  margin-bottom: 2px;
+  font-size: 13px;
+  color: var(--el-text-color-regular, var(--text));
+  background: var(--el-bg-color, var(--panel));
+  transition: background 0.12s, color 0.12s;
+}
+.ds-field select[multiple] option:checked {
+  background: linear-gradient(180deg, rgba(64, 158, 255, 0.26), rgba(64, 158, 255, 0.18));
+  color: var(--el-text-color-primary, var(--heading));
+  box-shadow: inset 2px 0 0 var(--el-color-primary, var(--primary));
+  font-weight: 500;
+}
+
+/* Buttons */
+.ds-btn-ghost {
+  padding: 8px 18px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary, var(--muted));;
+  background: transparent;
+  border: 1px solid var(--el-border-color, var(--line));
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ds-btn-ghost:hover {
+  color: var(--el-color-primary, var(--primary));;
+  border-color: var(--el-color-primary, var(--primary));;
+}
+.ds-btn-primary {
+  padding: 8px 18px;
+  font-size: 13px;
+  color: var(--el-color-white, #fff);
+  background: var(--el-color-primary, var(--primary));;
+  border: 1px solid var(--el-color-primary, var(--primary));
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ds-btn-primary:hover {
+  background: var(--el-color-primary-light-3, var(--primary-light));;
+  border-color: var(--el-color-primary-light-3, var(--primary-light));;
+}
+
+/* ============================================================
+ * Drawer (试跑结果) 样式
+ * ============================================================ */
 .eval-head {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 .eval-counts {
-  color: #606266;
+  color: var(--el-text-color-regular, var(--text));
   font-size: 13px;
 }
 .raw-pre {
@@ -1116,7 +1234,7 @@ function goDatasources() {
   max-height: 160px;
   overflow: auto;
   font-size: 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light, var(--inset-bg));
   padding: 8px;
   border-radius: 4px;
   white-space: pre-wrap;
@@ -1125,42 +1243,18 @@ function goDatasources() {
 .summary-list {
   margin: 4px 0;
   padding-left: 20px;
-  color: #606266;
+  color: var(--el-text-color-regular, var(--text));
 }
 .summary-list li {
   line-height: 1.7;
 }
 .more-tip {
-  color: #909399;
+  color: var(--el-text-color-secondary, var(--muted));
   font-size: 12px;
   margin-top: 4px;
 }
-.kv-section {
-  margin-top: 8px;
-}
-.kv-title {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-  font-weight: 500;
-  color: #303133;
-  font-size: 13px;
-}
-.kv-row {
-  display: flex;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.form-tip {
+.labels-cell {
   font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
-}
-.nested-collapse {
-  margin-top: 8px;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  padding: 0 8px;
+  color: var(--el-text-color-regular, var(--text));
 }
 </style>

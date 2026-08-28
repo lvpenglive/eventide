@@ -1054,8 +1054,8 @@ const drawerResp = computed(() =>
   padding: 14px 20px 40px;
 }
 .channels-affix {
-  background: var(--bg-color, #fff);
-  border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+  background: var(--el-bg-color, var(--panel));
+  border-bottom: 1px solid var(--el-border-color-lighter, var(--line-soft));
   margin: -14px -20px 16px;
   padding: 12px 20px 0;
 }

@@ -1,5 +1,5 @@
 listen = "0.0.0.0:8080"
-mysql_url = "mysql://root:886363@120.26.105.115:3306/eventide"
+mysql_url = "mysql://root:886363@120.26.67.180:3306/eventide"
 redis_url = "redis://123.207.158.181:6379/"
 static_dir = "static"
 scheduler_tick_seconds = 5
@@ -39,7 +39,7 @@ ingress_max_claim = 0
 api_url = "http://127.0.0.1:8081"
 # Must match eventide-trap.toml api_token (injected as Bearer on /trap-api)
 api_token = "eventide-trap-shared-token"
-s3_endpoint = "http://120.26.105.115:9000"
+s3_endpoint = "http://120.26.67.180:9000"
 s3_access_key = "admin"
 s3_secret_key = "admin123"
 s3_bucket = "eventide-mibs"

@@ -1,37 +1,20 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, onMounted, reactive, ref, markRaw } from 'vue'
 import {
   ElAffix,
-  ElButton,
-  ElCollapse,
-  ElCollapseItem,
   ElDialog,
   ElEmpty,
-  ElForm,
-  ElFormItem,
   ElInput,
   ElMessage,
   ElMessageBox,
   ElOption,
-  ElPopover,
-  ElRow,
-  ElCol,
   ElSelect,
-  ElSwitch,
   ElTable,
   ElTableColumn,
-  ElTag,
-  ElTooltip,
 } from 'element-plus'
-import type { FormInstance, FormRules } from 'element-plus'
 import {
-  Delete,
-  DocumentCopy,
-  Edit,
-  Plus,
-  Refresh,
-  Search,
   Monitor,
+  Search,
 } from '@element-plus/icons-vue'
 
 // ============================================================
@@ -161,39 +144,48 @@ function prettyJson(obj: Record<string, string> | undefined, maxLines = 20): str
 // ============================================================
 interface KindMeta {
   kind: DatasourceKind
-  label: string
-  color: string
+  name: string
+  /** 选择卡片上显示的两字母缩写（大写） */
+  icon: string
+  /** 配色主题，对应 CSS 类 .tone-{tone} */
+  tone: 'orange' | 'blue' | 'amber' | 'teal'
+  /** 选择卡片下方的功能描述 */
+  typeDesc: string
+  /** URL 输入框 placeholder */
   urlPlaceholder: string
-  hint: string
 }
 const KINDS: KindMeta[] = [
   {
     kind: 'prometheus',
-    label: 'Prometheus',
-    color: '#1677ff',
-    urlPlaceholder: 'http://prometheus:9090',
-    hint: '填写 Prometheus HTTP API 地址（默认端口 9090）',
+    name: 'Prometheus',
+    icon: 'PM',
+    tone: 'orange',
+    typeDesc: 'PromQL 指标查询',
+    urlPlaceholder: 'http://127.0.0.1:9090',
   },
   {
     kind: 'victoriametrics',
-    label: 'VictoriaMetrics',
-    color: '#13c2c2',
-    urlPlaceholder: 'http://victoriametrics:8428',
-    hint: '填写 VictoriaMetrics HTTP API 地址（兼容 Prometheus API）',
+    name: 'VictoriaMetrics',
+    icon: 'VM',
+    tone: 'blue',
+    typeDesc: '兼容 PromQL',
+    urlPlaceholder: 'http://127.0.0.1:8428',
   },
   {
     kind: 'kafka',
-    label: 'Kafka',
-    color: '#2f54eb',
-    urlPlaceholder: 'broker1:9092,broker2:9092',
-    hint: '填写 Kafka Brokers，多节点用逗号分隔',
+    name: 'Kafka',
+    icon: 'K',
+    tone: 'amber',
+    typeDesc: '消息管道 · JSON 字段告警',
+    urlPlaceholder: '127.0.0.1:9092',
   },
   {
     kind: 'log',
-    label: 'Loki',
-    color: '#722ed1',
-    urlPlaceholder: 'http://loki:3100',
-    hint: '填写 Loki HTTP API 地址（日志数据源）',
+    name: 'Loki 日志',
+    icon: 'Lo',
+    tone: 'teal',
+    typeDesc: 'LogQL 日志统计',
+    urlPlaceholder: 'http://127.0.0.1:3100',
   },
 ]
 const KIND_MAP: Record<DatasourceKind, KindMeta> = KINDS.reduce(
@@ -305,46 +297,23 @@ async function removeDatasource(row: LocalDatasource): Promise<void> {
 // 新建 / 编辑 Dialog
 // ============================================================
 const dialogVisible = ref(false)
+const typePickerVisible = ref(false)
 const isEdit = ref(false)
 const editingId = ref<string | null>(null)
 const dialogLoading = ref(false)
-const advancedOpen = ref<string[]>([])
 
-interface OptionsRow {
-  key: string
-  value: string
-}
-
-const form = reactive<{
-  name: string
-  kind: DatasourceKind
-  url: string
-  enabled: boolean
-  optionsRows: OptionsRow[]
-}>({
+const form = reactive({
   name: '',
-  kind: 'prometheus',
+  kind: 'prometheus' as DatasourceKind,
   url: '',
   enabled: true,
-  optionsRows: [],
-})
-type FormModelT = typeof form
-const formRef = ref<FormInstance | null>(null)
-
-const formRules = reactive<FormRules<FormModelT>>({
-  name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
-  kind: [{ required: true, message: '请选择类型', trigger: 'change' }],
-  url: [
-    { required: true, message: '请输入 URL / Brokers', trigger: 'blur' },
-    {
-      validator: (_rule, value, cb) => {
-        if (!value || !String(value).trim()) {
-          cb(new Error('URL / Brokers 必填'))
-        } else cb()
-      },
-      trigger: 'blur',
-    },
-  ],
+  // Kafka 专用 options
+  topic: '',
+  field: '',
+  label_fields: '',
+  max_records: '100',
+  mode: 'field' as string,
+  partitions: '8',
 })
 
 function resetForm(): void {
@@ -352,15 +321,32 @@ function resetForm(): void {
   form.kind = 'prometheus'
   form.url = ''
   form.enabled = true
-  form.optionsRows = [{ key: '', value: '' }]
-  advancedOpen.value = []
+  form.topic = ''
+  form.field = ''
+  form.label_fields = ''
+  form.max_records = '100'
+  form.mode = 'field'
+  form.partitions = '8'
 }
 
+// 类型选择卡片
 function openCreate(): void {
+  typePickerVisible.value = true
+}
+
+function pickKind(kind: DatasourceKind): void {
+  typePickerVisible.value = false
   resetForm()
+  form.kind = kind
   isEdit.value = false
   editingId.value = null
   dialogVisible.value = true
+}
+
+// 新建时：从编辑表单返回类型选择
+function repickKind(): void {
+  dialogVisible.value = false
+  typePickerVisible.value = true
 }
 
 async function openEdit(row: LocalDatasource): Promise<void> {
@@ -374,73 +360,88 @@ async function openEdit(row: LocalDatasource): Promise<void> {
     form.url = detail.url
     form.enabled = detail.enabled
     const opts = detail.options || {}
-    const keys = Object.keys(opts)
-    if (keys.length === 0) {
-      form.optionsRows = [{ key: '', value: '' }]
-    } else {
-      form.optionsRows = keys.map((k) => ({ key: k, value: opts[k] }))
-      form.optionsRows.push({ key: '', value: '' })
-    }
-  } catch (e) {
-    // 若 getDatasource 失败，仍以表格行数据兜底
+    form.topic = opts.topic || ''
+    form.field = opts.field || ''
+    form.label_fields = opts.label_fields || ''
+    form.max_records = opts.max_records || '100'
+    form.mode = opts.mode || 'field'
+    form.partitions = opts.partitions || '8'
+  } catch {
     form.name = row.name
     form.kind = row.kind
     form.url = row.url
     form.enabled = row.enabled
     const opts = row.options || {}
-    const keys = Object.keys(opts)
-    if (keys.length === 0) {
-      form.optionsRows = [{ key: '', value: '' }]
-    } else {
-      form.optionsRows = keys.map((k) => ({ key: k, value: opts[k] }))
-      form.optionsRows.push({ key: '', value: '' })
-    }
+    form.topic = opts.topic || ''
+    form.field = opts.field || ''
+    form.label_fields = opts.label_fields || ''
+    form.max_records = opts.max_records || '100'
+    form.mode = opts.mode || 'field'
+    form.partitions = opts.partitions || '8'
   }
   dialogVisible.value = true
 }
 
-function addOptionsRow(): void {
-  form.optionsRows.push({ key: '', value: '' })
-}
-function removeOptionsRow(idx: number): void {
-  if (form.optionsRows.length <= 1) {
-    form.optionsRows = [{ key: '', value: '' }]
-    return
-  }
-  form.optionsRows.splice(idx, 1)
-}
-function buildOptions(): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const r of form.optionsRows) {
-    const k = r.key.trim()
-    if (!k) continue
-    out[k] = r.value
-  }
-  return out
-}
+// URL 标签按类型变化
+const urlLabel = computed(() => {
+  if (form.kind === 'log') return 'Loki 地址'
+  if (form.kind === 'victoriametrics') return 'VictoriaMetrics 地址'
+  if (form.kind === 'kafka') return 'Brokers'
+  return 'Prometheus 地址'
+})
+const urlPlaceholder = computed(() => {
+  if (form.kind === 'log') return 'http://127.0.0.1:3100'
+  if (form.kind === 'victoriametrics') return 'http://127.0.0.1:8428'
+  if (form.kind === 'kafka') return '127.0.0.1:9092'
+  return 'http://127.0.0.1:9090'
+})
+const urlHint = computed(() => {
+  if (form.kind === 'log') return '填写 Loki 根地址。规则表达式使用 LogQL。'
+  if (form.kind === 'victoriametrics') return '兼容 PromQL 的查询入口。'
+  if (form.kind === 'kafka') return '多个 broker 用英文逗号分隔。消息按 JSON 解析字段后走阈值规则。'
+  return '填写 Prometheus 查询 API 根地址。'
+})
 
 async function submitForm(): Promise<void> {
-  if (!formRef.value) return
-  try {
-    await formRef.value.validate()
-  } catch {
+  // 手动校验（替代 el-form validate）
+  if (!form.name.trim()) {
+    ElMessage.error('请输入名称')
     return
   }
+  if (!form.url.trim()) {
+    ElMessage.error('请填写连接地址')
+    return
+  }
+
+  const options: Record<string, string> = {}
+  if (form.kind === 'kafka') {
+    if (!form.topic.trim()) {
+      ElMessage.error('请填写 Kafka Topic')
+      return
+    }
+    options.topic = form.topic.trim()
+    options.mode = form.mode
+    if (form.field.trim()) options.field = form.field.trim()
+    if (form.label_fields.trim()) options.label_fields = form.label_fields.trim()
+    if (form.max_records.trim()) options.max_records = form.max_records.trim()
+    if (form.partitions.trim()) options.partitions = form.partitions.trim()
+  }
+
   const payload: DatasourceInput = {
     name: form.name.trim(),
     kind: form.kind,
     url: form.url.trim(),
-    options: buildOptions(),
+    options,
     enabled: form.enabled,
   }
   dialogLoading.value = true
   try {
     if (isEdit.value && editingId.value) {
       await updateDatasource(editingId.value, payload)
-      ElMessage.success('保存成功')
+      ElMessage.success('已保存')
     } else {
       await createDatasource(payload)
-      ElMessage.success('创建成功')
+      ElMessage.success('已保存')
     }
     dialogVisible.value = false
     void loadList()
@@ -449,11 +450,6 @@ async function submitForm(): Promise<void> {
   } finally {
     dialogLoading.value = false
   }
-}
-
-// 切换 kind 时清空 url（避免 placeholder 误导）
-function onKindChange(): void {
-  form.url = ''
 }
 </script>
 
@@ -470,10 +466,8 @@ function onKindChange(): void {
       <!-- 工具栏 -->
       <div class="ds-toolbar panel" style="padding: 12px 18px;">
         <div class="ds-toolbar-row">
-          <el-button type="primary" :icon="Plus" @click="openCreate">
-            新建数据源
-          </el-button>
-          <el-button :icon="Refresh" link @click="loadList">刷新</el-button>
+          <button class="primary" @click="openCreate">新建数据源</button>
+          <button class="ghost" @click="loadList">刷新</button>
           <div class="ds-toolbar-filters">
             <el-select
               v-model="filterKind"
@@ -484,13 +478,14 @@ function onKindChange(): void {
               <el-option
                 v-for="k in KINDS"
                 :key="k.kind"
-                :label="k.label"
+                :label="k.name"
                 :value="k.kind"
               >
                 <div style="display: flex; align-items: center; gap: 8px;">
-                  <el-tag :color="k.color" effect="dark" size="small" style="color: #fff;">
-                    {{ k.label }}
-                  </el-tag>
+                  <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]" style="width: 20px; height: 20px; font-size: 10px; border-radius: 4px;">
+                    {{ k.icon }}
+                  </span>
+                  <span>{{ k.name }}</span>
                 </div>
               </el-option>
             </el-select>
@@ -522,16 +517,15 @@ function onKindChange(): void {
           :key="k.kind"
           class="ds-hint-row"
         >
-          <el-tag :color="k.color" effect="dark" size="small" style="color: #fff; min-width: 120px; justify-content: center;">
-            {{ k.label }}
-          </el-tag>
-          <span class="ds-hint-text">{{ k.hint }}</span>
+          <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]" style="width: 24px; height: 24px; font-size: 10px; border-radius: 6px;">
+            {{ k.icon }}
+          </span>
+          <span class="ds-hint-name">{{ k.name }}</span>
+          <span class="ds-hint-text">{{ k.typeDesc }}</span>
         </div>
       </div>
       <div style="margin-top: 18px;">
-        <el-button type="primary" :icon="Plus" @click="openCreate">
-          新建第一个数据源
-        </el-button>
+        <button class="primary" @click="openCreate">新建第一个数据源</button>
       </div>
     </div>
 
@@ -546,232 +540,227 @@ function onKindChange(): void {
         style="width: 100%;"
         empty-text="暂无匹配的数据源"
       >
-        <!-- 名称 name -->
-        <el-table-column label="名称" min-width="180" fixed="left">
+        <!-- 名称 -->
+        <el-table-column label="名称" min-width="180">
           <template #default="{ row }">
-            <el-button
-              link
-              type="primary"
-              style="font-weight: 500; padding: 0;"
-              @click="openEdit(row as LocalDatasource)"
-            >
+            <span style="font-weight: 500; color: var(--heading); cursor: pointer;" @click="openEdit(row as LocalDatasource)">
               {{ (row as LocalDatasource).name }}
-            </el-button>
-          </template>
-        </el-table-column>
-
-        <!-- kind -->
-        <el-table-column label="类型" width="140" align="center">
-          <template #default="{ row }">
-            <el-tag
-              :color="kindMetaOf((row as LocalDatasource).kind).color"
-              effect="dark"
-              style="color: #fff;"
-            >
-              {{ kindMetaOf((row as LocalDatasource).kind).label }}
-            </el-tag>
-          </template>
-        </el-table-column>
-
-        <!-- url -->
-        <el-table-column label="URL / Brokers" min-width="300">
-          <template #default="{ row }">
-            <div class="ds-url-cell">
-              <el-tooltip
-                :content="(row as LocalDatasource).url"
-                placement="top"
-                :disabled="!(row as LocalDatasource).url"
-              >
-                <span class="ds-url-text">
-                  {{ truncate((row as LocalDatasource).url, 40) }}
-                </span>
-              </el-tooltip>
-              <el-button
-                v-if="(row as LocalDatasource).url"
-                :icon="DocumentCopy"
-                size="small"
-                text
-                type="primary"
-                @click="copyText((row as LocalDatasource).url)"
-              >
-                复制
-              </el-button>
-            </div>
-          </template>
-        </el-table-column>
-
-        <!-- options -->
-        <el-table-column label="Options" width="110" align="center">
-          <template #default="{ row }">
-            <el-popover
-              placement="top"
-              :width="420"
-              trigger="hover"
-              :disabled="!(row as LocalDatasource).options || Object.keys((row as LocalDatasource).options).length === 0"
-            >
-              <template #reference>
-                <span class="ds-options-count">
-                  {{ Object.keys((row as LocalDatasource).options || {}).length }} 项
-                </span>
-              </template>
-              <pre class="ds-popover-pre">{{ prettyJson((row as LocalDatasource).options, 20) }}</pre>
-            </el-popover>
-          </template>
-        </el-table-column>
-
-        <!-- enabled -->
-        <el-table-column label="启用" width="90" align="center">
-          <template #default="{ row }">
-            <el-switch
-              :model-value="(row as LocalDatasource).enabled"
-              @update:model-value="(val) => toggleEnabled(row as LocalDatasource, val as boolean)"
-              active-text="是"
-              inactive-text="否"
-            />
-          </template>
-        </el-table-column>
-
-        <!-- updated_at -->
-        <el-table-column label="更新时间" width="180" align="center">
-          <template #default="{ row }">
-            <span style="color: var(--text-color-secondary); font-size: 13px;">
-              {{ (row as LocalDatasource).updated_at || '-' }}
             </span>
           </template>
         </el-table-column>
 
-        <!-- 操作列 -->
-        <el-table-column label="操作" width="220" align="center" fixed="right">
+        <!-- 类型 -->
+        <el-table-column label="类型" width="160" align="center">
           <template #default="{ row }">
-            <el-button
-              size="small"
-              :icon="Monitor"
-              type="success"
-              plain
-              @click="probeDatasource(row as LocalDatasource)"
-            >
-              探测
-            </el-button>
-            <el-button
-              size="small"
-              :icon="Edit"
-              plain
-              @click="openEdit(row as LocalDatasource)"
-            >
-              编辑
-            </el-button>
-            <el-button
-              size="small"
-              :icon="Delete"
-              type="danger"
-              plain
-              @click="removeDatasource(row as LocalDatasource)"
-            >
-              删除
-            </el-button>
+            <span :class="['ds-type-pick-ico', 'ds-tone-' + kindMetaOf((row as LocalDatasource).kind).tone]" style="width: 22px; height: 22px; font-size: 10px; border-radius: 4px; vertical-align: middle;">
+              {{ kindMetaOf((row as LocalDatasource).kind).icon }}
+            </span>
+            <span style="margin-left: 6px; font-size: 13px; color: var(--text);">
+              {{ kindMetaOf((row as LocalDatasource).kind).name }}
+            </span>
+          </template>
+        </el-table-column>
+
+        <!-- URL -->
+        <el-table-column label="URL" min-width="300">
+          <template #default="{ row }">
+            <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-secondary);">
+              {{ truncate((row as LocalDatasource).url, 50) }}
+            </span>
+          </template>
+        </el-table-column>
+
+        <!-- 状态 -->
+        <el-table-column label="状态" width="100" align="center">
+          <template #default="{ row }">
+            <span :class="['badge', (row as LocalDatasource).enabled ? 'on' : 'off']">
+              {{ (row as LocalDatasource).enabled ? '启用' : '停用' }}
+            </span>
+          </template>
+        </el-table-column>
+
+        <!-- 操作 -->
+        <el-table-column label="操作" width="150" align="center" fixed="right">
+          <template #default="{ row }">
+            <div class="actions">
+              <button @click="openEdit(row as LocalDatasource)">编辑</button>
+              <button class="danger" @click="removeDatasource(row as LocalDatasource)">删除</button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
     </div>
 
+    <!-- 类型选择 Dialog：先选类型再填表单（与老版一致） -->
+    <el-dialog
+      v-model="typePickerVisible"
+      width="880px"
+      :close-on-click-modal="false"
+      append-to-body
+      :show-close="false"
+    >
+      <template #header>
+        <div class="ds-modal-head">
+          <h3>选择数据源类型</h3>
+          <p class="ds-modal-desc">先选类型，再填写连接信息；规则评估会按类型自动拉数。</p>
+        </div>
+      </template>
+      <div class="ds-modal-body">
+        <div class="ds-type-pick-grid">
+          <button
+            v-for="k in KINDS"
+            :key="k.kind"
+            type="button"
+            class="ds-type-pick-card"
+            @click="pickKind(k.kind)"
+          >
+            <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]">
+              {{ k.icon }}
+            </span>
+            <span class="ds-type-pick-name">{{ k.name }}</span>
+            <span class="ds-type-pick-desc">{{ k.typeDesc }}</span>
+          </button>
+        </div>
+      </div>
+      <template #footer>
+        <div class="ds-modal-actions">
+          <button type="button" class="ds-btn-ghost" @click="typePickerVisible = false">取消</button>
+        </div>
+      </template>
+    </el-dialog>
+
     <!-- 新建 / 编辑 Dialog -->
     <el-dialog
       v-model="dialogVisible"
-      :title="isEdit ? '编辑数据源' : '新建数据源'"
-      width="760px"
+      width="880px"
       :close-on-click-modal="false"
-      top="6vh"
+      append-to-body
+      :show-close="false"
     >
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="formRules"
-        label-width="110px"
-        label-position="right"
-      >
-        <el-row :gutter="14">
-          <el-col :xs="24" :md="14">
-            <el-form-item label="名称" prop="name">
-              <el-input v-model="form.name" placeholder="例如：Prometheus-生产 / Kafka-Core" />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="10">
-            <el-form-item label="启用">
-              <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" />
-            </el-form-item>
-          </el-col>
-        </el-row>
+      <template #header>
+        <div class="ds-modal-head">
+          <h3>{{ isEdit ? '编辑数据源' : '新建数据源' }}</h3>
+          <p class="ds-modal-desc">填写连接信息，规则评估会按类型自动拉数。</p>
+        </div>
+      </template>
+      <div class="ds-modal-body">
+        <!-- 名称 -->
+        <div class="ds-field">
+          <label>名称</label>
+          <input
+            v-model="form.name"
+            type="text"
+            required
+            placeholder="例如：生产 Prometheus"
+          />
+        </div>
 
-        <el-row :gutter="14">
-          <el-col :xs="24" :md="10">
-            <el-form-item label="类型" prop="kind">
-              <el-select v-model="form.kind" style="width: 100%;" @change="onKindChange">
-                <el-option
-                  v-for="k in KINDS"
-                  :key="k.kind"
-                  :label="k.label"
-                  :value="k.kind"
-                >
-                  <div style="display: flex; align-items: center; gap: 8px;">
-                    <el-tag :color="k.color" effect="dark" size="small" style="color: #fff;">
-                      {{ k.label }}
-                    </el-tag>
-                  </div>
-                </el-option>
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :md="14">
-            <el-form-item label="URL / Brokers" prop="url">
-              <el-input
-                v-model="form.url"
-                :placeholder="kindMetaOf(form.kind).urlPlaceholder"
-              />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <!-- 高级 options：折叠面板 + 动态 key/value 行 -->
-        <el-collapse v-model="advancedOpen" style="border: none;">
-          <el-collapse-item name="advanced" title="高级 options（Map&lt;String,String&gt;）">
-            <div class="ds-options-editor">
-              <div
-                v-for="(row, idx) in form.optionsRows"
-                :key="idx"
-                class="ds-options-row"
-              >
-                <el-input
-                  v-model="row.key"
-                  placeholder="key（空行将被忽略）"
-                  style="flex: 1;"
-                />
-                <el-input
-                  v-model="row.value"
-                  placeholder="value"
-                  style="flex: 1; margin-left: 8px;"
-                />
-                <el-button
-                  type="danger"
-                  plain
-                  style="margin-left: 8px;"
-                  @click="removeOptionsRow(idx as number)"
-                >
-                  删除
-                </el-button>
-              </div>
-              <el-button link type="primary" @click="addOptionsRow" style="margin-top: 8px;">
-                + 添加一行
-              </el-button>
+        <!-- 类型 -->
+        <div class="ds-field">
+          <label>类型</label>
+          <input type="hidden" v-model="form.kind" />
+          <div class="ds-type-picked">
+            <span :class="['ds-type-pick-ico', 'ds-tone-' + kindMetaOf(form.kind).tone]">
+              {{ kindMetaOf(form.kind).icon }}
+            </span>
+            <div class="ds-type-picked-text">
+              <div class="ds-t-name">{{ kindMetaOf(form.kind).name }}</div>
+              <div class="ds-t-desc">{{ kindMetaOf(form.kind).typeDesc }}</div>
             </div>
-          </el-collapse-item>
-        </el-collapse>
-      </el-form>
+            <button
+              v-if="!isEdit"
+              type="button"
+              class="ds-btn-ghost"
+              @click="repickKind"
+            >重选类型</button>
+          </div>
+        </div>
 
+        <!-- 启用 -->
+        <div class="ds-field">
+          <label class="ds-check-row">
+            <input
+              v-model="form.enabled"
+              type="checkbox"
+            />
+            <span>启用此数据源；停用后关联规则将跳过评估</span>
+          </label>
+        </div>
+
+        <!-- HTTP 面板：Prometheus / VictoriaMetrics / Loki -->
+        <div v-if="form.kind !== 'kafka'" class="ds-kind-panel">
+          <div class="ds-field">
+            <label>{{ urlLabel }}</label>
+            <input
+              v-model="form.url"
+              type="text"
+              :placeholder="urlPlaceholder"
+            />
+            <div class="ds-hint">{{ urlHint }}</div>
+          </div>
+        </div>
+
+        <!-- Kafka 面板 -->
+        <div v-else class="ds-kind-panel">
+          <div class="ds-field">
+            <label>Brokers</label>
+            <input
+              v-model="form.url"
+              type="text"
+              :placeholder="urlPlaceholder"
+            />
+            <div class="ds-hint">多个 broker 用英文逗号分隔。消息按 JSON 解析字段后走阈值规则。</div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>Topic</label>
+              <input v-model="form.topic" type="text" placeholder="orders" />
+            </div>
+            <div class="ds-field">
+              <label>数值字段（JSON 路径）</label>
+              <input v-model="form.field" type="text" placeholder="latency_ms 或 metrics.p99" />
+            </div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>标签字段（可选）</label>
+              <input v-model="form.label_fields" type="text" placeholder="service,instance" />
+              <div class="ds-hint">从消息中取出作为标签，用于分组与告警标识。</div>
+            </div>
+            <div class="ds-field">
+              <label>每次拉取条数</label>
+              <input v-model="form.max_records" type="number" min="1" placeholder="100" />
+            </div>
+          </div>
+          <div class="ds-row">
+            <div class="ds-field">
+              <label>评估模式</label>
+              <select v-model="form.mode">
+                <option value="field">字段解析 field（推荐）</option>
+                <option value="depth">堆积深度 depth</option>
+                <option value="count">近期消息数 count</option>
+              </select>
+            </div>
+            <div class="ds-field">
+              <label>扫描分区数</label>
+              <input v-model="form.partitions" type="number" min="1" placeholder="8" />
+            </div>
+          </div>
+          <div class="ds-hint">
+            规则表达式可覆盖数值字段路径；例如消息 {"latency_ms":820,"service":"api"}，字段填 latency_ms，阈值 &gt; 500。
+          </div>
+        </div>
+      </div>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="dialogLoading" @click="submitForm">
-          {{ isEdit ? '保存修改' : '创建数据源' }}
-        </el-button>
+        <div class="ds-modal-actions">
+          <button type="button" class="ds-btn-ghost" @click="dialogVisible = false">取消</button>
+          <button
+            type="button"
+            class="ds-btn-primary"
+            :disabled="dialogLoading"
+            @click="submitForm"
+          >{{ dialogLoading ? '保存中…' : '保存' }}</button>
+        </div>
       </template>
     </el-dialog>
   </div>
@@ -787,8 +776,8 @@ function onKindChange(): void {
 }
 
 .ds-affix {
-  background: var(--bg-color, #ffffff);
-  border-bottom: 1px solid var(--border-color-lighter, #ebeef5);
+  background: var(--el-bg-color, var(--panel));
+  border-bottom: 1px solid var(--el-border-color-lighter, var(--line-soft));
 }
 
 .ds-head {
@@ -808,11 +797,11 @@ function onKindChange(): void {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
-  color: var(--text-color-primary, #1f2329);
+  color: var(--el-text-color-primary, #1f2329);
 }
 
 .ds-subtitle {
-  color: var(--text-color-secondary, #86909c);
+  color: var(--el-text-color-secondary, #86909c);
   font-size: 13px;
 }
 
@@ -853,8 +842,14 @@ function onKindChange(): void {
   border-radius: 6px;
 }
 
+.ds-hint-name {
+  font-weight: 650;
+  color: var(--el-text-color-primary, #1f2329);
+  min-width: 100px;
+}
+
 .ds-hint-text {
-  color: var(--text-color-secondary, #4e5969);
+  color: var(--el-text-color-secondary, #4e5969);
   font-size: 13px;
 }
 
@@ -863,59 +858,287 @@ function onKindChange(): void {
   border-radius: 8px;
 }
 
-.ds-url-cell {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* ============================================================
+ * Dialog 结构（与老版 .modal 一致）
+ * ============================================================ */
+.ds-modal-head {
+  padding: 20px 28px 16px;
+  border-bottom: 1px solid var(--el-border-color, #e5e6eb);
+  flex-shrink: 0;
+  margin: -20px -20px 0 -20px; /* 抵消 el-dialog 默认 padding */
 }
-
-.ds-url-text {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 13px;
-  color: var(--text-color-primary, #1f2329);
-  background: var(--fill-color-lighter, #f2f3f5);
-  padding: 2px 8px;
-  border-radius: 4px;
-  max-width: 320px;
-  display: inline-block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: middle;
-}
-
-.ds-options-count {
-  display: inline-block;
-  padding: 2px 10px;
-  background: var(--fill-color-light, #f7f8fa);
-  color: var(--text-color-secondary, #4e5969);
-  border-radius: 12px;
-  font-size: 12px;
-  cursor: help;
-}
-
-.ds-popover-pre {
+.ds-modal-head h3 {
   margin: 0;
-  padding: 10px 12px;
-  background: var(--bg-color-overlay, #1d2129);
-  color: #e5e6eb;
-  border-radius: 6px;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 12px;
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--el-text-color-primary, #1f2329);
+}
+.ds-modal-desc {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary, #86909c);
+  font-size: 13px;
   line-height: 1.5;
-  max-height: 380px;
+}
+
+.ds-modal-body {
+  padding: 20px 28px 12px;
   overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
-.ds-options-editor {
-  padding: 8px 0;
+.ds-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 28px 20px;
+  border-top: 1px solid var(--el-border-color, #e5e6eb);
+  background: var(--fill-color-lighter, #f7f8fa);
+  flex-shrink: 0;
+  margin: 0 -20px -20px -20px; /* 抵消 el-dialog 默认 padding */
 }
 
-.ds-options-row {
+/* 覆盖 el-dialog 默认 padding，让我们的 modal-head/body/actions 铺满 */
+.el-dialog :deep(.el-dialog__header) {
+  padding: 0;
+  margin: 0;
+}
+.el-dialog :deep(.el-dialog__body) {
+  padding: 0;
+}
+.el-dialog :deep(.el-dialog__footer) {
+  padding: 0;
+}
+.el-dialog :deep(.el-dialog__headerbtn) {
+  top: 16px;
+  right: 20px;
+}
+
+/* ============================================================
+ * 按钮样式（与老版 .ghost / .primary 一致）
+ * ============================================================ */
+.ds-btn-ghost {
+  min-width: 100px;
+  padding: 10px 18px;
+  font-size: 14px;
+  border: 1px solid var(--el-border-color, #e5e6eb);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--el-text-color-primary, #1f2329);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ds-btn-ghost:hover {
+  border-color: var(--el-color-primary, #1677ff);
+  color: var(--el-color-primary, #1677ff);
+  background: var(--el-color-primary-light-9, #ecf5ff);
+}
+
+.ds-btn-primary {
+  min-width: 100px;
+  padding: 10px 18px;
+  font-size: 14px;
+  border: 1px solid var(--el-color-primary, #1677ff);
+  border-radius: 6px;
+  background: var(--el-color-primary, #1677ff);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.ds-btn-primary:hover {
+  background: var(--el-color-primary-hover, #4096ff);
+  border-color: var(--el-color-primary-hover, #4096ff);
+}
+.ds-btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+ * 类型选择卡片（与老版 .type-pick-grid / .type-pick-card 一致）
+ * ============================================================ */
+.ds-type-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+.ds-type-pick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  height: auto;
+  min-height: 148px;
+  padding: 20px 14px 16px;
+  border: 1px solid var(--el-border-color, #e5e6eb);
+  border-radius: 12px;
+  background: var(--fill-color-lighter, #f7f8fa);
+  color: var(--el-text-color-primary, #1f2329);
+  cursor: pointer;
+  text-align: center;
+  font: inherit;
+  white-space: normal;
+  transition: border-color 0.15s, background 0.15s, transform 0.12s;
+}
+.ds-type-pick-card:hover {
+  border-color: var(--el-color-primary, #1677ff);
+  background: color-mix(in srgb, #1677ff 8%, var(--fill-color-lighter, #f7f8fa));
+  transform: translateY(-1px);
+}
+
+/* 类型图标（tone 渐变，与老版一致） */
+.ds-type-pick-ico {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #fff;
+}
+.ds-tone-orange {
+  background: linear-gradient(145deg, #f59e0b, #ea580c);
+}
+.ds-tone-blue {
+  background: linear-gradient(145deg, #3b82f6, #1d4ed8);
+}
+.ds-tone-amber {
+  background: linear-gradient(145deg, #231f20, #4b5563);
+  color: #f5c518;
+}
+.ds-tone-teal {
+  background: linear-gradient(145deg, #2dd4bf, #0f766e);
+}
+
+.ds-type-pick-name {
+  font-weight: 650;
+  color: var(--el-text-color-primary, #1f2329);
+  font-size: 14px;
+}
+.ds-type-pick-desc {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #86909c);
+  line-height: 1.4;
+  display: block;
+}
+
+/* ============================================================
+ * 类型已选卡片（与老版 .type-picked 一致）
+ * ============================================================ */
+.ds-type-picked {
   display: flex;
   align-items: center;
-  margin-bottom: 8px;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color, #e5e6eb);
+  border-radius: 10px;
+  background: var(--fill-color-lighter, #f7f8fa);
 }
+.ds-type-picked .ds-type-pick-ico {
+  width: 40px;
+  height: 40px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.ds-type-picked-text {
+  flex: 1;
+  min-width: 0;
+}
+.ds-t-name {
+  font-weight: 650;
+  color: var(--el-text-color-primary, #1f2329);
+}
+.ds-t-desc {
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #86909c);
+}
+
+/* ============================================================
+ * 表单结构（与老版 .field / .row / .hint / .check-row 一致）
+ * ============================================================ */
+.ds-field {
+  margin-bottom: 20px;
+}
+.ds-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--el-text-color-primary, #1f2329);
+  margin-bottom: 6px;
+}
+.ds-field input[type="text"],
+.ds-field input[type="number"],
+.ds-field select {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 1px solid var(--el-border-color, var(--line));
+  border-radius: 6px;
+  background: var(--el-bg-color, var(--panel));
+  color: var(--el-text-color-primary, var(--heading));
+  outline: none;
+  transition: border-color 0.15s;
+  box-sizing: border-box;
+}
+.ds-field input[type="text"]:focus,
+.ds-field input[type="number"]:focus,
+.ds-field select:focus {
+  border-color: var(--el-color-primary, #1677ff);
+}
+.ds-field input[type="text"]::placeholder,
+.ds-field input[type="number"]::placeholder {
+  color: var(--el-text-color-placeholder, #a8abb2);
+}
+
+.ds-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.ds-row > .ds-field {
+  flex: 1;
+  min-width: 140px;
+}
+
+.ds-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary, #86909c);
+  line-height: 1.5;
+}
+
+.ds-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  margin: 0;
+  color: var(--el-text-color-primary, #1f2329);
+  line-height: 1.5;
+}
+.ds-check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 3px 0 0;
+  accent-color: var(--el-color-primary, #1677ff);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.ds-check-row span {
+  font-size: 14px;
+  color: var(--el-text-color-secondary, #4e5969);
+}
+
+.ds-kind-panel[hidden] {
+  display: none !important;
+}
+
+/* ============================================================
+ * 状态徽章 - 使用全局 .badge 类（与老版对齐）
+ * ============================================================ */
 </style>

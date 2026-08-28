@@ -273,18 +273,49 @@ function mkTreeRow(m: MibModuleItem | string, oid: string, name: string, hasChil
   }
 }
 
-function resetTreeForModule(mod: MibModuleItem) {
+async function resetTreeForModule(mod: MibModuleItem) {
   treeRows.value = []
   childrenCache.clear()
   const rootOid = mod.module_oid || '1'
   const root: TreeRow = mkTreeRow(mod, rootOid, mod.module_name, true)
+  // 立即让 treeRows 有值, 便于 ElTree 挂载
   treeRows.value = [root]
+  // 主动拉取根节点子节点并填充, 避免 ElTree 懒加载时的时序问题
+  if (root.moduleId) {
+    loadingTree.value = true
+    try {
+      const res = await mibsApi.listMibChildren(root.moduleId, root.oid)
+      const rows: TreeRow[] = (res.children || []).map((c) =>
+        mkTreeRow(root.moduleId, c.oid, c.name, c.has_children, !!c.is_notification)
+      )
+      const cacheKey = `${root.moduleId}|${root.oid}`
+      childrenCache.set(cacheKey, rows)
+      root.loaded = true
+      // 回填子节点到 root (非懒加载路径), 避免 ElTree 重复请求
+      root.children = rows
+      treeRows.value = [root]
+    } catch (e) {
+      ElMessage.error(errMsg(e, '加载根节点子节点失败'))
+      root.loaded = true
+      root.children = []
+      treeRows.value = [root]
+    } finally {
+      loadingTree.value = false
+    }
+  }
 }
 
 async function loadNodeChildren(node: TreeRow, cb?: (children: TreeRow[]) => void) {
+  // 防御性检查: moduleId 为空时直接返回空数组, 避免拼接出 /api/mibs//children 这种双斜杠 URL
+  if (!node.moduleId) {
+    console.warn('[MIB] loadNodeChildren: node.moduleId is empty', node)
+    if (cb) cb([])
+    return [] as TreeRow[]
+  }
   const cacheKey = `${node.moduleId}|${node.oid}`
   if (childrenCache.has(cacheKey)) {
     const cached = childrenCache.get(cacheKey)!
+    node.children = cached
     if (cb) cb(cached)
     return cached
   }
@@ -296,6 +327,7 @@ async function loadNodeChildren(node: TreeRow, cb?: (children: TreeRow[]) => voi
     )
     childrenCache.set(cacheKey, rows)
     node.loaded = true
+    node.children = rows
     if (cb) cb(rows)
     return rows
   } catch (e) {
@@ -307,14 +339,18 @@ async function loadNodeChildren(node: TreeRow, cb?: (children: TreeRow[]) => voi
   }
 }
 
-/** ElTree lazy 加载回调 (在模板中去掉签名) */
-async function treeLoadNode(row: unknown, _node: unknown, cb: (children: TreeRow[]) => void) {
-  const r = row as TreeRow
-  if (r.loaded && childrenCache.has(`${r.moduleId}|${r.oid}`)) {
-    cb(childrenCache.get(`${r.moduleId}|${r.oid}`)!)
-    return
-  }
-  await loadNodeChildren(r, cb)
+/** 树引用 & 懒加载子节点 (通过 node-expand 事件触发) */
+const treeRef = ref<any>(null)
+
+async function onTreeExpand(row: TreeRow) {
+  // 非懒加载节点: children 已在 resetTreeForModule 或之前的 loadNodeChildren 中填充
+  if (!row.hasChildren) return
+  // 已经加载过的节点不再请求
+  if (row.loaded && row.children && row.children.length > 0) return
+  // 通过 loadNodeChildren 加载, 其内部已处理缓存和错误
+  await loadNodeChildren(row)
+  // 强制 ElTree 更新视图 (通过重新设置 data 触发响应式)
+  treeRows.value = [...treeRows.value]
 }
 
 function treeFilterNode(_value: unknown, data: unknown): boolean {
@@ -347,7 +383,7 @@ async function onTreeSelect(node: TreeRow) {
 
 async function onSelectModule(mod: MibModuleItem) {
   selectedModuleId.value = mod.id
-  resetTreeForModule(mod)
+  await resetTreeForModule(mod)
   selectedNodeKey.value = ''
   nodeDetail.value = null
   void loadNotifications()
@@ -657,17 +693,17 @@ onMounted(() => { void loadModules() })
               />
               <el-tree
                 v-else
+                ref="treeRef"
                 :data="treeRows"
                 :props="{ label: 'label', children: 'children', isLeaf: treeIsLeaf }"
                 node-key="id"
-                lazy
-                :load="treeLoadNode"
                 :expand-on-click-node="false"
                 :current-node-key="selectedNodeKey"
                 highlight-current
                 :filter-node-method="treeFilterNode"
                 v-loading="loadingTree"
                 @node-click="(d) => onTreeSelect(d as TreeRow)"
+                @node-expand="(d) => onTreeExpand(d as TreeRow)"
                 style="flex: 1; overflow: auto;"
                 height="450"
               >

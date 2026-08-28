@@ -2,7 +2,6 @@
 import { computed, onMounted, reactive, ref, markRaw, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  ElAffix,
   ElAlert,
   ElAvatar,
   ElButton,
@@ -26,8 +25,6 @@ import {
   ElSwitch,
   ElTable,
   ElTableColumn,
-  ElTabPane,
-  ElTabs,
   ElTag,
   ElTooltip,
 } from 'element-plus'
@@ -253,6 +250,16 @@ function tabFromRoute(name: string | symbol | undefined): 'department' | 'role' 
   return 'department'
 }
 const activeTab = ref<'department' | 'role' | 'user'>(tabFromRoute(route.name))
+const pageTitle = computed(() => {
+  if (activeTab.value === 'department') return '部门管理'
+  if (activeTab.value === 'role') return '权限管理'
+  return '用户管理'
+})
+const pageSubtitle = computed(() => {
+  if (activeTab.value === 'department') return '组织架构'
+  if (activeTab.value === 'role') return '角色与权限码'
+  return '账号 · 部门 · 角色'
+})
 const departments = ref<Department[]>([])
 const departmentsLoading = ref(false)
 const departmentMap = computed<Record<string, Department>>(() => {
@@ -293,6 +300,9 @@ const deptFormRef = ref<FormInstance>()
 const deptRules: FormRules<DepartmentInput> = {
   name: [{ required: true, message: '请输入部门名称', trigger: 'blur' }],
 }
+const isEditingSystemDept = computed(() => {
+  return isSystemDept({ name: deptForm.name } as Department) && !!deptEditingId.value
+})
 function openCreateDepartment(): void {
   deptEditingId.value = null
   deptForm.name = ''
@@ -327,6 +337,11 @@ async function submitDepartment(): Promise<void> {
   }
 }
 async function onToggleDepartmentEnabled(row: Department): Promise<void> {
+  if (isSystemDept(row)) {
+    ElMessage.warning('系统部门不可禁用')
+    row.enabled = true
+    return
+  }
   try {
     await updateDepartment(row.id, {
       name: row.name,
@@ -340,7 +355,14 @@ async function onToggleDepartmentEnabled(row: Department): Promise<void> {
     ElMessage.error(errMsgOf(e, '更新失败'))
   }
 }
+function isSystemDept(row: Department): boolean {
+  return row.name.includes('默认') || row.name.includes('系统')
+}
 async function handleDeleteDepartment(row: Department): Promise<void> {
+  if (isSystemDept(row)) {
+    ElMessage.warning('系统部门不可删除')
+    return
+  }
   try {
     await ElMessageBox.confirm(`确认删除部门「${row.name}」？`, '删除部门', {
       type: 'warning',
@@ -398,6 +420,7 @@ async function loadRoles(force = false): Promise<void> {
 
 const roleDialogVisible = ref(false)
 const roleEditingId = ref<string | null>(null)
+const roleEditingIsSystem = ref(false)
 const roleForm = reactive<RoleInput>({
   name: '',
   description: '',
@@ -409,6 +432,7 @@ const roleRules: FormRules<RoleInput> = {
 }
 function openCreateRole(): void {
   roleEditingId.value = null
+  roleEditingIsSystem.value = false
   roleForm.name = ''
   roleForm.description = ''
   roleForm.permissions = []
@@ -416,6 +440,7 @@ function openCreateRole(): void {
 }
 function openEditRole(row: Role): void {
   roleEditingId.value = row.id
+  roleEditingIsSystem.value = !!row.is_system
   roleForm.name = row.name
   roleForm.description = row.description ?? ''
   roleForm.permissions = [...(row.permissions ?? [])]
@@ -424,12 +449,16 @@ function openEditRole(row: Role): void {
 async function submitRole(): Promise<void> {
   const valid = await roleFormRef.value?.validate().catch(() => false)
   if (!valid) return
+  // 保护: 系统角色提交时保留原有权限
+  const payload: RoleInput = roleEditingIsSystem.value
+    ? { name: roleForm.name, description: roleForm.description } as RoleInput
+    : { ...roleForm }
   try {
     if (roleEditingId.value) {
-      await updateRole(roleEditingId.value, { ...roleForm })
+      await updateRole(roleEditingId.value, payload)
       ElMessage.success('角色已更新')
     } else {
-      await createRole({ ...roleForm })
+      await createRole(payload)
       ElMessage.success('角色已创建')
     }
     roleDialogVisible.value = false
@@ -563,6 +592,11 @@ function openEditUser(row: UserRow): void {
 async function submitUser(): Promise<void> {
   const valid = await userFormRef.value?.validate().catch(() => false)
   if (!valid) return
+  // 保护: admin 用户不能移除所有角色
+  if (userForm.username === 'admin' && userForm.role_ids.length === 0) {
+    ElMessage.error('admin 用户至少需要保留一个角色')
+    return
+  }
   const body: UserInput = {
     username: userForm.username,
     display_name: userForm.display_name || undefined,
@@ -590,6 +624,7 @@ async function onToggleUserEnabled(row: UserRow): Promise<void> {
     await updateUser(row.id, {
       username: row.username,
       enabled: row.enabled,
+      role_ids: row.role_ids ?? [],
     })
     ElMessage.success('已更新')
   } catch (e) {
@@ -695,19 +730,6 @@ watch(
   },
 )
 
-// ============================================================
-// 统一刷新
-// ============================================================
-async function refreshAll(): Promise<void> {
-  await Promise.all([
-    loadDepartments(true),
-    loadRoles(true),
-    loadUsers(true),
-    loadPermissions(true),
-  ])
-  ElMessage.success('已刷新')
-}
-
 onMounted(async () => {
   await Promise.all([loadDepartments(), loadRoles(), loadUsers(), loadPermissions()])
 })
@@ -715,21 +737,13 @@ onMounted(async () => {
 
 <template>
   <div class="iam-users-page">
-    <!-- 标题 + Affix 工具栏 -->
-    <h2 class="page-title">用户与角色</h2>
-    <p class="page-subtitle">部门树 / 角色权限 / 用户账号</p>
+    <!-- 标题 + 副标题 -->
+    <h2 class="page-title">{{ pageTitle }}</h2>
+    <p class="page-subtitle">{{ pageSubtitle }}</p>
 
-    <ElAffix :offset="0" class="toolbar-affix">
-      <div class="toolbar-bar">
-        <ElButton @click="refreshAll" :icon="Refresh">刷新</ElButton>
-        <ElButton type="primary" @click="openAuditDrawer" :icon="View">查看审计日志</ElButton>
-      </div>
-    </ElAffix>
-
-    <!-- 三大 Tab -->
-    <ElTabs v-model="activeTab" class="iam-tabs">
-      <!-- ============ Tab 1 部门 ============ -->
-      <ElTabPane name="department" label="部门">
+    <!-- 三大列表（按路由切换，无 tab 切换器，对齐旧版独立列表样式） -->
+    <!-- ============ 部门列表 ============ -->
+    <div v-show="activeTab === 'department'">
         <ElCard shadow="never">
           <template #header>
             <div class="card-header">
@@ -741,25 +755,38 @@ onMounted(async () => {
             </div>
           </template>
           <ElTable :data="departments" v-loading="departmentsLoading" stripe>
-            <ElTableColumn prop="name" label="名称" min-width="180" />
-            <ElTableColumn label="父级" min-width="160">
+            <ElTableColumn prop="name" label="名称" min-width="140" />
+            <ElTableColumn label="父级" min-width="100">
               <template #default="{ row: raw }">
                 {{ parentNameOf((raw as Department).parent_id) }}
               </template>
             </ElTableColumn>
-            <ElTableColumn prop="sort_order" label="排序" width="90" align="right" />
-            <ElTableColumn label="启用" width="90" align="center">
+            <ElTableColumn prop="sort_order" label="排序" width="70" align="right" />
+            <ElTableColumn label="启用" width="70" align="center">
               <template #default="{ row: raw }">
-                <ElSwitch v-model="(raw as Department).enabled" @change="onToggleDepartmentEnabled(raw as Department)" />
+                <ElSwitch
+                  v-model="(raw as Department).enabled"
+                  :disabled="isSystemDept(raw as Department)"
+                  @change="onToggleDepartmentEnabled(raw as Department)"
+                />
               </template>
             </ElTableColumn>
-            <ElTableColumn prop="updated_at" label="更新时间" min-width="180" />
-            <ElTableColumn label="操作" width="180" fixed="right">
+            <ElTableColumn prop="updated_at" label="更新时间" min-width="150" />
+            <ElTableColumn label="操作" width="180">
               <template #default="{ row: raw }">
-                <ElButton size="small" :icon="Edit" @click="openEditDepartment(raw as Department)">编辑</ElButton>
-                <ElButton size="small" type="danger" plain :icon="Delete" @click="handleDeleteDepartment(raw as Department)">
-                  删除
-                </ElButton>
+                <div class="row-actions">
+                  <ElButton size="small" :icon="Edit" @click="openEditDepartment(raw as Department)">编辑</ElButton>
+                  <ElButton
+                    size="small"
+                    type="danger"
+                    plain
+                    :icon="Delete"
+                    :disabled="isSystemDept(raw as Department)"
+                    @click="handleDeleteDepartment(raw as Department)"
+                  >
+                    删除
+                  </ElButton>
+                </div>
               </template>
             </ElTableColumn>
             <template #empty>
@@ -775,36 +802,41 @@ onMounted(async () => {
           width="520px"
           destroy-on-close
         >
-          <ElForm ref="deptFormRef" :model="deptForm" :rules="deptRules" label-width="90px">
-            <ElFormItem label="名称" prop="name">
-              <ElInput v-model="deptForm.name" placeholder="请输入部门名称" />
-            </ElFormItem>
-            <ElFormItem label="父级" prop="parent_id">
-              <ElSelect v-model="deptForm.parent_id as unknown as string" placeholder="选择父级部门" clearable style="width: 100%">
-                <ElOption
-                  v-for="opt in departmentOptions"
-                  :key="String(opt.value)"
-                  :label="opt.label"
-                  :value="opt.value as unknown as string"
-                />
-              </ElSelect>
-            </ElFormItem>
-            <ElFormItem label="排序" prop="sort_order">
-              <ElInputNumber v-model="deptForm.sort_order" :min="0" :step="1" controls-position="right" />
-            </ElFormItem>
-            <ElFormItem label="启用" prop="enabled">
-              <ElSwitch v-model="deptForm.enabled" />
-            </ElFormItem>
+          <ElForm ref="deptFormRef" :model="deptForm" :rules="deptRules" label-position="top">
+            <div class="form-two-col">
+              <ElFormItem label="名称" prop="name">
+                <ElInput v-model="deptForm.name" placeholder="请输入部门名称" />
+              </ElFormItem>
+              <ElFormItem label="父级" prop="parent_id">
+                <ElSelect v-model="deptForm.parent_id as unknown as string" placeholder="选择父级部门" clearable style="width: 100%">
+                  <ElOption
+                    v-for="opt in departmentOptions"
+                    :key="String(opt.value)"
+                    :label="opt.label"
+                    :value="opt.value as unknown as string"
+                  />
+                </ElSelect>
+              </ElFormItem>
+            </div>
+            <div class="form-two-col">
+              <ElFormItem label="排序" prop="sort_order">
+                <ElInputNumber v-model="deptForm.sort_order" :min="0" :step="1" controls-position="right" />
+              </ElFormItem>
+              <ElFormItem label="启用" prop="enabled">
+                <ElSwitch v-model="deptForm.enabled" :disabled="isEditingSystemDept" />
+                <span v-if="isEditingSystemDept" class="form-hint">系统部门不可禁用</span>
+              </ElFormItem>
+            </div>
           </ElForm>
           <template #footer>
             <ElButton @click="deptDialogVisible = false">取消</ElButton>
             <ElButton type="primary" @click="submitDepartment">保存</ElButton>
           </template>
         </ElDialog>
-      </ElTabPane>
+    </div>
 
-      <!-- ============ Tab 2 角色 ============ -->
-      <ElTabPane name="role" label="角色">
+    <!-- ============ 角色列表 ============ -->
+    <div v-show="activeTab === 'role'">
         <ElCard shadow="never">
           <template #header>
             <div class="card-header">
@@ -816,9 +848,9 @@ onMounted(async () => {
             </div>
           </template>
           <ElTable :data="roles" v-loading="rolesLoading" stripe>
-            <ElTableColumn prop="name" label="角色名称" min-width="180" />
-            <ElTableColumn prop="description" label="描述" min-width="260" show-overflow-tooltip />
-            <ElTableColumn label="权限" min-width="220">
+            <ElTableColumn prop="name" label="角色名称" min-width="140" />
+            <ElTableColumn prop="description" label="描述" min-width="180" show-overflow-tooltip />
+            <ElTableColumn label="权限" min-width="160">
               <template #default="{ row: raw }">
                 <span class="perm-count">共 {{ ((raw as Role).permissions ?? []).length }} 项</span>
                 <ElPopover
@@ -847,26 +879,20 @@ onMounted(async () => {
                 </ElPopover>
               </template>
             </ElTableColumn>
-            <ElTableColumn label="系统角色" width="100" align="center">
+            <ElTableColumn label="系统角色" width="80" align="center">
               <template #default="{ row: raw }">
                 <ElTag v-if="(raw as Role).is_system" type="warning" effect="dark">系统</ElTag>
                 <span v-else>-</span>
               </template>
             </ElTableColumn>
-            <ElTableColumn prop="updated_at" label="更新时间" min-width="180" />
-            <ElTableColumn label="操作" width="180" fixed="right">
+            <ElTableColumn prop="updated_at" label="更新时间" min-width="150" />
+            <ElTableColumn label="操作" width="180">
               <template #default="{ row: raw }">
-                <ElButton size="small" :icon="Edit" @click="openEditRole(raw as Role)">编辑</ElButton>
-                <ElButton
-                  size="small"
-                  type="danger"
-                  plain
-                  :icon="Delete"
-                  :disabled="!!(raw as Role).is_system"
-                  @click="handleDeleteRole(raw as Role)"
-                >
-                  删除
-                </ElButton>
+                <div class="row-actions">
+                  <ElButton size="small" :icon="Edit" @click="openEditRole(raw as Role)">编辑</ElButton>
+                  <ElButton v-if="!(raw as Role).is_system" size="small" type="danger" plain :icon="Delete" @click="handleDeleteRole(raw as Role)">删除</ElButton>
+                  <span v-else class="admin-locked" title="系统角色不可删除">🔒</span>
+                </div>
               </template>
             </ElTableColumn>
             <template #empty>
@@ -882,47 +908,55 @@ onMounted(async () => {
           width="600px"
           destroy-on-close
         >
-          <ElForm ref="roleFormRef" :model="roleForm" :rules="roleRules" label-width="90px">
-            <ElFormItem label="名称" prop="name">
-              <ElInput v-model="roleForm.name" placeholder="请输入角色名称" />
-            </ElFormItem>
-            <ElFormItem label="描述" prop="description">
-              <ElInput
-                v-model="roleForm.description"
-                type="textarea"
-                :rows="3"
-                placeholder="选填，描述角色用途"
-              />
-            </ElFormItem>
-            <ElFormItem label="权限" prop="permissions">
-              <ElSelect
-                v-model="roleForm.permissions"
-                multiple
-                filterable
-                collapse-tags
-                collapse-tags-tooltip
-                reserve-keyword
-                placeholder="选择权限"
-                style="width: 100%"
-              >
-                <ElOption
-                  v-for="opt in permissionOptions"
-                  :key="opt.value"
-                  :label="opt.label"
-                  :value="opt.value"
+          <ElForm ref="roleFormRef" :model="roleForm" :rules="roleRules" label-position="top">
+            <div class="form-two-col">
+              <ElFormItem label="名称" prop="name">
+                <ElInput v-model="roleForm.name" placeholder="请输入角色名称" />
+              </ElFormItem>
+              <ElFormItem label="描述" prop="description">
+                <ElInput
+                  v-model="roleForm.description"
+                  type="textarea"
+                  :rows="3"
+                  placeholder="选填，描述角色用途"
                 />
-              </ElSelect>
-            </ElFormItem>
+              </ElFormItem>
+            </div>
+            <div class="form-two-col">
+              <ElFormItem label="权限" prop="permissions" style="flex: 2">
+                <ElSelect
+                  v-if="!roleEditingIsSystem"
+                  v-model="roleForm.permissions"
+                  multiple
+                  filterable
+                  collapse-tags
+                  collapse-tags-tooltip
+                  reserve-keyword
+                  placeholder="选择权限"
+                  style="width: 100%"
+                >
+                  <ElOption
+                    v-for="opt in permissionOptions"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </ElSelect>
+                <ElTag v-else type="info" effect="dark" style="font-size: 14px; padding: 6px 12px;">
+                  🔒 系统角色权限不可编辑 ({{ roleForm.permissions.length }} 项)
+                </ElTag>
+              </ElFormItem>
+            </div>
           </ElForm>
           <template #footer>
             <ElButton @click="roleDialogVisible = false">取消</ElButton>
             <ElButton type="primary" @click="submitRole">保存</ElButton>
           </template>
         </ElDialog>
-      </ElTabPane>
+    </div>
 
-      <!-- ============ Tab 3 用户 ============ -->
-      <ElTabPane name="user" label="用户">
+    <!-- ============ 用户列表 ============ -->
+    <div v-show="activeTab === 'user'">
         <ElCard shadow="never">
           <template #header>
             <div class="card-header">
@@ -969,7 +1003,7 @@ onMounted(async () => {
           </ElRow>
           <ElDivider style="margin: 12px 0" />
           <ElTable :data="users" v-loading="usersLoading" stripe>
-            <ElTableColumn label="用户名" min-width="200">
+            <ElTableColumn label="用户名" min-width="130">
               <template #default="{ row: raw }">
                 <div class="user-cell">
                   <ElAvatar size="small" class="user-avatar">{{ initial((raw as UserRow).username) }}</ElAvatar>
@@ -977,17 +1011,17 @@ onMounted(async () => {
                 </div>
               </template>
             </ElTableColumn>
-            <ElTableColumn prop="display_name" label="显示名" min-width="160" show-overflow-tooltip>
+            <ElTableColumn prop="display_name" label="显示名" min-width="140">
               <template #default="{ row: raw }">
-                {{ (raw as UserRow).display_name || '-' }}
+                <span class="cell-ellipsis">{{ (raw as UserRow).display_name || '-' }}</span>
               </template>
             </ElTableColumn>
-            <ElTableColumn label="部门" min-width="140">
+            <ElTableColumn label="部门" min-width="90">
               <template #default="{ row: raw }">
                 {{ userDepartmentName(raw as UserRow) }}
               </template>
             </ElTableColumn>
-            <ElTableColumn label="角色" min-width="220">
+            <ElTableColumn label="角色" min-width="140">
               <template #default="{ row: raw }">
                 <div class="role-chip-wrap">
                   <ElTag
@@ -1003,22 +1037,25 @@ onMounted(async () => {
                 </div>
               </template>
             </ElTableColumn>
-            <ElTableColumn label="启用" width="90" align="center">
+            <ElTableColumn label="启用" width="70" align="center">
               <template #default="{ row: raw }">
-                <ElSwitch v-model="(raw as UserRow).enabled" @change="onToggleUserEnabled(raw as UserRow)" />
+                <ElSwitch v-if="(raw as UserRow).username !== 'admin'" v-model="(raw as UserRow).enabled" @change="onToggleUserEnabled(raw as UserRow)" />
+                <span v-else class="admin-locked">🔒</span>
               </template>
             </ElTableColumn>
-            <ElTableColumn prop="created_at" label="创建时间" min-width="180" />
-            <ElTableColumn prop="password_changed_at" label="密码修改时间" min-width="180">
+            <ElTableColumn prop="created_at" label="创建时间" min-width="150" />
+            <ElTableColumn prop="password_changed_at" label="密码修改时间" min-width="150">
               <template #default="{ row: raw }">
                 {{ (raw as UserRow).password_changed_at || '未修改' }}
               </template>
             </ElTableColumn>
-            <ElTableColumn label="操作" width="260" fixed="right">
+            <ElTableColumn label="操作" width="300">
               <template #default="{ row: raw }">
-                <ElButton size="small" :icon="Key" @click="handleResetPassword(raw as UserRow)">重置密码</ElButton>
-                <ElButton size="small" :icon="Edit" @click="openEditUser(raw as UserRow)">编辑</ElButton>
-                <ElButton size="small" type="danger" plain :icon="Delete" @click="handleDeleteUser(raw as UserRow)">删除</ElButton>
+                <div class="row-actions">
+                  <ElButton size="small" :icon="Key" @click="handleResetPassword(raw as UserRow)">重置密码</ElButton>
+                  <ElButton size="small" :icon="Edit" @click="openEditUser(raw as UserRow)">编辑</ElButton>
+                  <ElButton v-if="(raw as UserRow).username !== 'admin'" size="small" type="danger" plain :icon="Delete" @click="handleDeleteUser(raw as UserRow)">删除</ElButton>
+                </div>
               </template>
             </ElTableColumn>
             <template #empty>
@@ -1031,66 +1068,74 @@ onMounted(async () => {
         <ElDialog
           v-model="userDialogVisible"
           :title="userEditingId ? '编辑用户' : '新建用户'"
-          width="620px"
+          width="720px"
           destroy-on-close
         >
-          <ElForm ref="userFormRef" :model="userForm" :rules="userRules" label-width="100px">
-            <ElFormItem label="用户名" prop="username">
-              <ElInput
-                v-model="userForm.username"
-                :disabled="!!userEditingId"
-                placeholder="2-32 字符，唯一"
-              />
-            </ElFormItem>
-            <ElFormItem label="显示名" prop="display_name">
-              <ElInput v-model="userForm.display_name" placeholder="选填" />
-            </ElFormItem>
-            <ElFormItem label="密码" prop="password">
-              <ElInput
-                v-model="userForm.password"
-                type="password"
-                show-password
-                :placeholder="userEditingId ? '留空 = 保持现有密码' : '请输入初始密码'"
-              />
-            </ElFormItem>
-            <ElFormItem label="部门" prop="department_id">
-              <ElSelect v-model="userForm.department_id as unknown as string" placeholder="选择部门" clearable style="width: 100%">
-                <ElOption
-                  v-for="opt in departmentOptions.filter((o) => o.value !== null)"
-                  :key="String(opt.value)"
-                  :label="opt.label"
-                  :value="opt.value as unknown as string"
+          <ElForm ref="userFormRef" :model="userForm" :rules="userRules" label-position="top">
+            <div class="form-two-col">
+              <ElFormItem label="用户名" prop="username">
+                <ElInput
+                  v-model="userForm.username"
+                  :disabled="!!userEditingId"
+                  placeholder="2-32 字符，唯一"
                 />
-              </ElSelect>
-            </ElFormItem>
-            <ElFormItem label="角色" prop="role_ids">
-              <ElSelect
-                v-model="userForm.role_ids"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                placeholder="选择角色"
-                style="width: 100%"
-              >
-                <ElOption
-                  v-for="r in roles"
-                  :key="r.id"
-                  :label="r.name"
-                  :value="r.id"
+              </ElFormItem>
+              <ElFormItem label="显示名" prop="display_name">
+                <ElInput v-model="userForm.display_name" placeholder="选填" />
+              </ElFormItem>
+            </div>
+            <div class="form-two-col">
+              <ElFormItem label="密码" prop="password">
+                <ElInput
+                  v-model="userForm.password"
+                  type="password"
+                  show-password
+                  :placeholder="userEditingId ? '留空 = 保持现有密码' : '请输入初始密码'"
                 />
-              </ElSelect>
-            </ElFormItem>
-            <ElFormItem label="启用" prop="enabled">
-              <ElSwitch v-model="userForm.enabled" />
-            </ElFormItem>
+              </ElFormItem>
+              <ElFormItem label="部门" prop="department_id">
+                <ElSelect v-model="userForm.department_id as unknown as string" placeholder="选择部门" clearable style="width: 100%">
+                  <ElOption
+                    v-for="opt in departmentOptions.filter((o) => o.value !== null)"
+                    :key="String(opt.value)"
+                    :label="opt.label"
+                    :value="opt.value as unknown as string"
+                  />
+                </ElSelect>
+              </ElFormItem>
+            </div>
+            <div class="form-two-col">
+              <ElFormItem label="角色" prop="role_ids">
+                <ElSelect
+                  v-model="userForm.role_ids"
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  placeholder="选择角色"
+                  style="width: 100%"
+                >
+                  <ElOption
+                    v-for="r in roles"
+                    :key="r.id"
+                    :label="r.name"
+                    :value="r.id"
+                  />
+                </ElSelect>
+              </ElFormItem>
+              <ElFormItem v-if="userForm.username !== 'admin'" label="启用" prop="enabled">
+                <ElSwitch v-model="userForm.enabled" />
+              </ElFormItem>
+              <ElFormItem v-else label="启用">
+                <span class="admin-locked">🔒 admin 用户不可禁用</span>
+              </ElFormItem>
+            </div>
           </ElForm>
           <template #footer>
             <ElButton @click="userDialogVisible = false">取消</ElButton>
             <ElButton type="primary" @click="submitUser">保存</ElButton>
           </template>
         </ElDialog>
-      </ElTabPane>
-    </ElTabs>
+    </div>
 
     <!-- 审计日志 Drawer -->
     <ElDrawer
@@ -1270,6 +1315,18 @@ onMounted(async () => {
 .filter-row {
   margin-bottom: 4px;
 }
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.cell-ellipsis {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .iam-tabs :deep(.el-tabs__content) {
   padding-top: 8px;
 }
@@ -1302,6 +1359,25 @@ onMounted(async () => {
 }
 .user-name {
   font-weight: 500;
+}
+.admin-locked {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  cursor: not-allowed;
+}
+.form-two-col {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 4px;
+}
+.form-two-col .el-form-item {
+  flex: 1;
+  margin-bottom: 16px;
+}
+.form-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .role-chip-wrap {
   display: flex;

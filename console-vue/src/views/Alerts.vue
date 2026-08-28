@@ -65,6 +65,8 @@ import {
   CircleClose,
   CopyDocument,
   DataAnalysis,
+  DocumentCopy,
+  Filter,
   Refresh,
   Search,
   Setting,
@@ -329,6 +331,21 @@ interface CtxState {
 }
 const ctx = reactive<CtxState>({ visible: false, x: 0, y: 0, alert: null })
 
+// --- 关闭告警对话框 ---
+const closeDialogVisible = ref(false)
+const closeForm = reactive<{ reason: string; notify: boolean; alertId: string }>({
+  reason: '',
+  notify: true,
+  alertId: '',
+})
+const closeFormRef = ref<FormInstance | null>(null)
+const closeFormRules: FormRules = {
+  reason: [
+    { required: true, message: '请填写关闭原因', trigger: 'blur' },
+    { min: 2, max: 200, message: '长度 2 ~ 200', trigger: 'blur' },
+  ],
+}
+
 // --- 自动刷新 timer ---
 let autoTimer: number | null = null
 
@@ -417,6 +434,26 @@ function alertName(a: AlertEvent): string {
   )
 }
 
+// 排除不需要显示的 label keys（与老版一致）
+const EXCLUDED_LABEL_KEYS = new Set([
+  'alertname', 'severity', 'source', 'alertIp', 'ip', 'ipaddr',
+  'instance', 'host', 'hostname', '主机名',
+  'alertgroup', 'AlertGroup', 'alert_group',
+  'alertkey', 'AlertKey', 'alert_key',
+])
+
+function getLabelChips(a: any, max = 3): { key: string; value: string }[] {
+  const labels = a?.labels
+  if (!labels) return []
+  const chips: { key: string; value: string }[] = []
+  for (const [k, v] of Object.entries(labels)) {
+    if (EXCLUDED_LABEL_KEYS.has(k)) continue
+    if (chips.length >= max) break
+    chips.push({ key: k, value: String(v) })
+  }
+  return chips
+}
+
 function alertSummary(a: AlertEvent, max = 160): string {
   const aa = a as AlertEvent & LocalAlertEvent
   const s = aa.summary || aa.annotations?.summary || aa.description || aa.annotations?.description || ''
@@ -448,40 +485,59 @@ function alertHost(a: AlertEvent): string {
 
 function sourceText(a: AlertEvent): string {
   const aa = a as AlertEvent & LocalAlertEvent
+  // 优先使用顶层字段
   if (aa.source === 'ingress' || aa.ingress_name) return `接入·${aa.ingress_name || 'ingress'}`
   if (aa.source === 'rule' || aa.rule) return `规则·${aa.rule || 'rule'}`
   if (aa.source) return String(aa.source)
+  // 从 labels 中提取
+  const labelSource = aa.labels?.source
+  if (labelSource) {
+    if (labelSource.startsWith('ingress:')) return '接入·' + labelSource.slice(8)
+    if (labelSource.startsWith('rule:')) return '规则·' + labelSource.slice(5)
+    return labelSource
+  }
+  // 从 annotations 中提取
+  const annSource = aa.annotations?.source
+  if (annSource) return annSource
   return '未知'
 }
 
 // severity / status 映射
 type TagType = 'success' | 'warning' | 'info' | 'danger' | 'primary'
-function severityMeta(s: Severity): { text: string; type: TagType; color: string } {
+function severityMeta(s: Severity): { text: string; type: TagType; color: string; cls: string } {
   switch (s) {
+    case 'disaster':
+      return { text: '灾难', type: 'danger', color: 'var(--crit-soft)', cls: 'sev-disaster' }
     case 'critical':
-      return { text: '严重', type: 'danger', color: 'var(--crit)' }
+    case 'high':
+      return { text: '严重', type: 'danger', color: 'var(--crit-soft)', cls: 'sev-critical' }
     case 'error':
-      return { text: '错误', type: 'danger', color: 'var(--crit-soft)' }
+      return { text: '错误', type: 'danger', color: '#c4503c', cls: 'sev-error' }
+    case 'average':
+      return { text: '一般严重', type: 'warning', color: '#d4a017', cls: 'sev-average' }
     case 'warning':
-      return { text: '警告', type: 'warning', color: 'var(--warn)' }
+      return { text: '警告', type: 'warning', color: 'var(--warn-soft)', cls: 'sev-warning' }
+    case 'information':
     case 'info':
-      return { text: '信息', type: 'info', color: 'var(--info)' }
+      return { text: '信息', type: 'info', color: 'var(--info-soft)', cls: 'sev-info' }
+    case 'not_classified':
+      return { text: '未分类', type: 'info', color: 'var(--muted)', cls: 'sev-not_classified' }
     case 'ok':
-      return { text: '正常', type: 'success', color: 'var(--ok)' }
+      return { text: '正常', type: 'success', color: 'var(--ok-soft)', cls: 'sev-ok' }
     default:
-      return { text: String(s || '-'), type: 'primary', color: 'var(--primary)' }
+      return { text: String(s || '-'), type: 'primary', color: 'var(--muted)', cls: 'sev-default' }
   }
 }
-function statusMeta(s: AlertStatus): { text: string; type: TagType; color: string } {
+function statusMeta(s: AlertStatus): { text: string; type: TagType; color: string; cls: string } {
   switch (s) {
     case 'firing':
-      return { text: '触发', type: 'danger', color: 'var(--crit)' }
+      return { text: '告警中', type: 'danger', color: 'var(--crit-soft)', cls: 'badge-firing' }
     case 'pending':
-      return { text: '等待', type: 'warning', color: 'var(--warn)' }
+      return { text: '等待中', type: 'warning', color: 'var(--warn-soft)', cls: 'badge-pending' }
     case 'resolved':
-      return { text: '已恢复', type: 'success', color: 'var(--ok)' }
+      return { text: '已恢复', type: 'success', color: 'var(--ok-soft)', cls: 'badge-resolved' }
     default:
-      return { text: String(s || '-'), type: 'info', color: 'var(--info)' }
+      return { text: String(s || '-'), type: 'info', color: 'var(--info-soft)', cls: 'badge-default' }
   }
 }
 
@@ -770,7 +826,8 @@ function isResolved(a: AlertEvent): boolean {
 }
 
 async function doAck(id: string, note?: string): Promise<boolean> {
-  const r = await safeCall((ackAlert as unknown as (id: string, note?: string) => Promise<unknown>)(id, note))
+  const body = note ? { comment: note } : {}
+  const r = await safeCall(ackAlert(id, body))
   if (r !== null) {
     ElMessage.success('已接手告警')
     return true
@@ -785,13 +842,25 @@ async function doUnack(id: string): Promise<boolean> {
   }
   return false
 }
-async function doClose(id: string, reason: string): Promise<boolean> {
-  const r = await safeCall((closeAlert as unknown as (id: string, reason: string) => Promise<unknown>)(id, reason))
+async function doClose(id: string, reason: string, notify = true): Promise<boolean> {
+  const r = await safeCall(closeAlert(id, { comment: reason, notify }))
   if (r !== null) {
     ElMessage.success('告警已关闭')
     return true
   }
   return false
+}
+
+async function confirmClose(): Promise<void> {
+  try {
+    await closeFormRef.value?.validate()
+  } catch {
+    return
+  }
+  if (!closeForm.alertId) return
+  const ok = await doClose(closeForm.alertId, closeForm.reason, closeForm.notify)
+  closeDialogVisible.value = false
+  if (ok) await loadAlerts()
 }
 
 // =================================================================
@@ -839,9 +908,8 @@ async function confirmBatchAck(): Promise<void> {
   }
   const ids = batchIds.value
   if (ids.length === 0) return
-  const resp = await safeCall(
-    (batchAckAlerts as unknown as (ids: string[], note?: string) => Promise<BatchOpResp>)(ids, batchForm.note || undefined),
-  )
+  const body = batchForm.note ? { comment: batchForm.note } : {}
+  const resp = await safeCall(batchAckAlerts(ids, body))
   batchAckVisible.value = false
   if (!resp) return
   ElMessage.success(`批量接手：成功 ${resp.ok} 条 / 失败 ${resp.failed} 条`)
@@ -857,9 +925,7 @@ async function confirmBatchClose(): Promise<void> {
   }
   const ids = batchIds.value
   if (ids.length === 0) return
-  const resp = await safeCall(
-    (batchCloseAlerts as unknown as (ids: string[], reason: string) => Promise<BatchOpResp>)(ids, batchForm.reason),
-  )
+  const resp = await safeCall(batchCloseAlerts(ids, { comment: batchForm.reason, notify: true }))
   batchCloseVisible.value = false
   if (!resp) return
   ElMessage.success(`批量关闭：成功 ${resp.ok} 条 / 失败 ${resp.failed} 条`)
@@ -948,7 +1014,12 @@ function closeCtx(): void {
   ctx.visible = false
   ctx.alert = null
 }
-function onCtxClickOutside(): void {
+function onCtxClickOutside(e: MouseEvent): void {
+  const target = e.target as HTMLElement
+  // 如果点击的是菜单内部元素，不关闭
+  if (target.closest('.ctx-menu')) return
+  // 如果点击的是卡片或表格行（触发菜单的元素），不关闭（让 contextmenu 事件处理）
+  if (target.closest('.alert-card') || target.closest('.el-table__row')) return
   closeCtx()
 }
 onMounted(() => {
@@ -977,16 +1048,10 @@ async function ctxAction(act: string): Promise<void> {
       break
     case 'close':
       if (isResolved(a)) return
-      try {
-        const { value } = await ElMessageBox.prompt('请输入关闭原因', '关闭告警', {
-          confirmButtonText: '确认',
-          cancelButtonText: '取消',
-          inputValidator: (v) => (v && v.length >= 2 ? true : '长度至少 2 字符'),
-        })
-        if (await doClose(id, value)) await loadAlerts()
-      } catch {
-        /* noop */
-      }
+      closeForm.reason = ''
+      closeForm.notify = true
+      closeForm.alertId = id
+      closeDialogVisible.value = true
       break
     case 'silence':
     case 'maintenance':
@@ -1170,11 +1235,12 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
         <el-col :xs="12" :sm="8" :md="3">
           <el-select v-model="severity" size="small" placeholder="级别" style="width:100%">
             <el-option label="全部级别" value="all" />
-            <el-option label="严重 critical" value="critical" />
-            <el-option label="错误 error" value="error" />
-            <el-option label="警告 warning" value="warning" />
-            <el-option label="信息 info" value="info" />
-            <el-option label="正常 ok" value="ok" />
+            <el-option label="未分类" value="not_classified" />
+            <el-option label="信息" value="information" />
+            <el-option label="警告" value="warning" />
+            <el-option label="一般严重" value="average" />
+            <el-option label="严重" value="high" />
+            <el-option label="灾难" value="disaster" />
           </el-select>
         </el-col>
         <el-col :xs="12" :sm="8" :md="3">
@@ -1253,10 +1319,18 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
               <div class="alert-card-head">
                 <div class="alert-card-head-left">
                   <el-checkbox :model-value="isSelected(a)" @click.stop="toggleSelect(a, $event)" style="margin-right:8px;" />
-                  <el-tag size="small" :type="statusMeta((a as any).status).type" effect="light" style="margin-right:6px;">
+                  <el-tag
+                    size="small"
+                    :class="['alerts-tag', 'alerts-status', statusMeta((a as any).status).cls]"
+                    effect="plain"
+                  >
                     {{ statusMeta((a as any).status).text }}
                   </el-tag>
-                  <el-tag size="small" :type="severityMeta((a as any).severity).type" effect="dark">
+                  <el-tag
+                    size="small"
+                    :class="['alerts-tag', 'alerts-sev', severityMeta((a as any).severity).cls]"
+                    effect="plain"
+                  >
                     {{ severityMeta((a as any).severity).text }}
                   </el-tag>
                 </div>
@@ -1294,16 +1368,30 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
 
               <div class="ac-row alert-meta-row">
                 <span class="meta-cell"><el-icon :size="12"><Tickets /></el-icon> IP：{{ alertIp(a) || '-' }}</span>
-                <span class="meta-cell">主机：{{ alertHost(a) || '-' }}</span>
-                <span class="meta-cell">实例：{{ (a as any).labels?.instance || '-' }}</span>
-                <span class="meta-cell">来源：{{ sourceText(a) }}</span>
+                <span class="meta-cell" v-if="alertHost(a) && alertHost(a) !== alertIp(a)">主机：{{ alertHost(a) || '-' }}</span>
+                <span class="meta-cell" v-if="(a as any).labels?.instance">实例：{{ (a as any).labels?.instance || '-' }}</span>
+                <span class="meta-cell emph">⏱ {{ fmtDuration((a as any).starts_at || (a as any).created_at, (a as any).status === 'resolved' ? ((a as any).ends_at || (a as any).updated_at) : undefined) }}</span>
               </div>
               <div class="ac-row alert-meta-row">
-                <span class="meta-cell">开始：{{ fmtTime((a as any).starts_at || (a as any).created_at) }}</span>
-                <span class="meta-cell">结束：{{ fmtTime((a as any).ends_at) }}</span>
-                <span class="meta-cell">组：{{ (a as any).alert_group || (a as any).alertGroup || '-' }}</span>
-                <span class="meta-cell">键：{{ (a as any).alert_key || (a as any).alertKey || '-' }}</span>
-                <span class="meta-cell">末次评估：{{ fmtTime((a as any).evaluated_at || (a as any).last_eval_at || (a as any).updated_at) }}</span>
+                <span class="meta-cell">{{ sourceText(a) }}</span>
+                <span class="meta-cell">起 {{ fmtTime((a as any).starts_at || (a as any).created_at) }}</span>
+                <span class="meta-cell">末 {{ fmtTime((a as any).last_occurrence_at || (a as any).starts_at) }}</span>
+                <span class="meta-cell" v-if="(a as any).alert_group || (a as any).alertGroup">组 {{ (a as any).alert_group || (a as any).alertGroup || '-' }}</span>
+                <span class="meta-cell" v-if="(a as any).alert_key || (a as any).alertKey">键 {{ (a as any).alert_key || (a as any).alertKey || '-' }}</span>
+                <span class="meta-cell">评 {{ fmtTime((a as any).last_evaluated_at || (a as any).evaluated_at || '') }}</span>
+              </div>
+
+              <!-- Label chips -->
+              <div v-if="getLabelChips(a).length" class="alert-labels">
+                <el-tag
+                  v-for="lbl in getLabelChips(a)"
+                  :key="lbl.key"
+                  size="small"
+                  effect="plain"
+                  style="max-width:200px;overflow:hidden;text-overflow:ellipsis;"
+                >
+                  {{ lbl.key }}={{ lbl.value }}
+                </el-tag>
               </div>
 
               <div v-if="(a as any).note || (a as any).comment" class="ac-row" style="margin-top:6px;">
@@ -1346,41 +1434,57 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           stripe
           @row-click="(_, __, e) => { if (!e) return; }"
           @row-contextmenu="(row, e) => openCtx(e as unknown as MouseEvent, row as any)"
+          @contextmenu.prevent="(e: MouseEvent) => {
+            const tr = (e.target as HTMLElement).closest('.el-table__row')
+            if (tr) {
+              const rowIndex = Array.from(tr.parentNode?.children || []).indexOf(tr)
+              const row = pagedAlerts[rowIndex]
+              if (row) openCtx(e, row as any)
+            }
+          }"
           style="width:100%;"
           empty-text="暂无数据"
         >
           <el-table-column type="selection" width="44" />
           <el-table-column label="状态" width="90" fixed="left">
             <template #default="{ row }">
-              <el-tag :type="statusMeta((row as any).status).type" effect="light" size="small">
+              <el-tag
+                :class="['alerts-tag', 'alerts-status', statusMeta((row as any).status).cls]"
+                effect="plain"
+                size="small"
+              >
                 {{ statusMeta((row as any).status).text }}
               </el-tag>
             </template>
           </el-table-column>
           <el-table-column label="级别" width="90">
             <template #default="{ row }">
-              <el-tag :type="severityMeta((row as any).severity).type" effect="dark" size="small">
+              <el-tag
+                :class="['alerts-tag', 'alerts-sev', severityMeta((row as any).severity).cls]"
+                effect="plain"
+                size="small"
+              >
                 {{ severityMeta((row as any).severity).text }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="名称 + 实例" min-width="280">
+          <el-table-column label="告警名称" min-width="220">
             <template #default="{ row }">
               <div style="font-weight:600;color:var(--heading);cursor:pointer;" @click.stop="openDetail(row as any)">
                 {{ alertName(row as any) }}
               </div>
-              <div style="color:var(--muted);font-size:12px;margin-top:2px;">
-                {{ (row as any).labels?.instance || '-' }}
+              <div v-if="(row as any).labels?.instance" style="color:var(--muted);font-size:12px;margin-top:2px;">
+                实例：{{ (row as any).labels.instance }}
               </div>
-              <div v-if="(row as any).labels && Object.keys((row as any).labels).length" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">
+              <div v-if="getLabelChips(row).length" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;">
                 <el-tag
-                  v-for="(v, k) in (row as any).labels"
-                  :key="String(k)"
+                  v-for="lbl in getLabelChips(row)"
+                  :key="lbl.key"
                   size="small"
                   effect="plain"
                   style="max-width:200px;overflow:hidden;text-overflow:ellipsis;"
                 >
-                  {{ k }}={{ String(v) }}
+                  {{ lbl.key }}={{ lbl.value }}
                 </el-tag>
               </div>
             </template>
@@ -1425,8 +1529,8 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           <el-table-column label="开始" width="160">
             <template #default="{ row }">{{ fmtTime((row as any).starts_at || (row as any).created_at) }}</template>
           </el-table-column>
-          <el-table-column label="末次" width="160">
-            <template #default="{ row }">{{ fmtTime((row as any).evaluated_at || (row as any).last_eval_at || (row as any).updated_at) }}</template>
+          <el-table-column label="末次发生" width="160">
+            <template #default="{ row }">{{ fmtTime((row as any).last_occurrence_at || (row as any).starts_at || (row as any).created_at) }}</template>
           </el-table-column>
           <el-table-column label="组" min-width="140" show-overflow-tooltip>
             <template #default="{ row }">{{ (row as any).alert_group || (row as any).alertGroup || '-' }}</template>
@@ -1434,12 +1538,8 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           <el-table-column label="键" min-width="140" show-overflow-tooltip>
             <template #default="{ row }">{{ (row as any).alert_key || (row as any).alertKey || '-' }}</template>
           </el-table-column>
-          <el-table-column label="评估" width="100">
-            <template #default="{ row }">
-              <el-tag size="small" effect="plain" :type="(row as any).last_eval_at || (row as any).evaluated_at ? 'success' : 'info'">
-                {{ (row as any).last_eval_at || (row as any).evaluated_at ? '已评估' : '未知' }}
-              </el-tag>
-            </template>
+          <el-table-column label="最后评估" width="160">
+            <template #default="{ row }">{{ fmtTime((row as any).last_evaluated_at || (row as any).evaluated_at || '') }}</template>
           </el-table-column>
           <el-table-column label="接手" width="110">
             <template #default="{ row }">
@@ -1490,7 +1590,7 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
       </div>
     </el-card>
 
-    <!-- ===== 模拟右键菜单：固定位置 dropdown ===== -->
+    <!-- ===== 右键菜单 ===== -->
     <teleport to="body">
       <div
         v-if="ctx.visible && ctx.alert"
@@ -1498,56 +1598,49 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
         :style="{ left: ctx.x + 'px', top: ctx.y + 'px' }"
         @click.stop
       >
-        <el-dropdown v-model:visible="ctx.visible" trigger="click" @visible-change="(v) => { if (!v) closeCtx() }">
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click.stop="ctxAction('view')">
-                <el-icon style="margin-right:6px;"><View /></el-icon>查看详情
-              </el-dropdown-item>
-              <el-dropdown-item
-                :disabled="!auth.can('alerts:write')"
-                @click.stop="ctxAction('ack')"
-              >
-                <el-icon style="margin-right:6px;"><Check /></el-icon>
-                {{ isAcked(ctx.alert!) ? '取消接手' : '接手告警' }}
-              </el-dropdown-item>
-              <el-dropdown-item
-                :disabled="!auth.can('alerts:write') || isResolved(ctx.alert!)"
-                @click.stop="ctxAction('close')"
-              >
-                <el-icon style="margin-right:6px;"><CircleClose /></el-icon>关闭告警
-              </el-dropdown-item>
-              <el-dropdown-item disabled>
-                <el-popover placement="right" trigger="hover" :width="160">
-                  <template #reference>
-                    <span style="display:inline-flex;align-items:center;">
-                      <el-icon style="margin-right:6px;"><Switch /></el-icon>据此静默
-                    </span>
-                  </template>
-                  <span style="font-size:12px;">批次 2 实现</span>
-                </el-popover>
-              </el-dropdown-item>
-              <el-dropdown-item disabled>
-                <el-popover placement="right" trigger="hover" :width="160">
-                  <template #reference>
-                    <span style="display:inline-flex;align-items:center;">
-                      <el-icon style="margin-right:6px;"><Setting /></el-icon>据此开维护
-                    </span>
-                  </template>
-                  <span style="font-size:12px;">批次 2 实现</span>
-                </el-popover>
-              </el-dropdown-item>
-              <el-dropdown-item divided @click.stop="ctxAction('copy_desc')">
-                <el-icon style="margin-right:6px;"><CopyDocument /></el-icon>复制描述
-              </el-dropdown-item>
-              <el-dropdown-item @click.stop="ctxAction('copy_ip')">复制 IP</el-dropdown-item>
-              <el-dropdown-item @click.stop="ctxAction('copy_fp')">复制指纹</el-dropdown-item>
-              <el-dropdown-item divided @click.stop="ctxAction('filter_name')">按名称筛选</el-dropdown-item>
-              <el-dropdown-item @click.stop="ctxAction('filter_ip')">按 IP 筛选</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-          <span style="display:none;" />
-        </el-dropdown>
+        <ul class="ctx-menu-list">
+          <li class="ctx-menu-item" @click.stop="ctxAction('view')">
+            <el-icon><View /></el-icon><span>查看详情</span>
+          </li>
+          <li
+            class="ctx-menu-item"
+            :class="{ 'is-disabled': !auth.can('alerts:write') }"
+            @click.stop="auth.can('alerts:write') && ctxAction('ack')"
+          >
+            <el-icon><Check /></el-icon>
+            <span>{{ isAcked(ctx.alert!) ? '取消接手' : '确认接手' }}</span>
+          </li>
+          <li
+            class="ctx-menu-item"
+            :class="{ 'is-disabled': !auth.can('alerts:write') || isResolved(ctx.alert!) }"
+            @click.stop="(auth.can('alerts:write') && !isResolved(ctx.alert!)) && ctxAction('close')"
+          >
+            <el-icon><CircleClose /></el-icon><span>关闭告警</span>
+          </li>
+          <li class="ctx-menu-item is-disabled">
+            <el-icon><Switch /></el-icon><span>据此静默</span>
+          </li>
+          <li class="ctx-menu-item is-disabled">
+            <el-icon><Setting /></el-icon><span>据此开维护</span>
+          </li>
+          <li class="ctx-menu-divider"></li>
+          <li class="ctx-menu-item" @click.stop="ctxAction('copy_desc')">
+            <el-icon><CopyDocument /></el-icon><span>复制告警描述</span>
+          </li>
+          <li class="ctx-menu-item" @click.stop="ctxAction('copy_ip')">
+            <span class="ctx-menu-icon-inline">IP</span><span>复制告警 IP</span>
+          </li>
+          <li class="ctx-menu-item" @click.stop="ctxAction('copy_fp')">
+            <el-icon><DocumentCopy /></el-icon><span>复制告警标识</span>
+          </li>
+          <li class="ctx-menu-divider"></li>
+          <li class="ctx-menu-item" @click.stop="ctxAction('filter_name')">
+            <el-icon><Filter /></el-icon><span>按此告警名称筛选</span>
+          </li>
+          <li class="ctx-menu-item" @click.stop="ctxAction('filter_ip')">
+            <span class="ctx-menu-icon-inline">IP</span><span>按此 IP 筛选</span>
+          </li>
+        </ul>
       </div>
     </teleport>
 
@@ -1563,10 +1656,18 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
       <template v-if="detailAlert">
         <div class="drawer-header">
           <div class="drawer-title">
-            <el-tag :type="statusMeta((detailAlert as any).status).type" effect="dark" style="margin-right:6px;">
+            <el-tag
+              :class="['alerts-tag', 'alerts-status', statusMeta((detailAlert as any).status).cls]"
+              effect="plain"
+              style="margin-right:6px;"
+            >
               {{ statusMeta((detailAlert as any).status).text }}
             </el-tag>
-            <el-tag :type="severityMeta((detailAlert as any).severity).type" effect="dark" style="margin-right:6px;">
+            <el-tag
+              :class="['alerts-tag', 'alerts-sev', severityMeta((detailAlert as any).severity).cls]"
+              effect="plain"
+              style="margin-right:6px;"
+            >
               {{ severityMeta((detailAlert as any).severity).text }}
             </el-tag>
             <span style="font-size:16px;font-weight:700;color:var(--heading);">{{ alertName(detailAlert) }}</span>
@@ -1598,10 +1699,20 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
                   </el-button>
                 </el-descriptions-item>
                 <el-descriptions-item label="状态">
-                  <el-tag :type="statusMeta((detailAlert as any).status).type">{{ statusMeta((detailAlert as any).status).text }}</el-tag>
+                  <el-tag
+                    :class="['alerts-tag', 'alerts-status', statusMeta((detailAlert as any).status).cls]"
+                    effect="plain"
+                  >
+                    {{ statusMeta((detailAlert as any).status).text }}
+                  </el-tag>
                 </el-descriptions-item>
                 <el-descriptions-item label="严重度">
-                  <el-tag :type="severityMeta((detailAlert as any).severity).type" effect="dark">{{ severityMeta((detailAlert as any).severity).text }}</el-tag>
+                  <el-tag
+                    :class="['alerts-tag', 'alerts-sev', severityMeta((detailAlert as any).severity).cls]"
+                    effect="plain"
+                  >
+                    {{ severityMeta((detailAlert as any).severity).text }}
+                  </el-tag>
                 </el-descriptions-item>
                 <el-descriptions-item label="开始时间">{{ fmtTime((detailAlert as any).starts_at || (detailAlert as any).created_at) }}</el-descriptions-item>
                 <el-descriptions-item label="结束时间">{{ fmtTime((detailAlert as any).ends_at) }}</el-descriptions-item>
@@ -1759,7 +1870,7 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <template v-if="!isResolved(detailAlert) && auth.can('alerts:write')">
               <el-button v-if="!isAcked(detailAlert)" type="warning" @click="async () => { const ok = await doAck((detailAlert as any).id); if (ok) { closeCtx(); await openDetail((detailAlert as any).id); await loadAlerts(); } }">
-                <el-icon style="margin-right:4px;"><Check /></el-icon>接手告警
+                <el-icon style="margin-right:4px;"><Check /></el-icon>确认接手
               </el-button>
               <el-button v-else type="info" @click="async () => { const ok = await doUnack((detailAlert as any).id); if (ok) { await openDetail((detailAlert as any).id); await loadAlerts(); } }">
                 取消接手
@@ -1865,6 +1976,38 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
       <template #footer>
         <el-button @click="batchCloseVisible = false">取消</el-button>
         <el-button type="danger" @click="confirmBatchClose">确认关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ===== 关闭告警 dialog ===== -->
+    <el-dialog v-model="closeDialogVisible" title="关闭告警" width="480px" destroy-on-close>
+      <div class="close-alert-desc">
+        人工强制恢复（适用于无 recover 的来源）。同指纹再次触发会作为新问题。
+      </div>
+      <el-form
+        ref="closeFormRef"
+        :model="closeForm"
+        :rules="closeFormRules"
+        label-position="top"
+        size="default"
+      >
+        <el-form-item label="关闭原因（必填）" prop="reason">
+          <el-input
+            v-model="closeForm.reason"
+            type="textarea"
+            :rows="4"
+            maxlength="200"
+            show-word-limit
+            placeholder="例如：误报 / 已线下处理 / 设备更换..."
+          />
+        </el-form-item>
+        <el-form-item label-width="0" style="margin-bottom:0;">
+          <el-checkbox v-model="closeForm.notify">发送恢复通知到绑定渠道</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="closeDialogVisible = false">取消</el-button>
+        <el-button type="danger" @click="confirmClose">确认关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -2008,6 +2151,16 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.meta-cell.emph {
+  color: var(--heading);
+  font-weight: 500;
+}
+.alert-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
 .contacts-row { margin-top: 4px; }
 .contact-chip { cursor: help; }
 .mw-badge { display: inline-block; }
@@ -2028,10 +2181,55 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
   background: var(--panel-surface);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 2px;
+  padding: 4px;
   box-shadow: 0 8px 24px -8px rgba(0,0,0,0.25);
+  user-select: none;
 }
-.ctx-menu .el-dropdown-menu { border: 0; padding: 2px; background: transparent; box-shadow: none; }
+.ctx-menu-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ctx-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+.ctx-menu-item:hover:not(.is-disabled) {
+  background: var(--overlay-mid);
+  color: var(--heading);
+}
+.ctx-menu-item.is-disabled {
+  color: var(--muted);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ctx-menu-item .el-icon {
+  font-size: 14px;
+  width: 14px;
+  text-align: center;
+}
+.ctx-menu-icon-inline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  width: 14px;
+  color: var(--muted);
+}
+.ctx-menu-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 0;
+}
 
 /* Drawer */
 .alert-drawer :deep(.el-drawer__body) {
@@ -2083,5 +2281,89 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
 }
 .code-block.error {
   color: var(--crit);
+}
+
+/* ===== 关闭告警对话框 ===== */
+.close-alert-desc {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+}
+
+/* ===== 状态标签（半透明背景+边框，与老版对齐） ===== */
+.alerts-tag {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 20px;
+  border: 1px solid transparent;
+  font-weight: 600;
+  background: transparent;
+}
+.alerts-tag.el-tag {
+  --el-tag-bg-color: transparent;
+  --el-tag-border-color: transparent;
+  --el-tag-text-color: inherit;
+  height: 20px;
+}
+
+/* 状态标签样式 */
+.alerts-status.badge-firing {
+  background: rgba(227, 93, 106, 0.14);
+  border-color: rgba(227, 93, 106, 0.35);
+  color: var(--crit-soft);
+}
+.alerts-status.badge-pending {
+  background: rgba(212, 160, 23, 0.14);
+  border-color: rgba(212, 160, 23, 0.35);
+  color: var(--warn-soft);
+}
+.alerts-status.badge-resolved {
+  background: rgba(92, 184, 122, 0.14);
+  border-color: rgba(92, 184, 122, 0.35);
+  color: var(--ok-soft);
+}
+.alerts-status.badge-default {
+  background: var(--overlay-soft);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+/* 严重度标签样式（纯文字，无背景，与老版对齐） */
+.alerts-sev {
+  background: transparent;
+  border: none;
+  padding: 0 4px;
+}
+.alerts-sev.sev-disaster,
+.alerts-sev.sev-critical {
+  color: var(--crit-soft);
+}
+.alerts-sev.sev-error {
+  color: #c4503c;
+}
+.alerts-sev.sev-high {
+  color: #e07a4a;
+}
+.alerts-sev.sev-average {
+  color: #d4a017;
+}
+.alerts-sev.sev-warning {
+  color: var(--warn-soft);
+}
+.alerts-sev.sev-info,
+.alerts-sev.sev-information {
+  color: var(--info-soft);
+}
+.alerts-sev.sev-not_classified {
+  color: var(--muted);
+}
+.alerts-sev.sev-ok {
+  color: var(--ok-soft);
+}
+.alerts-sev.sev-default {
+  color: var(--muted);
 }
 </style>

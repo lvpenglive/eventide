@@ -162,7 +162,7 @@ const _shimKafka: KafkaApiShim = {
   deleteKafkaTopic: () => Promise.reject(_unimpl('deleteKafkaTopic')),
 }
 
-// 优先 @/api/ingress（旧 kafka 函数），其次 @/api/kafka（B4 新版）
+// 优先 @/api/kafka（B4 新版），其次 @/api/ingress（旧 kafka 函数）
 // @ts-ignore 模块未创建时忽略
 import * as _rawIngress from '@/api/ingress'
 // @ts-ignore 模块未创建时忽略
@@ -183,7 +183,7 @@ function _bindApi<S extends object>(shim: S, ...sources: Record<string, unknown>
   return out
 }
 
-const _api = _bindApi<KafkaApiShim>(_shimKafka, _kafka, _ingress)
+const _api = _bindApi<KafkaApiShim>(_shimKafka, _ingress, _kafka)
 const {
   probeKafkaCluster,
   listKafkaGroups,
@@ -550,7 +550,7 @@ onMounted(() => {
             stripe
             height="320"
             v-loading="connecting"
-            empty-text="未连接或无 Topic"
+            empty-text="暂无 Topic"
           >
             <el-table-column label="名称" min-width="160">
               <template #default="{ row }">

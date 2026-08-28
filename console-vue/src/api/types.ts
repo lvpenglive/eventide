@@ -44,12 +44,20 @@ export interface ChangePasswordResp {
 }
 
 export interface AlertRecentItem {
+  id?: string
   fingerprint: string
-  summary: string
+  summary?: string
+  description?: string
   severity: 'critical' | 'warning' | 'info' | 'error' | 'ok' | string
   status: 'firing' | 'pending' | 'resolved' | string
-  created_at: string
-  datasource: string
+  created_at?: string
+  starts_at?: string
+  last_occurrence_at?: string
+  pending_since?: string
+  datasource?: string
+  annotations?: Record<string, string>
+  labels?: Record<string, string>
+  rule_id?: string
 }
 
 export interface IngressBrief {
@@ -69,6 +77,7 @@ export interface OverviewResp {
   health: 'ok' | 'degraded' | 'error' | string
   datasources: number
   rules: number
+  enabled_rules?: number
   channels: number
   ingress_routes: number
   alerts_total: number
@@ -609,7 +618,12 @@ export interface AlertHistorySettingsUpdate {
 }
 
 export interface TrapTokenSettingsView {
+  configured: boolean
+  token_preview?: string
+  token_length?: number
+  source?: string
   token?: string
+  redis_synced?: boolean
   token_set: boolean
   token_prefix?: string
   regenerate?: boolean
@@ -627,6 +641,8 @@ export interface StormSettingsView {
   group_by?: string[]
   action?: string
   silence_seconds?: number
+  source?: string
+  reset?: boolean
   [k: string]: unknown
 }
 
@@ -639,6 +655,7 @@ export type StormSettingsUpdate = Partial<StormSettingsView>
  */
 export interface UiBetaSettingsView {
   enabled: boolean
+  v2_available?: boolean
 }
 /** 别名导出（同名 = 兼容） */
 export type B3UiBetaSettingsView = UiBetaSettingsView
@@ -925,3 +942,36 @@ export interface B4TrapPolicyImportResult {
 }
 
 export type B4PolicyImportMode = 'merge' | 'replace' | 'keep'
+
+// ================================================================
+// License 许可证管理
+// ================================================================
+
+export type LicenseKind = 'trial' | 'commercial' | 'perpetual'
+
+export interface LicenseSnapshot {
+  kind: LicenseKind
+  writable: boolean
+  install_id: string
+  customer?: string
+  edition?: string
+  expires_at?: string
+  days_left?: number
+  trial_started_at?: string
+  reason?: string
+  has_license_token: boolean
+}
+
+export interface LicenseRequest {
+  install_id: string
+  customer?: string
+  generated_at: string
+  product: string
+  version: string
+  signature?: string
+}
+
+export interface LicenseImportBody {
+  token?: string
+  content?: string
+}
