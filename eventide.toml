@@ -2,6 +2,7 @@ listen = "0.0.0.0:8080"
 mysql_url = "mysql://root:886363@120.26.67.180:3306/eventide"
 redis_url = "redis://123.207.158.181:6379/"
 static_dir = "static"
+v2_static_dir = "console-vue/dist"
 scheduler_tick_seconds = 5
 
 [auth]

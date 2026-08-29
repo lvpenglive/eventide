@@ -1,5 +1,5 @@
-<script setup lang="ts">
-import { computed, markRaw, onMounted, reactive, ref } from 'vue'
+﻿<script setup lang="ts">
+import { computed, markRaw, onMounted, reactive, ref, watch } from 'vue'
 import {
   ElButton,
   ElCard,
@@ -47,8 +47,10 @@ interface MibModuleItem {
   status?: string
   updated_at?: string
   error?: string
-  notifications_count?: number
-  objects_count?: number
+  /** MibEntry.notification_count (后端实际字段名, 单数) */
+  notification_count?: number
+  /** MibEntry.node_count (后端实际字段名, 单数) */
+  node_count?: number
 }
 
 interface MibModuleList {
@@ -182,6 +184,21 @@ function errMsg(e: unknown, fb: string): string {
   }
   return fb
 }
+
+/** 当前选中的 MIB 模块 */
+const selectedModule = computed<MibModuleItem | null>(() =>
+  modules.value.find((m) => m.id === selectedModuleId.value) || null,
+)
+
+/** 所有模块的整体汇总 */
+const moduleSummary = computed(() => {
+  const total = modules.value.length
+  const parsed = modules.value.filter((m) => !m.error).length
+  const failed = total - parsed
+  const totalNotifs = modules.value.reduce((s, m) => s + (m.notification_count ?? 0), 0)
+  const totalObjects = modules.value.reduce((s, m) => s + (m.node_count ?? 0), 0)
+  return { total, parsed, failed, totalNotifs, totalObjects }
+})
 
 function asMod(r: unknown): MibModuleItem { return r as MibModuleItem }
 function asNotif(r: unknown): MibNotifRow { return r as MibNotifRow }
@@ -339,18 +356,47 @@ async function loadNodeChildren(node: TreeRow, cb?: (children: TreeRow[]) => voi
   }
 }
 
-/** 树引用 & 懒加载子节点 (通过 node-expand 事件触发) */
+/** 树引用 */
 const treeRef = ref<any>(null)
 
-async function onTreeExpand(row: TreeRow) {
-  // 非懒加载节点: children 已在 resetTreeForModule 或之前的 loadNodeChildren 中填充
-  if (!row.hasChildren) return
-  // 已经加载过的节点不再请求
-  if (row.loaded && row.children && row.children.length > 0) return
-  // 通过 loadNodeChildren 加载, 其内部已处理缓存和错误
-  await loadNodeChildren(row)
-  // 强制 ElTree 更新视图 (通过重新设置 data 触发响应式)
-  treeRows.value = [...treeRows.value]
+/**
+ * el-tree lazy 模式回调
+ * 签名: (elTreeNode, resolve) => void
+ *   resolve(children[]): 把 children 交给 el-tree 渲染
+ * 根节点在 resetTreeForModule 里已经预加载并写入 childrenCache,
+ * 所以这里优先查缓存, 避免重复请求.
+ */
+function onLazyLoadChildren(elTreeNode: any, resolve: (data: any[]) => void) {
+  const row = elTreeNode.data as TreeRow
+  // 防御: moduleId 为空直接 resolve 空数组, 避免拼出 /api/mibs//children
+  if (!row.moduleId) {
+    resolve([])
+    return
+  }
+  const cacheKey = `${row.moduleId}|${row.oid}`
+  // 命中缓存 (包括 resetTreeForModule 里预加载的根节点)
+  if (childrenCache.has(cacheKey)) {
+    resolve(childrenCache.get(cacheKey)!)
+    return
+  }
+  // 没缓存就异步加载
+  loadingTree.value = true
+  mibsApi
+    .listMibChildren(row.moduleId, row.oid)
+    .then((res) => {
+      const rows: TreeRow[] = (res.children || []).map((c) =>
+        mkTreeRow(row.moduleId, c.oid, c.name, c.has_children, !!c.is_notification)
+      )
+      childrenCache.set(cacheKey, rows)
+      resolve(rows)
+    })
+    .catch((e) => {
+      ElMessage.error(errMsg(e, '加载 OID 子节点失败'))
+      resolve([])
+    })
+    .finally(() => {
+      loadingTree.value = false
+    })
 }
 
 function treeFilterNode(_value: unknown, data: unknown): boolean {
@@ -359,6 +405,48 @@ function treeFilterNode(_value: unknown, data: unknown): boolean {
   if (!q) return true
   return d.label.toLowerCase().includes(q) || d.oid.toLowerCase().includes(q)
 }
+
+/**
+ * 搜索词变化时, 手动触发 el-tree 的 filter.
+ * Element Plus lazy 模式下 filter-node-method 不会自动响应 v-model,
+ * 必须显式调用 treeRef.filter().
+ * 同时清空搜索时关闭所有展开, 方便下次浏览.
+ */
+watch(treeSearch, (q) => {
+  const tree = treeRef.value
+  if (!tree) return
+  if (!q.trim()) {
+    tree.filter('')
+    tree.store?.getAllNodes().forEach((n: any) => (n.expanded = false))
+    return
+  }
+  tree.filter(q.trim())
+  // 展开所有匹配节点的父链路 —— Element Plus lazy 模式下 filter 不会自动展开.
+  // 遍历当前 store 里已加载的节点, 匹配的那条向上追溯父节点并标记 expanded.
+  const store = tree.store
+  if (!store) return
+  const matchedKeys = new Set<string>()
+  store.getAllNodes().forEach((n: any) => {
+    const d = n.data as TreeRow
+    if (
+      d &&
+      (d.label.toLowerCase().includes(q.toLowerCase()) || d.oid.toLowerCase().includes(q.toLowerCase()))
+    ) {
+      matchedKeys.add(n.id)
+    }
+  })
+  store.getAllNodes().forEach((n: any) => {
+    if (!n.parent || n.parent === store.root) return
+    let cur = n
+    while (cur && cur.parent && cur.parent !== store.root) {
+      if (matchedKeys.has(cur.id)) {
+        cur.parent.expanded = true
+        break
+      }
+      cur = cur.parent
+    }
+  })
+})
 
 function treeIsLeaf(data: unknown): boolean {
   return !(data as TreeRow).hasChildren
@@ -570,14 +658,14 @@ onMounted(() => { void loadModules() })
 </script>
 
 <template>
-  <div class="page-wrap" style="padding: 16px 20px;">
+  <div class="mib-page">
     <!-- 顶部标题 & 动作 -->
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; flex-wrap: wrap; gap: 8px;">
-      <h2 style="font-size: 20px; margin: 0; color: var(--heading);">
+    <div class="mib-header">
+      <h2>
         MIB 库
-        <span style="font-size:13px;color:var(--el-text-color-secondary);margin-left:8px">OID 树浏览器 · Trap 策略导出与应用 · SNMP Get</span>
+        <span class="sub">OID 树浏览器 · Trap 策略导出与应用 · SNMP Get</span>
       </h2>
-      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+      <div class="actions">
         <el-button :icon="Refresh" @click="loadModules(true)">重新加载</el-button>
         <el-button :icon="Download" type="primary" plain @click="handleExport('all')">导出全部策略</el-button>
         <el-upload
@@ -588,8 +676,7 @@ onMounted(() => { void loadModules() })
           :multiple="true"
           :before-upload="beforeMibUpload"
           :http-request="customMibRequest"
-          drag
-          style="display: inline-block;"
+          class="mib-upload"
         >
           <el-button type="success" :icon="UploadFilled" :loading="uploadLoading">上传 MIB</el-button>
         </el-upload>
@@ -600,11 +687,22 @@ onMounted(() => { void loadModules() })
     <el-row :gutter="14">
       <!-- a) 左：MIB 模块列表 -->
       <el-col :span="8">
-        <el-card shadow="never" style="border: 1px solid var(--line); background: var(--panel-bg, var(--panel)); margin-bottom: 14px; height: 560px; display: flex; flex-direction: column;">
+        <el-card shadow="never" class="mib-card mib-tall-card mib-modules-card">
           <template #header>
-            <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div class="mib-card-header">
               <strong>MIB 模块</strong>
-              <el-tag size="small" type="info">{{ modules.length }}</el-tag>
+              <div class="mib-module-summary">
+                <el-tag size="small" type="success" effect="plain" v-if="moduleSummary.parsed">
+                  已解析 {{ moduleSummary.parsed }}
+                </el-tag>
+                <el-tag size="small" type="danger" effect="plain" v-if="moduleSummary.failed">
+                  失败 {{ moduleSummary.failed }}
+                </el-tag>
+                <span class="sep">·</span>
+                <span class="muted">Trap {{ moduleSummary.totalNotifs }}</span>
+                <span class="sep">·</span>
+                <span class="muted">节点 {{ moduleSummary.totalObjects }}</span>
+              </div>
             </div>
           </template>
           <el-input
@@ -612,14 +710,15 @@ onMounted(() => { void loadModules() })
             placeholder="搜索 名称 / ID / 文件名"
             size="small"
             clearable
-            style="margin-bottom: 8px;"
+            class="mib-modules-search"
           >
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
-          <div v-if="mibListMeta.load_error" style="margin-bottom: 8px;">
+          <div v-if="mibListMeta.load_error" class="mib-modules-search">
             <el-tag type="danger" effect="plain" size="small">加载错误: {{ mibListMeta.load_error }}</el-tag>
           </div>
           <el-table
+            class="mib-modules-table"
             :data="filteredModules as unknown as MibModuleItem[]"
             size="small"
             stripe
@@ -631,7 +730,7 @@ onMounted(() => { void loadModules() })
           >
             <el-table-column label="名称" min-width="130">
               <template #default="{ row }">
-                <div style="display: flex; align-items: center; gap: 6px;">
+                <div class="mib-cell-row">
                   <el-tag
                     v-if="asMod(row).error"
                     type="danger"
@@ -644,20 +743,28 @@ onMounted(() => { void loadModules() })
             </el-table-column>
             <el-table-column label="ID" width="90">
               <template #default="{ row }">
-                <span style="font-family: var(--font-mono); font-size: 12.5px;">{{ asMod(row).id }}</span>
+                <span class="mono-id">{{ asMod(row).id }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="OID 根" min-width="120">
+            <el-table-column label="OID 根" min-width="110">
               <template #default="{ row }">
-                <span style="font-family: var(--font-mono); font-size: 12.5px;">{{ asMod(row).module_oid || '—' }}</span>
+                <span class="mono-oid">{{ asMod(row).module_oid || '—' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="错误" width="90">
+            <el-table-column label="统计" width="100" align="center">
+              <template #default="{ row }">
+                <div class="mib-stat-cell">
+                  <span class="mib-stat-chip" title="Trap 通知定义数">T {{ asMod(row).notification_count ?? 0 }}</span>
+                  <span class="mib-stat-chip" title="MIB 对象节点数">N {{ asMod(row).node_count ?? 0 }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="错误" width="72" align="center">
               <template #default="{ row }">
                 <el-tooltip v-if="asMod(row).error" :content="asMod(row).error" placement="top">
                   <el-tag type="danger" effect="plain" size="small">错误</el-tag>
                 </el-tooltip>
-                <span v-else style="color: var(--muted);">-</span>
+                <span v-else class="muted">-</span>
               </template>
             </el-table-column>
           </el-table>
@@ -669,9 +776,9 @@ onMounted(() => { void loadModules() })
         <el-row :gutter="14">
           <!-- OID 树 -->
           <el-col :span="10">
-            <el-card shadow="never" style="border: 1px solid var(--line); background: var(--panel-bg, var(--panel)); margin-bottom: 14px; height: 560px; display: flex; flex-direction: column;">
+            <el-card shadow="never" class="mib-card mib-tall-card mib-tree-card">
               <template #header>
-                <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div class="mib-card-header">
                   <strong>OID 树</strong>
                   <el-tag size="small" type="info" effect="plain">{{ selectedModuleId || '未选模块' }}</el-tag>
                 </div>
@@ -681,7 +788,7 @@ onMounted(() => { void loadModules() })
                 placeholder="搜索 OID / 名称（前端过滤可见节点）"
                 size="small"
                 clearable
-                style="margin-bottom: 8px;"
+                class="mib-tree-search"
               >
                 <template #prefix><el-icon><Search /></el-icon></template>
               </el-input>
@@ -689,13 +796,15 @@ onMounted(() => { void loadModules() })
                 v-if="!selectedModuleId"
                 description="请先选择左侧 MIB 模块"
                 :image-size="60"
-                style="flex: 1; display: flex; align-items: center; justify-content: center;"
+                class="mib-empty-flex"
               />
               <el-tree
                 v-else
                 ref="treeRef"
                 :data="treeRows"
                 :props="{ label: 'label', children: 'children', isLeaf: treeIsLeaf }"
+                :lazy="true"
+                :load="onLazyLoadChildren"
                 node-key="id"
                 :expand-on-click-node="false"
                 :current-node-key="selectedNodeKey"
@@ -703,16 +812,11 @@ onMounted(() => { void loadModules() })
                 :filter-node-method="treeFilterNode"
                 v-loading="loadingTree"
                 @node-click="(d) => onTreeSelect(d as TreeRow)"
-                @node-expand="(d) => onTreeExpand(d as TreeRow)"
-                style="flex: 1; overflow: auto;"
                 height="450"
               >
                 <template #default="{ node, data }">
-                  <div style="display: flex; align-items: center; gap: 6px; width: 100%;">
-                    <el-icon size="12" style="color: var(--muted);">
-                      <component :is="node.expanded ? CaretBottom : CaretRight" v-if="data.hasChildren" />
-                    </el-icon>
-                    <span style="font-family: var(--font-mono); font-size: 12.5px;">{{ data.label }}</span>
+                  <div class="tree-node-meta">
+                    <span class="tree-node-label">{{ data.label }}</span>
                     <el-tag v-if="data.isNotification" type="warning" size="small" effect="plain">Trap</el-tag>
                   </div>
                 </template>
@@ -722,7 +826,7 @@ onMounted(() => { void loadModules() })
 
           <!-- 节点详情 + SNMP Get -->
           <el-col :span="14">
-            <el-card shadow="never" style="border: 1px solid var(--line); background: var(--panel-bg, var(--panel)); margin-bottom: 14px; height: 560px; display: flex; flex-direction: column;">
+            <el-card shadow="never" class="mib-card mib-tall-card mib-detail-card">
               <template #header>
                 <strong>节点详情</strong>
               </template>
@@ -731,54 +835,55 @@ onMounted(() => { void loadModules() })
                 description="请在左侧点击 OID 树节点"
                 :image-size="60"
               />
-              <div v-else style="flex: 1; overflow: auto;" v-loading="loadingNodeDetail">
+              <div v-else class="mib-detail-scroll" v-loading="loadingNodeDetail">
                 <template v-if="nodeDetail">
-                  <h4 style="margin: 0 0 8px; color: var(--heading); font-family: var(--font-mono);">
+                  <h4 class="detail-title">
                     {{ nodeDetail.name }}
-                    <el-tag v-if="nodeDetail.is_notification" type="warning" size="small" style="margin-left: 6px;">Trap</el-tag>
+                    <el-tag v-if="nodeDetail.is_notification" type="warning" size="small">Trap</el-tag>
                   </h4>
-                  <el-descriptions :column="1" size="small" border style="margin-bottom: 10px;">
+                  <el-descriptions :column="1" size="small" border>
                     <el-descriptions-item label="OID">
-                      <span style="font-family: var(--font-mono); font-size: 12.5px;">{{ nodeDetail.oid }}</span>
+                      <span class="mono-oid">{{ nodeDetail.oid }}</span>
                     </el-descriptions-item>
                     <el-descriptions-item label="类型">{{ nodeDetail.kind || nodeDetail.type || '—' }}</el-descriptions-item>
                     <el-descriptions-item label="状态">{{ nodeDetail.status || '—' }}</el-descriptions-item>
                     <el-descriptions-item label="描述">
-                      <span style="white-space: pre-wrap;">{{ nodeDetail.description || '—' }}</span>
+                      <span class="detail-desc">{{ nodeDetail.description || '—' }}</span>
                     </el-descriptions-item>
                     <el-descriptions-item label="OBJECTS">
                       <template v-if="nodeDetail.objects && nodeDetail.objects.length">
-                        <el-tag v-for="o in nodeDetail.objects" :key="o" size="small" effect="plain" style="margin: 2px;">{{ o }}</el-tag>
+                        <div class="detail-objects">
+                          <el-tag v-for="o in nodeDetail.objects" :key="o" size="small" effect="plain">{{ o }}</el-tag>
+                        </div>
                       </template>
-                      <span v-else style="color: var(--muted);">—</span>
+                      <span v-else class="muted">—</span>
                     </el-descriptions-item>
                     <el-descriptions-item v-if="nodeDetail.values && Object.keys(nodeDetail.values).length" label="值">
-                      <pre style="margin: 0; font-family: var(--font-mono); font-size: 12.5px;">{{ JSON.stringify(nodeDetail.values, null, 2) }}</pre>
+                      <pre class="detail-values">{{ JSON.stringify(nodeDetail.values, null, 2) }}</pre>
                     </el-descriptions-item>
                   </el-descriptions>
                 </template>
 
-                <el-divider content-position="left">SNMP Get</el-divider>
-                <el-form :model="snmpForm" size="small" label-width="90px" inline style="flex-wrap: wrap;">
-                  <el-form-item label="目标 IP">
-                    <el-input v-model="snmpForm.host" style="width: 150px;" />
-                  </el-form-item>
-                  <el-form-item label="Port">
-                    <el-input-number v-model="snmpForm.port" :min="1" :max="65535" style="width: 110px;" />
-                  </el-form-item>
-                  <el-form-item label="Community">
-                    <el-input v-model="snmpForm.community" style="width: 140px;" />
-                  </el-form-item>
-                  <el-form-item>
-                    <el-button type="primary" :loading="snmpLoading" @click="handleSnmpGet()">
-                      Get
-                    </el-button>
-                  </el-form-item>
-                </el-form>
-                <pre
-                  v-if="snmpResult"
-                  style="margin-top: 4px; background: var(--inset-bg); padding: 10px; border-radius: 6px; font-family: var(--font-mono); font-size: 12.5px; max-height: 200px; overflow: auto;"
-                >{{ JSON.stringify(snmpResult, null, 2) }}</pre>
+                <div class="mib-snmp-section">
+                  <el-divider content-position="left">SNMP Get</el-divider>
+                  <el-form :model="snmpForm" size="small" label-width="90px" inline>
+                    <el-form-item label="目标 IP">
+                      <el-input v-model="snmpForm.host" class="mib-snmp-host" />
+                    </el-form-item>
+                    <el-form-item label="Port">
+                      <el-input-number v-model="snmpForm.port" :min="1" :max="65535" class="mib-snmp-port" />
+                    </el-form-item>
+                    <el-form-item label="Community">
+                      <el-input v-model="snmpForm.community" class="mib-snmp-comm" />
+                    </el-form-item>
+                    <el-form-item>
+                      <el-button type="primary" :loading="snmpLoading" @click="handleSnmpGet()">
+                        Get
+                      </el-button>
+                    </el-form-item>
+                  </el-form>
+                  <pre v-if="snmpResult" class="mib-snmp-result">{{ JSON.stringify(snmpResult, null, 2) }}</pre>
+                </div>
               </div>
             </el-card>
           </el-col>
@@ -787,20 +892,20 @@ onMounted(() => { void loadModules() })
     </el-row>
 
     <!-- c) 下：Trap Notifications + 模块策略动作 -->
-    <el-card shadow="never" style="border: 1px solid var(--line); background: var(--panel-bg, var(--panel));">
+    <el-card shadow="never" class="mib-card mib-notif-card">
       <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div class="mib-notif-header">
           <div>
             <strong>Trap Notifications</strong>
-            <el-tag size="small" type="info" effect="plain" style="margin-left: 8px;">模块：{{ selectedModuleId || '—' }}</el-tag>
+            <el-tag size="small" type="info" effect="plain" class="mib-module-tag">模块：{{ selectedModuleId || '—' }}</el-tag>
           </div>
-          <div style="display: flex; gap: 8px; align-items: center;">
+          <div class="notif-actions">
             <el-input
               v-model="notifFilter"
               placeholder="搜索 oid / 名称 / objects"
               size="small"
               clearable
-              style="width: 260px;"
+              class="mib-notif-search"
             >
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
@@ -834,7 +939,7 @@ onMounted(() => { void loadModules() })
       >
         <el-table-column label="Trap OID" min-width="220">
           <template #default="{ row }">
-            <span style="font-family: var(--font-mono); font-size: 12.5px;">{{ asNotif(row).trap_oid }}</span>
+            <span class="mono-oid">{{ asNotif(row).trap_oid }}</span>
           </template>
         </el-table-column>
         <el-table-column label="名称" min-width="180">
@@ -845,27 +950,34 @@ onMounted(() => { void loadModules() })
             <el-tag v-if="asNotif(row).severity" size="small" :type="sevMeta(asNotif(row).severity).type" effect="dark">
               {{ sevMeta(asNotif(row).severity).text }}
             </el-tag>
-            <span v-else style="color: var(--muted);">-</span>
+            <span v-else class="muted">-</span>
           </template>
         </el-table-column>
         <el-table-column label="OBJECTS" min-width="300">
           <template #default="{ row }">
             <template v-if="asNotif(row).objects && asNotif(row).objects!.length">
-              <el-tag v-for="o in asNotif(row).objects" :key="o" size="small" effect="plain" style="margin: 2px;">{{ o }}</el-tag>
+              <div class="mib-cell-row">
+                <el-tag v-for="o in asNotif(row).objects" :key="o" size="small" effect="plain">{{ o }}</el-tag>
+              </div>
             </template>
-            <span v-else style="color: var(--muted);">—</span>
+            <span v-else class="muted">—</span>
           </template>
         </el-table-column>
         <el-table-column label="描述" min-width="240">
           <template #default="{ row }">
-            <span style="color: var(--el-text-color-secondary);">{{ asNotif(row).description || '—' }}</span>
+            <span class="text-secondary">{{ asNotif(row).description || '—' }}</span>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
     <!-- 应用策略 Dialog -->
-    <el-dialog v-model="applyDlgVisible" :title="applyScope === 'all' ? '应用全部策略' : '应用本模块策略'" width="520px">
+    <el-dialog
+      v-model="applyDlgVisible"
+      :title="applyScope === 'all' ? '应用全部策略' : '应用本模块策略'"
+      width="520px"
+      class="mib-apply-dialog"
+    >
       <el-form label-width="100px">
         <el-form-item label="作用范围">
           <el-tag :type="applyScope === 'all' ? 'warning' : 'primary'" effect="plain">
@@ -883,11 +995,11 @@ onMounted(() => { void loadModules() })
         v-if="applyResult"
         :type="(applyResult.errors?.length ?? 0) > 0 ? 'warning' : 'success'"
         :closable="false"
-        style="margin: 10px 0;"
+        class="mib-apply-alert"
       >
         <template #title>应用结果</template>
         <template #default>
-          <pre style="margin: 0; white-space: pre-wrap; font-family: var(--font-mono); font-size: 12.5px;">{{ JSON.stringify(applyResult, null, 2) }}</pre>
+          <pre>{{ JSON.stringify(applyResult, null, 2) }}</pre>
         </template>
       </el-alert>
       <template #footer>
@@ -897,3 +1009,279 @@ onMounted(() => { void loadModules() })
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+/* =========================================================
+   MIB 库页面 — Eventide 视觉系统
+   所有面板统一圆角 / 边框 / 背景，替换模板里的行内 style
+   ========================================================= */
+
+/* ---- 通用辅助 ---- */
+.muted { color: var(--muted, var(--el-text-color-secondary)); }
+.text-secondary { color: var(--el-text-color-secondary); }
+.mib-cell-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mib-upload {
+  display: inline-flex;
+  align-items: center;
+}
+.mib-upload :deep(.el-upload) {
+  display: inline-flex;
+}
+.mib-tree-search { margin-bottom: 8px; }
+.mib-empty-flex { flex: 1; display: flex; align-items: center; justify-content: center; }
+.mib-detail-scroll { flex: 1; overflow: auto; }
+.mib-snmp-host { width: 150px; }
+.mib-snmp-port { width: 110px; }
+.mib-snmp-comm { width: 140px; }
+.mib-module-tag { margin-left: 8px; }
+.mib-notif-search { width: 260px; }
+.mib-apply-alert { margin: 10px 0; }
+
+/* ---- 页面容器 ---- */
+.mib-page {
+  padding: 16px 20px;
+}
+
+/* ---- 顶部标题栏 ---- */
+.mib-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.mib-header h2 {
+  font-size: 20px;
+  margin: 0;
+  color: var(--heading, var(--el-text-color-primary));
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.mib-header .sub {
+  font-size: 13px;
+  color: var(--muted, var(--el-text-color-secondary));
+  margin-left: 8px;
+  font-weight: 400;
+}
+.mib-header .actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ---- 统一卡片 ---- */
+.mib-card {
+  border: 1px solid var(--line, var(--el-border-color));
+  background: var(--panel-bg, var(--panel));
+  border-radius: 10px;
+}
+.mib-card :deep(.el-card__header) {
+  border-bottom: 1px solid var(--line, var(--el-border-color-lighter));
+  padding: 12px 16px;
+}
+.mib-card :deep(.el-card__body) {
+  padding: 14px 16px;
+}
+.mib-card .mib-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.mib-card .mib-card-header strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--heading, var(--el-text-color-primary));
+  letter-spacing: 0.01em;
+}
+.mib-card .mib-module-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  flex-wrap: wrap;
+}
+.mib-card .mib-module-summary .sep {
+  color: var(--line, var(--el-border-color));
+  user-select: none;
+}
+.mib-stat-num {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--heading, var(--el-text-color-primary));
+}
+.mib-stat-cell {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  justify-content: center;
+}
+.mib-stat-chip {
+  display: inline-block;
+  padding: 0 5px;
+  height: 18px;
+  line-height: 18px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary, var(--el-text-color-regular));
+  background: var(--inset-bg, var(--el-fill-color-light));
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  border-radius: 4px;
+  user-select: none;
+}
+
+/* 模块列表 / OID 树 / 节点详情 这三个等高卡片 */
+.mib-tall-card {
+  height: 560px;
+  display: flex;
+  flex-direction: column;
+}
+.mib-tall-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- 模块列表 ---- */
+.mib-modules-card {
+  margin-bottom: 14px;
+}
+.mib-modules-card .mib-modules-search {
+  margin-bottom: 8px;
+}
+.mib-modules-card .mib-modules-table {
+  flex: 1;
+}
+.mib-modules-card .mono-id,
+.mib-modules-card .mono-oid {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+}
+
+/* ---- OID 树 ---- */
+.mib-tree-card {
+  margin-bottom: 14px;
+}
+.mib-tree-card :deep(.el-tree) {
+  flex: 1;
+  overflow: auto;
+  padding: 2px;
+}
+.mib-tree-card :deep(.el-tree-node__content) {
+  height: 32px;
+  border-radius: 5px;
+  transition: background-color 0.12s ease;
+}
+.mib-tree-card :deep(.el-tree-node__content:hover) {
+  background: var(--primary-bg, rgba(59, 143, 217, 0.12));
+}
+.mib-tree-card :deep(.el-tree-node.is-current > .el-tree-node__content) {
+  background: var(--primary-bg, rgba(59, 143, 217, 0.18));
+  color: var(--heading, var(--el-text-color-primary));
+}
+.mib-tree-card .tree-node-label {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+}
+.mib-tree-card .tree-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+/* ---- 节点详情 ---- */
+.mib-detail-card :deep(.el-descriptions) {
+  margin-bottom: 10px;
+}
+.mib-detail-card :deep(.el-descriptions__label) {
+  font-weight: 600;
+  color: var(--muted, var(--el-text-color-secondary));
+  width: 96px;
+}
+.mib-detail-card .detail-title {
+  margin: 0 0 10px;
+  color: var(--heading, var(--el-text-color-primary));
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mib-detail-card .detail-desc {
+  white-space: pre-wrap;
+}
+.mib-detail-card .detail-objects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.mib-detail-card .detail-values {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+  background: var(--inset-bg, var(--el-fill-color-light));
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text-secondary, var(--el-text-color-regular));
+  line-height: 1.55;
+}
+
+/* ---- SNMP Get 区域 ---- */
+.mib-snmp-section :deep(.el-divider) {
+  margin: 14px 0 10px;
+}
+.mib-snmp-section :deep(.el-form--inline) {
+  flex-wrap: wrap;
+  gap: 6px 0;
+}
+.mib-snmp-result {
+  margin-top: 4px;
+  background: var(--inset-bg, var(--el-fill-color-light));
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  color: var(--text-secondary, var(--el-text-color-regular));
+  line-height: 1.55;
+}
+
+/* ---- Trap Notifications 表格 ---- */
+.mib-notif-card :deep(.el-table) {
+  --el-table-border-color: var(--line, var(--el-border-color-lighter));
+}
+.mib-notif-card .mono-oid {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+}
+.mib-notif-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ---- 应用策略 Dialog ---- */
+.mib-apply-dialog :deep(.el-form-item__label) {
+  font-weight: 600;
+  color: var(--heading, var(--el-text-color-primary));
+}
+.mib-apply-dialog :deep(.el-alert pre) {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+</style>

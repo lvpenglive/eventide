@@ -1,654 +1,331 @@
 <script setup lang="ts">
-/* =========================================================
- * Silences.vue —— 静默策略视图（Vue 3 + TS + Element Plus）
- * 批次 2：静默策略管理。
- * 严格独立，不修改任何其他文件。
- * ========================================================= */
-
-import { computed, onMounted, reactive, ref } from 'vue'
-
-// --- Element Plus 按需 ---
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
-  ElAffix,
-  ElBadge,
-  ElButton,
-  ElDatePicker,
-  ElDialog,
-  ElEmpty,
-  ElForm,
-  ElFormItem,
-  ElIcon,
-  ElInput,
-  ElMessage,
-  ElMessageBox,
-  ElOption,
-  ElSelect,
-  ElTable,
-  ElTableColumn,
-  ElTag,
-  ElTooltip,
+  ElAffix, ElButton, ElDatePicker, ElDialog, ElEmpty, ElForm, ElFormItem,
+  ElInput, ElMessage, ElMessageBox, ElOption, ElPagination, ElSelect,
+  ElTable, ElTableColumn, ElTooltip, ElAlert,
 } from 'element-plus'
 import type { FormInstance } from 'element-plus'
+import { Plus, Refresh, Search } from '@element-plus/icons-vue'
+import type { Silence, SilenceInput } from '@/api/types'
+import { listSilences, createSilence, deleteSilence } from '@/api/silences'
+import { listRules } from '@/api/rules'
 
-import {
-  CircleClose,
-  Delete,
-  Edit,
-  Plus,
-  Refresh,
-} from '@element-plus/icons-vue'
-
-// =================================================================
-// 业务模块 —— 优先真实模块，缺失则 shim 兜底
-// =================================================================
-// 尝试从 @/api/silences 导入；若并行任务未创建成功则本地 shim
-interface SilenceApiShim {
-  listSilences: () => Promise<LocalSilence[]>
-  createSilence: (payload: SilenceInput) => Promise<LocalSilence>
-  updateSilence: (id: string, payload: SilenceInput) => Promise<LocalSilence>
-  deleteSilence: (id: string) => Promise<{ ok: boolean }>
-}
-
-// 尝试从 @/api/common 获取 listRules
-interface CommonShim {
-  listRules: () => Promise<Array<{ id: string; name?: string }>>
-}
-
-// 动态尝试导入真实模块，失败时使用 fallback shim
-let SilApi: SilenceApiShim
-let CommonApi: CommonShim
-
-const unimpl = (name: string) => () => {
-  ElMessage.warning(`[shim] ${name} 未实现（真实 @/api 模块待接入）`)
-  return Promise.reject(new Error(`${name} not implemented`))
-}
-
-const fallbackSil: SilenceApiShim = {
-  listSilences: async () => [],
-  createSilence: unimpl('createSilence'),
-  updateSilence: unimpl('updateSilence'),
-  deleteSilence: unimpl('deleteSilence'),
-}
-
-const fallbackCommon: CommonShim = {
-  listRules: async () => [],
-}
-
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const m = require('@/api/silences')
-  SilApi = {
-    listSilences: m.listSilences ?? fallbackSil.listSilences,
-    createSilence: m.createSilence ?? fallbackSil.createSilence,
-    updateSilence: m.updateSilence ?? fallbackSil.updateSilence,
-    deleteSilence: m.deleteSilence ?? fallbackSil.deleteSilence,
-  }
-} catch {
-  SilApi = fallbackSil
-}
-
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const m = require('@/api/common')
-  CommonApi = {
-    listRules: m.listRules ?? fallbackCommon.listRules,
-  }
-} catch {
-  CommonApi = fallbackCommon
-}
-
-// =================================================================
-// 本地类型定义（不修改 api/types.ts）
-// =================================================================
-export interface LocalMatcher {
-  key: string
-  value: string
-}
-
-export interface LocalSilence {
-  id: string
-  comment?: string
-  rule_id?: string | null
-  starts_at: string
-  ends_at: string
-  matchers: LocalMatcher[] | Record<string, string>
-  created_at?: string | null
-}
-
-export interface SilenceInput {
-  comment?: string
-  rule_id?: string | null
-  starts_at: string
-  ends_at: string
-  matchers: LocalMatcher[]
-}
-
-// 与 @/api/types 中可能存在的 Silence 类型对齐（若未来添加）
-type Silence = LocalSilence
-
-// =================================================================
-// 运行时状态
-// =================================================================
+interface RuleBrief { id: string; name?: string }
 const loading = ref(false)
 const silences = ref<Silence[]>([])
-const rules = ref<Array<{ id: string; name?: string }>>([])
+const rules = ref<RuleBrief[]>([])
+const filterQ = ref('')
+const filterStatus = ref<'' | 'active' | 'pending' | 'ended'>('')
+const PAGE_SIZES: number[] = [10, 20, 50, 100]
+const page = ref(1)
+const pageSize = ref<number>(PAGE_SIZES[1])
 
-// --- Dialog 表单 ---
-const dialogVisible = ref(false)
-const dialogMode = ref<'create' | 'edit'>('create')
-const editingId = ref<string | null>(null)
-const formRef = ref<FormInstance | null>(null)
+function asSilence(r: unknown): Silence { return r as Silence }
 
-const form = reactive({
-  comment: '',
-  rule_id: '' as string,
-  starts_at: '' as string,
-  ends_at: '' as string,
-  matchersJson: '{}' as string,
+function mToObj(m: unknown): Record<string, string> {
+  if (!m) return {}
+  if (Array.isArray(m)) {
+    const o: Record<string, string> = {}
+    for (const x of m as Array<{ key?: string; value?: string }>) {
+      if (x?.key) o[x.key] = String(x.value ?? '')
+    }
+    return o
+  }
+  if (typeof m === 'object') return m as Record<string, string>
+  return {}
+}
+
+const filtered = computed(() => {
+  const now = Date.now()
+  return silences.value.filter((s) => {
+    if (filterStatus.value) {
+      const st = silenceStatus(s, now)
+      if (st !== filterStatus.value) return false
+    }
+    if (filterQ.value.trim()) {
+      const q = filterQ.value.trim().toLowerCase()
+      const c = (s.comment || '').toLowerCase()
+      const ms = Object.entries(mToObj(s.matchers)).map(
+        ([k, v]) => k + '=' + v
+      ).join(' ')
+      const r = rules.value.find((x) => x.id === s.rule_id)?.name || ''
+      if (c.indexOf(q) < 0 && ms.indexOf(q) < 0 && r.toLowerCase().indexOf(q) < 0) return false
+    }
+    return true
+  })
 })
 
-function resetForm() {
-  form.comment = ''
-  form.rule_id = ''
-  // 默认预填：此刻 ~ 此刻 + 2 小时
-  const now = new Date()
-  const plus2 = new Date(now.getTime() + 2 * 60 * 60 * 1000)
-  form.starts_at = formatDateTimePicker(now)
-  form.ends_at = formatDateTimePicker(plus2)
-  form.matchersJson = '{}'
-  editingId.value = null
-  formRef.value?.clearValidate()
-}
+const pagedSilences = computed(() => {
+  const src = filtered.value
+  if (src.length <= pageSize.value) return src
+  const start = (page.value - 1) * pageSize.value
+  return src.slice(start, start + pageSize.value)
+})
+function onPage(p: number) { page.value = Math.max(1, p) }
+function onSize(s: number) { pageSize.value = s; page.value = 1 }
+watch([filterQ, filterStatus, silences], () => { page.value = 1 })
 
-// =================================================================
-// 工具函数
-// =================================================================
-function pad(n: number): string {
-  return String(n).padStart(2, '0')
-}
-
-// ElDatePicker value-format 要求：YYYY-MM-DDTHH:mm:ss（本地时间）
-function formatDateTimePicker(d: Date): string {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
-// 展示用截断：ISO -> YYYY-MM-DD HH:mm:ss
-function fmtDisplay(ts: string | null | undefined): string {
-  if (!ts) return '-'
-  const d = new Date(ts)
-  if (Number.isNaN(d.getTime())) return String(ts)
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
-// 统一把 matchers 规整成 [{key, value}]
-function normalizeMatchers(
-  m: LocalMatcher[] | Record<string, string> | undefined
-): LocalMatcher[] {
-  if (!m) return []
-  if (Array.isArray(m)) return m.filter((x) => x && x.key)
-  return Object.entries(m).map(([key, value]) => ({ key, value }))
-}
-
-type SilenceStatus = 'active' | 'pending' | 'ended'
-function getStatus(s: unknown): SilenceStatus {
-  const row = s as Silence
-  const now = Date.now()
-  const sTime = new Date(row.starts_at).getTime()
-  const eTime = new Date(row.ends_at).getTime()
-  if (now < sTime) return 'pending'
-  if (now >= sTime && now <= eTime) return 'active'
+function silenceStatus(s: Silence, nowMs = Date.now()): 'active' | 'pending' | 'ended' {
+  const st = new Date(s.starts_at).getTime()
+  const et = new Date(s.ends_at).getTime()
+  if (nowMs < st) return 'pending'
+  if (nowMs <= et) return 'active'
   return 'ended'
 }
-
-const statusBadgeMap: Record<SilenceStatus, { type: 'primary' | 'success' | 'warning' | 'info' | 'danger'; text: string }> = {
-  active: { type: 'primary', text: '进行中' },
-  pending: { type: 'info', text: '未开始' },
-  ended: { type: 'success', text: '已结束' },
+const statusStyle: Record<string, { text: string; cls: string }> = {
+  active: { text: '生效中', cls: 'pill-sm pill-ok' },
+  pending: { text: '未开始', cls: 'pill-sm pill-warn' },
+  ended: { text: '已结束', cls: 'pill-sm' },
 }
-
-function remainingText(s: unknown): string {
-  const row = s as Silence
+function pad(n: number) { return String(n).padStart(2, '0') }
+function fmtTs(ts: string | null | undefined): string {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ts
+  return pad(d.getFullYear()) + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+}
+function fmtRemain(s: Silence): string {
   const now = Date.now()
-  const sTime = new Date(row.starts_at).getTime()
-  const eTime = new Date(row.ends_at).getTime()
-  if (now < sTime) {
-    const diff = sTime - now
-    return `${formatDuration(diff)} 后开始`
-  }
-  if (now <= eTime) {
-    const diff = eTime - now
-    return `剩余 ${formatDuration(diff)}`
-  }
-  const diff = now - eTime
-  return `已结束 ${formatDuration(diff)}`
+  const st = new Date(s.starts_at).getTime()
+  const et = new Date(s.ends_at).getTime()
+  if (now < st) return fmtDur(st - now) + ' 后开始'
+  if (now <= et) return '剩余 ' + fmtDur(et - now)
+  return '已结束 ' + fmtDur(now - et)
 }
-
-function formatDuration(ms: number): string {
+function fmtDur(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
   const d = Math.floor(total / 86400)
   const h = Math.floor((total % 86400) / 3600)
   const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  if (d > 0) return `${d}天${h}小时`
-  if (h > 0) return `${h}小时${m}分`
-  if (m > 0) return `${m}分${s}秒`
-  return `${s}秒`
+  if (d > 0) return d + '天' + h + '小时'
+  if (h > 0) return h + '小时' + m + '分'
+  if (m > 0) return m + '分'
+  return total + '秒'
+}
+function ruleName(s: Silence): string {
+  if (!s.rule_id) return '全部告警规则'
+  const r = rules.value.find((x) => x.id === s.rule_id)
+  if (r) return r.name || s.rule_id.slice(0, 8) + '...'
+  return s.rule_id.slice(0, 8) + '...'
+}
+function matchersText(s: Silence): string {
+  const o = mToObj(s.matchers)
+  const keys = Object.keys(o)
+  if (keys.length === 0) return '(无匹配标签)'
+  return keys.map((k) => k + '=' + o[k]).join(', ')
 }
 
-function shortId(id: string): string {
-  if (!id) return '-'
-  return id.length > 8 ? id.slice(0, 8) : id
-}
-
-// =================================================================
-// 数据加载
-// =================================================================
-async function loadList() {
-  loading.value = true
-  try {
-    const data = await SilApi.listSilences()
-    silences.value = (data || []) as Silence[]
-  } catch (e) {
-    // shim 状态下静默兜底空数组
-    silences.value = []
-  } finally {
-    loading.value = false
-  }
-}
-
-async function loadRules() {
-  try {
-    const data = await CommonApi.listRules()
-    rules.value = data || []
-  } catch {
-    rules.value = []
-  }
-}
-
-onMounted(() => {
-  loadList()
-  loadRules()
+// Dialog
+const dlg = reactive({
+  visible: false,
+  mode: 'create' as 'create' | 'edit',
+  editing: null as Silence | null,
+  form: {
+    comment: '', rule_id: '', starts_at: '', ends_at: '', matchersJson: '{}',
+  },
+  formRef: null as FormInstance | null,
 })
-
-// =================================================================
-// Dialog 操作
-// =================================================================
-function openCreate() {
-  dialogMode.value = 'create'
-  resetForm()
-  dialogVisible.value = true
+function dlgReset() {
+  const now = new Date()
+  const plus2 = new Date(now.getTime() + 2 * 60 * 60 * 1000)
+  const fmt = (d: Date) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+  dlg.form.comment = ''; dlg.form.rule_id = ''
+  dlg.form.starts_at = fmt(now); dlg.form.ends_at = fmt(plus2)
+  dlg.form.matchersJson = '{}'
+  dlg.editing = null
+  try { dlg.formRef?.clearValidate() } catch {}
 }
-
-function openEdit(r: unknown) {
-  const row = r as Silence
-  dialogMode.value = 'edit'
-  resetForm()
-  editingId.value = row.id
-  form.comment = row.comment || ''
-  form.rule_id = row.rule_id || ''
-  form.starts_at = row.starts_at || ''
-  form.ends_at = row.ends_at || ''
-  // 将 matchers 转为 JSON 字符串
-  try {
-    const mObj = matchersToObject(row.matchers)
-    form.matchersJson = JSON.stringify(mObj, null, 2)
-  } catch {
-    form.matchersJson = '{}'
-  }
-  dialogVisible.value = true
+function openCreate() { dlg.mode = 'create'; dlgReset(); dlg.visible = true }
+function openEdit(row: Silence) {
+  dlg.mode = 'edit'; dlg.editing = row
+  dlg.form.comment = row.comment || ''
+  dlg.form.rule_id = row.rule_id || ''
+  dlg.form.starts_at = row.starts_at; dlg.form.ends_at = row.ends_at
+  dlg.form.matchersJson = JSON.stringify(mToObj(row.matchers), null, 2)
+  dlg.visible = true
 }
-
-function closeDialog() {
-  dialogVisible.value = false
-}
-
-// 格式化 matchers 为 JSON 字符串显示
-function formatMatchersJson(m: LocalMatcher[] | Record<string, string> | undefined): string {
-  try {
-    const obj = matchersToObject(m)
-    return JSON.stringify(obj)
-  } catch {
-    return '{}'
-  }
-}
-
-// 将 matchers 转为 Record 对象
-function matchersToObject(m: LocalMatcher[] | Record<string, string> | undefined): Record<string, string> {
-  if (!m) return {}
-  if (Array.isArray(m)) {
-    const obj: Record<string, string> = {}
-    for (const item of m) {
-      if (item && item.key) obj[item.key] = item.value
+async function dlgSave() {
+  if (!dlg.formRef) return
+  await dlg.formRef.validate(async (valid) => {
+    if (!valid) return
+    let matchersObj: Record<string, string>
+    try {
+      matchersObj = JSON.parse(dlg.form.matchersJson || '{}')
+      if (typeof matchersObj !== 'object' || matchersObj === null || Array.isArray(matchersObj)) {
+        ElMessage.error('匹配标签 JSON 必须是对象'); return
+      }
+      for (const k of Object.keys(matchersObj)) matchersObj[k] = String(matchersObj[k])
+    } catch { ElMessage.error('匹配标签 JSON 格式错误'); return }
+    const body: SilenceInput = {
+      comment: dlg.form.comment, rule_id: dlg.form.rule_id || null,
+      starts_at: dlg.form.starts_at, ends_at: dlg.form.ends_at, matchers: matchersObj,
     }
-    return obj
-  }
-  return { ...m }
+    try {
+      if (dlg.mode === 'edit' && dlg.editing) {
+        await deleteSilence(dlg.editing.id).catch(() => {})
+      }
+      const s = await createSilence(body)
+      ElMessage.success(dlg.mode === 'create' ? '已新建静默策略' : '已更新静默策略')
+      dlg.visible = false
+      silences.value = silences.value.filter((x) => x.id !== s.id)
+      silences.value.unshift(s)
+      dlg.editing = null
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      ElMessage.error(msg || '保存失败')
+    }
+  })
 }
-
-// 保存
-async function handleSave() {
-  // 1. 解析 matchers JSON
-  let matchersObj: Record<string, string> = {}
-  try {
-    const parsed = JSON.parse(form.matchersJson || '{}')
-    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-      ElMessage.error('匹配标签 JSON 必须是对象')
-      return
-    }
-    matchersObj = {}
-    for (const [k, v] of Object.entries(parsed)) {
-      matchersObj[String(k)] = String(v)
-    }
-  } catch {
-    ElMessage.error('匹配标签 JSON 格式错误')
-    return
-  }
-
-  // 2. 至少 1 个匹配器 或 绑定 1 条规则
-  const hasMatchers = Object.keys(matchersObj).length > 0
-  if (!hasMatchers && !form.rule_id) {
-    ElMessage.error('请至少填写一个匹配器或绑定一条规则')
-    return
-  }
-
-  // 3. starts_at < ends_at
-  if (!form.starts_at || !form.ends_at) {
-    ElMessage.error('请选择开始时间和结束时间')
-    return
-  }
-  const sTime = new Date(form.starts_at).getTime()
-  const eTime = new Date(form.ends_at).getTime()
-  if (Number.isNaN(sTime) || Number.isNaN(eTime)) {
-    ElMessage.error('时间格式错误')
-    return
-  }
-  if (sTime >= eTime) {
-    ElMessage.error('开始时间必须早于结束时间')
-    return
-  }
-
-  const payload: SilenceInput = {
-    comment: form.comment.trim() || undefined,
-    rule_id: form.rule_id || null,
-    starts_at: form.starts_at,
-    ends_at: form.ends_at,
-    matchers: Object.entries(matchersObj).map(([key, value]) => ({ key, value })),
-  }
-
-  try {
-    if (dialogMode.value === 'create') {
-      await SilApi.createSilence(payload)
-      ElMessage.success('静默策略创建成功')
-    } else if (editingId.value) {
-      await SilApi.updateSilence(editingId.value, payload)
-      ElMessage.success('静默策略更新成功')
-    }
-    dialogVisible.value = false
-    loadList()
-  } catch (e) {
-    // shim 状态下的兜底：不弹二次错误
-  }
-}
-
-// 删除
-async function handleDelete(r: unknown) {
-  const row = r as Silence
+async function handleDelete(row: Silence) {
   try {
     await ElMessageBox.confirm(
-      `确认删除静默策略「${shortId(row.id)}」？此操作不可恢复。`,
-      '删除确认',
-      {
-        confirmButtonText: '删除',
-        cancelButtonText: '取消',
-        type: 'warning',
-      }
+      '确定删除静默策略「' + (row.comment || row.id.slice(0, 8)) + '...」？删除后生效中的抑制立即失效。',
+      '删除静默策略', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
-  } catch {
-    return
-  }
+  } catch { return }
   try {
-    await SilApi.deleteSilence(row.id)
-    ElMessage.success('删除成功')
-    loadList()
-  } catch {
-    // shim 状态兜底
+    await deleteSilence(row.id)
+    silences.value = silences.value.filter((x) => x.id !== row.id)
+    ElMessage.success('已删除')
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    ElMessage.error(msg || '删除失败')
   }
 }
 
-// =================================================================
-// 渲染辅助
-// =================================================================
-const matcherColumns = computed(() => {
-  return silences.value.map((s) => normalizeMatchers(s.matchers))
-})
-
-function getMatchersByIndex(idx: number): LocalMatcher[] {
-  return matcherColumns.value[idx] || []
+async function loadAll() {
+  loading.value = true
+  try {
+    const [listRs, rulesRs] = await Promise.all([
+      listSilences().catch(() => [] as Silence[]),
+      listRules().catch(() => [] as RuleBrief[]),
+    ])
+    silences.value = (listRs || []) as Silence[]
+    rules.value = (rulesRs || []) as RuleBrief[]
+  } finally { loading.value = false }
 }
+
+onMounted(loadAll)
 </script>
 
 <template>
-  <div class="silences-view" style="padding: 16px 20px 32px">
-    <!-- 标题 -->
-    <div style="margin-bottom: 16px">
-      <h2 style="margin: 0 0 4px; font-size: 20px; font-weight: 600; color: #1f2937">
-        静默策略
-      </h2>
-      <p style="margin: 0; font-size: 13px; color: #6b7280">
-        按匹配器 + 时间窗抑制告警通知
-      </p>
+  <div class="silences-view">
+    <div class="page-header">
+      <h2 class="page-title">静默策略</h2>
+      <p class="page-sub">按匹配标签 + 时间窗抑制告警通知；生效中的抑制会立即阻止对应告警推送</p>
     </div>
 
-    <!-- 吸附工具栏 -->
-    <ElAffix :offset="0" style="margin-bottom: 12px">
-      <div
-        style="
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 10px 0;
-          background: #fff;
-          border-bottom: 1px solid #eef0f3;
-        "
-      >
-        <div>
-          <ElButton type="primary" :icon="Plus" @click="openCreate">
-            新建静默策略
-          </ElButton>
+    <ElAffix :offset="0" class="affix-wrap">
+      <div class="toolbar panel">
+        <div class="tb-left">
+          <ElButton type="primary" :icon="Plus" @click="openCreate">新建静默策略</ElButton>
+          <ElButton :icon="Refresh" @click="loadAll" :loading="loading">刷新</ElButton>
         </div>
-        <div>
-          <ElButton :icon="Refresh" @click="loadList" :loading="loading">
-            刷新
-          </ElButton>
+        <div class="tb-right">
+          <ElSelect v-model="filterStatus" clearable placeholder="状态" style="width:140px">
+            <ElOption label="生效中" value="active" />
+            <ElOption label="未开始" value="pending" />
+            <ElOption label="已结束" value="ended" />
+          </ElSelect>
+          <ElInput v-model="filterQ" placeholder="搜索 注释/匹配标签/规则名" clearable style="width:260px" :prefix-icon="Search" />
         </div>
       </div>
     </ElAffix>
 
-    <!-- 空态 -->
-    <template v-if="!loading && silences.length === 0">
-      <div
-        style="
-          background: #fff;
-          border-radius: 8px;
-          border: 1px solid #eef0f3;
-          padding: 64px 0;
-        "
-      >
-        <ElEmpty description="暂无静默策略">
-          <template #default>
-            <ElButton type="primary" :icon="Plus" @click="openCreate">
-              新建第一个静默策略
-            </ElButton>
-          </template>
-        </ElEmpty>
-      </div>
-    </template>
+    <div v-if="!loading && silences.length === 0" class="panel silences-empty">
+      <ElEmpty description="暂无静默策略">
+        <template #default>
+          <ElButton type="primary" :icon="Plus" @click="openCreate">新建第一个静默策略</ElButton>
+        </template>
+      </ElEmpty>
+    </div>
 
-    <!-- 列表 -->
     <template v-else>
-      <ElTable
-        :data="silences"
-        v-loading="loading"
-        stripe
-        border
-        style="width: 100%; background: #fff; border-radius: 8px; overflow: hidden"
-      >
-        <!-- 注释 -->
-        <ElTableColumn label="注释" min-width="160" show-overflow-tooltip>
+      <ElTable :data="pagedSilences" v-loading="loading" stripe class="silences-table" empty-text="无匹配结果">
+        <ElTableColumn label="注释" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }"><span class="name-link">{{ asSilence(row).comment || '-' }}</span></template>
+        </ElTableColumn>
+        <ElTableColumn label="告警规则" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
-            <span style="font-size: 13px; color: #1f2937">
-              {{ row.comment || '—' }}
-            </span>
+            <ElTooltip v-if="asSilence(row).rule_id" :content="(asSilence(row).rule_id as string) || undefined">
+              <span class="rule-cell">{{ ruleName(asSilence(row)) }}</span>
+            </ElTooltip>
+            <span v-else class="rule-cell all-rule">全部告警规则</span>
           </template>
         </ElTableColumn>
-
-        <!-- 规则 -->
-        <ElTableColumn label="规则" width="140">
+        <ElTableColumn label="匹配标签" min-width="240" show-overflow-tooltip>
+          <template #default="{ row }"><span class="mono">{{ matchersText(asSilence(row)) }}</span></template>
+        </ElTableColumn>
+        <ElTableColumn label="开始时间" width="150">
+          <template #default="{ row }"><span class="cell-updated" :title="asSilence(row).starts_at">{{ fmtTs(asSilence(row).starts_at) }}</span></template>
+        </ElTableColumn>
+        <ElTableColumn label="结束时间" width="150">
+          <template #default="{ row }"><span class="cell-updated" :title="asSilence(row).ends_at">{{ fmtTs(asSilence(row).ends_at) }}</span></template>
+        </ElTableColumn>
+        <ElTableColumn label="剩余/已结束" width="120">
           <template #default="{ row }">
-            <template v-if="!row.rule_id">
-              <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: #6b7280">全部</span>
-            </template>
-            <template v-else>
-              <ElTooltip :content="row.rule_id" :show-after="300">
-                <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: #1f2937; cursor: pointer">
-                  {{ shortId(row.rule_id) }}…
-                </span>
-              </ElTooltip>
-            </template>
+            <span :class="['remain-text', silenceStatus(asSilence(row)) === 'ended' ? 'remain-ended' : '']">{{ fmtRemain(asSilence(row)) }}</span>
           </template>
         </ElTableColumn>
-
-        <!-- 匹配标签 -->
-        <ElTableColumn label="匹配标签" min-width="200" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="mono-cell" style="font-family: ui-monospace, monospace; font-size: 12px; color: #1f2937">
-              {{ formatMatchersJson(row.matchers) }}
-            </span>
-          </template>
-        </ElTableColumn>
-
-        <!-- 时间窗 -->
-        <ElTableColumn label="时间窗" min-width="300">
-          <template #default="{ row }">
-            <span style="font-size: 13px; color: #1f2937">
-              {{ fmtDisplay(row.starts_at) }}
-              <span style="color: #9ca3af; margin: 0 4px">→</span>
-              {{ fmtDisplay(row.ends_at) }}
-            </span>
-          </template>
-        </ElTableColumn>
-
-        <!-- 状态 -->
         <ElTableColumn label="状态" width="100" align="center">
           <template #default="{ row }">
-            <span :class="['status-badge', getStatus(row) === 'active' ? 'on' : 'off']">
-              {{ getStatus(row) === 'active' ? '生效中' : '未生效' }}
-            </span>
+            <span :class="statusStyle[silenceStatus(asSilence(row))].cls">{{ statusStyle[silenceStatus(asSilence(row))].text }}</span>
           </template>
         </ElTableColumn>
-
-        <!-- 操作 -->
-        <ElTableColumn label="操作" width="130" fixed="right" align="center">
+        <ElTableColumn label="创建时间" width="160">
+          <template #default="{ row }"><span class="cell-updated" :title="asSilence(row).created_at">{{ fmtTs(asSilence(row).created_at) }}</span></template>
+        </ElTableColumn>
+        <ElTableColumn label="操作" width="170" align="center">
           <template #default="{ row }">
-            <ElButton
-              link
-              type="primary"
-              size="small"
-              :icon="Edit"
-              @click="openEdit(row)"
-            >
-              编辑
-            </ElButton>
-            <ElButton
-              link
-              type="danger"
-              size="small"
-              :icon="Delete"
-              @click="handleDelete(row)"
-            >
-              删除
-            </ElButton>
+            <div class="row-actions">
+              <ElButton size="small" class="act-btn act-edit" @click="openEdit(asSilence(row))">编辑</ElButton>
+              <ElButton size="small" type="danger" plain class="act-btn" @click="handleDelete(asSilence(row))">删除</ElButton>
+            </div>
           </template>
         </ElTableColumn>
       </ElTable>
+
+      <div class="panel silences-pager">
+        <div class="pager-tip">共 <span class="mono">{{ filtered.length }}</span> 条 / 总 <span class="mono">{{ silences.length }}</span> 条</div>
+        <ElPagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="PAGE_SIZES"
+          :total="filtered.length" layout="sizes, prev, pager, next, jumper, ->, total"
+          @current-change="onPage" @size-change="onSize" background />
+      </div>
     </template>
 
-    <!-- 新建/编辑 Dialog -->
-    <ElDialog
-      v-model="dialogVisible"
-      :title="dialogMode === 'create' ? '新建静默' : '编辑静默'"
-      width="560px"
-      :close-on-click-modal="false"
-      @closed="resetForm"
-    >
-      <div class="dialog-desc">在时间窗内抑制匹配标签的通知。</div>
-      <ElForm
-        ref="formRef"
-        label-position="top"
-        style="padding-top: 4px"
-      >
-        <!-- 注释 -->
-        <ElFormItem label="注释">
-          <ElInput
-            v-model="form.comment"
-            placeholder="维护窗口"
-            maxlength="200"
-            show-word-limit
-          />
+    <ElDialog v-model="dlg.visible" :title="dlg.mode === 'create' ? '新建静默策略' : '编辑静默策略'"
+      width="640px" :close-on-click-modal="false" destroy-on-close top="6vh" @closed="dlgReset">
+      <ElAlert v-if="dlg.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px">
+        后端暂不支持更新静默策略，保存将执行「删除旧 → 新建新」。生效中策略的抑制会短暂中断。
+      </ElAlert>
+      <ElForm ref="dlg.formRef" label-width="100px">
+        <ElFormItem label="注释"><ElInput v-model="dlg.form.comment" placeholder="例：维护窗口" maxlength="200" show-word-limit /></ElFormItem>
+        <ElFormItem label="告警规则">
+          <ElSelect v-model="dlg.form.rule_id" clearable filterable placeholder="留空 = 全部规则" style="width:100%">
+            <ElOption v-for="r in rules" :key="r.id" :label="r.name || r.id" :value="r.id" />
+          </ElSelect>
         </ElFormItem>
-
-        <!-- 规则 ID -->
-        <ElFormItem label="规则 ID（可选，留空匹配全部）">
-          <ElInput
-            v-model="form.rule_id"
-            placeholder="uuid"
-          />
+        <ElFormItem label="匹配标签 JSON">
+          <ElInput v-model="dlg.form.matchersJson" type="textarea" :rows="4"
+            placeholder='{"ip":"10.0.0.1","alertname":"CPU High"}' class="mono-font" />
+          <div class="form-tip">JSON 对象；留空 {} 表示仅按规则匹配</div>
         </ElFormItem>
-
-        <!-- 匹配标签 JSON -->
-        <ElFormItem label="匹配标签 JSON" required>
-          <ElInput
-            v-model="form.matchersJson"
-            type="textarea"
-            :rows="4"
-            placeholder='{"ip":"10.0.0.1"}'
-          />
-          <div class="form-hint">例：{"ip":"10.0.0.1"} 或 {"alertname":"CPU High"}</div>
-        </ElFormItem>
-
-        <!-- 时间窗 -->
-        <div class="form-row">
-          <ElFormItem label="开始时间" required style="flex: 1">
-            <ElDatePicker
-              v-model="form.starts_at"
-              type="datetime"
-              placeholder="开始时间"
-              value-format="YYYY-MM-DDTHH:mm:ss"
-              style="width: 100%"
-              format="YYYY-MM-DD HH:mm:ss"
-            />
+        <div style="display:flex;gap:12px">
+          <ElFormItem label="开始时间" style="flex:1">
+            <ElDatePicker v-model="dlg.form.starts_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss"
+              format="YYYY-MM-DD HH:mm:ss" style="width:100%" />
           </ElFormItem>
-          <ElFormItem label="结束时间" required style="flex: 1">
-            <ElDatePicker
-              v-model="form.ends_at"
-              type="datetime"
-              placeholder="结束时间"
-              value-format="YYYY-MM-DDTHH:mm:ss"
-              style="width: 100%"
-              format="YYYY-MM-DD HH:mm:ss"
-            />
+          <ElFormItem label="结束时间" style="flex:1">
+            <ElDatePicker v-model="dlg.form.ends_at" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss"
+              format="YYYY-MM-DD HH:mm:ss" style="width:100%" />
           </ElFormItem>
         </div>
       </ElForm>
-
       <template #footer>
-        <div style="display: flex; justify-content: flex-end; gap: 8px">
-          <ElButton @click="closeDialog">取消</ElButton>
-          <ElButton type="primary" @click="handleSave">保存</ElButton>
+        <div class="dlg-footer">
+          <ElButton @click="dlg.visible = false">取消</ElButton>
+          <ElButton type="primary" :loading="loading" @click="dlgSave">保存</ElButton>
         </div>
       </template>
     </ElDialog>
@@ -656,45 +333,61 @@ function getMatchersByIndex(idx: number): LocalMatcher[] {
 </template>
 
 <style scoped>
-/* 局部样式，避免污染全局，保持克制 */
-.silences-view :deep(.el-affix) {
-  z-index: 10;
+.silences-view { padding: 16px 20px 32px; }
+.page-header { margin-bottom: 10px; }
+.page-title { margin: 0 0 4px; font-size: 22px; }
+.page-sub { margin: 0; color: var(--el-text-color-secondary, #909399); font-size: 13px; }
+.panel {
+  background: var(--el-bg-color, #fff);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
-
-/* 状态徽章 - 与老版对齐 */
-.status-badge {
-  display: inline-block;
-  padding: 2px 10px;
-  font-size: 12px;
-  border-radius: 10px;
-  font-weight: 500;
+.toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
 }
-.status-badge.on {
-  background: #dcfce7;
-  color: #16a34a;
+.tb-left, .tb-right { display: flex; gap: 8px; align-items: center; }
+.affix-wrap { z-index: 10; margin-bottom: 0; }
+.silences-table { font-size: 13px; overflow: hidden; margin-top: 0; }
+.silences-table :deep(.el-table__inner-wrapper::before) { display: none; }
+.silences-table :deep(.el-table th.el-table__cell) { background: transparent; }
+.silences-table :deep(.el-table td.el-table__cell),
+.silences-table :deep(.el-table th.el-table__cell.is-leaf) {
+  border-bottom: 1px solid var(--el-border-color-lighter, #f2f3f5);
 }
-.status-badge.off {
-  background: #f3f4f6;
-  color: #6b7280;
+.silences-table :deep(.el-table th.el-table__cell .cell) { padding-top: 4px; padding-bottom: 4px; }
+.silences-table :deep(.el-table td.el-table__cell .cell) { padding-top: 8px; padding-bottom: 8px; }
+.name-link { color: var(--el-color-primary, #409eff); font-weight: 500; cursor: pointer; user-select: none; }
+.name-link:hover { text-decoration: underline; }
+.rule-cell { font-size: 13px; color: var(--el-text-color-primary, #303133); }
+.rule-cell.all-rule { font-family: Consolas, Menlo, monospace; font-size: 12px; color: var(--el-text-color-secondary, #909399); }
+.mono { font-family: Consolas, Menlo, monospace; font-size: 12.5px; }
+.mono-font :deep(textarea) { font-family: Consolas, Menlo, monospace; font-size: 12.5px; line-height: 1.5; }
+.cell-updated { font-family: Consolas, Menlo, monospace; font-size: 12.5px; color: var(--el-text-color-secondary, #909399); }
+.pill-sm {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 10px; height: 22px; line-height: 20px;
+  font-size: 11.5px; font-weight: 500; border-radius: 4px;
 }
-
-/* 对话框描述 */
-.dialog-desc {
-  font-size: 13px;
-  color: #6b7280;
-  margin-bottom: 12px;
+.pill-sm.pill-ok { background: var(--el-color-success-light-9, #e1f3d8); color: var(--el-color-success, #67c23a); }
+.pill-sm.pill-warn { background: var(--el-color-warning-light-9, #faecd8); color: var(--el-color-warning, #e6a23c); }
+.remain-text { font-size: 12.5px; font-weight: 500; color: var(--el-color-success, #67c23a); }
+.remain-text.remain-ended { color: var(--el-text-color-secondary, #909399); }
+.row-actions { display: inline-flex; align-items: center; gap: 6px; }
+.act-btn { height: 26px; padding: 0 12px !important; font-size: 12px !important; border-radius: 4px; }
+.act-edit {
+  --el-button-border-color: #3f8bff; --el-button-text-color: #3f8bff;
+  --el-button-hover-bg-color: rgba(63, 139, 255, 0.08); --el-button-hover-border-color: #3077ef;
+  --el-button-hover-text-color: #3077ef;
 }
-
-/* 表单行 */
-.form-row {
-  display: flex;
-  gap: 16px;
+.silences-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px; padding: 12px 18px; margin-top: 12px;
 }
-
-/* 表单提示 */
-.form-hint {
-  font-size: 12px;
-  color: #9ca3af;
-  margin-top: 4px;
-}
+.silences-pager .pager-tip { font-size: 13px; color: var(--el-text-color-secondary, #909399); }
+.silences-pager .mono { font-family: Consolas, Menlo, monospace; font-weight: 600; color: var(--el-text-color-primary, #303133); }
+.silences-empty { padding: 48px 0; }
+.form-tip { font-size: 12px; color: var(--el-text-color-secondary, #909399); margin-top: 4px; }
+.dlg-footer { display: flex; justify-content: flex-end; gap: 8px; width: 100%; }
 </style>

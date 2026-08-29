@@ -633,13 +633,247 @@ onMounted(() => { void loadAll() })
   padding: 16px 18px;
 }
 
-/* Trap section */
+/* =========================================================
+   Panel 内部统一视觉系统
+   —— 让服务状态 / Kafka 积压 / 集群心跳 / 试推送 / 最近事件
+      这 5 个 tab pane 的子内容（标题、meta、表格、表单、空态）
+      形成一致的 Eventide 风格
+   ========================================================= */
+
+/* ---- 标题区 ---- */
 .trap-section-title {
-  margin: 0 0 0.75rem;
-  font-size: 1rem;
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--heading, var(--el-text-color-primary));
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line, var(--el-border-color-lighter));
 }
 .trap-section-meta {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--muted, var(--el-text-color-secondary));
+  line-height: 1.7;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.trap-section-meta code {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+  background: var(--inset-bg, var(--el-fill-color-light));
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-secondary, var(--el-text-color-regular));
+}
+.trap-section-meta .badge {
+  flex-shrink: 0;
+}
+
+/* ---- 原生 table.data（Kafka 积压 / 集群心跳 / 最近事件 共用） ---- */
+.panel :deep(.alert-table-scroll) {
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 8px 0 4px;
+}
+.panel :deep(table.data) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  background: transparent;
+}
+.panel :deep(table.data thead th) {
+  background: var(--table-head-bg, rgba(0, 0, 0, 0.12));
+  color: var(--muted, var(--el-text-color-secondary));
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line, var(--el-border-color));
+}
+.panel :deep(table.data tbody tr) {
+  transition: background-color 0.12s ease;
+}
+.panel :deep(table.data tbody tr:hover) {
+  background: var(--primary-bg, rgba(59, 143, 217, 0.12));
+}
+.panel :deep(table.data tbody td) {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line, var(--el-border-color-lighter));
+  color: var(--text, var(--el-text-color-primary));
+  vertical-align: middle;
+}
+.panel :deep(table.data tbody tr:last-child td) {
+  border-bottom: none;
+}
+.panel :deep(table.data td.mono) {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12.5px;
+}
+.panel :deep(table.data td.actions) {
+  white-space: nowrap;
+  width: 80px;
+}
+.panel :deep(table.data td.actions button) {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line, var(--el-border-color));
+  background: transparent;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--text-secondary, var(--el-text-color-regular));
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.panel :deep(table.data td.actions button:hover) {
+  background: var(--primary, var(--el-color-primary));
+  border-color: var(--primary, var(--el-color-primary));
+  color: #fff;
+}
+
+/* ---- Kafka 积压的 v-html 内容（scoped 下需要 :deep） ---- */
+.panel :deep(.hint) {
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--muted, var(--el-text-color-secondary));
+}
+.panel :deep(.hint code) {
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+  background: var(--inset-bg, var(--el-fill-color-light));
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text-secondary, var(--el-text-color-regular));
+}
+.panel :deep(.empty) {
+  text-align: center;
+  padding: 24px 8px;
+  color: var(--muted, var(--el-text-color-secondary));
+  font-size: 13.5px;
+  border: 1px dashed var(--line, var(--el-border-color-lighter));
+  border-radius: 8px;
+  margin: 8px 0;
+  background: var(--inset-bg, var(--el-fill-color-light));
+}
+
+/* ---- 试推送表单 ---- */
+.panel :deep(.trap-sim-grid) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 18px;
+  margin: 4px 0;
+}
+.panel :deep(.field) {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.panel :deep(.field label) {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted, var(--el-text-color-secondary));
+  letter-spacing: 0.02em;
+}
+.panel :deep(.field input[type="text"]),
+.panel :deep(.field select) {
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line, var(--el-border-color));
+  background: var(--el-bg-color, var(--panel));
+  color: var(--text, var(--el-text-color-primary));
+  border-radius: 7px;
+  font-size: 13.5px;
+  font-family: inherit;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background-color 0.18s ease;
+  outline: none;
+}
+.panel :deep(.field input[type="text"]:hover),
+.panel :deep(.field select:hover) {
+  border-color: var(--line-soft, var(--el-border-color));
+}
+.panel :deep(.field input[type="text"]:focus),
+.panel :deep(.field select:focus) {
+  border-color: var(--primary, var(--el-color-primary));
+  box-shadow: 0 0 0 3px var(--focus-ring, rgba(59, 143, 217, 0.22));
+}
+.panel :deep(.field input[type="text"]:disabled),
+.panel :deep(.field select:disabled) {
+  opacity: 0.55;
+  cursor: not-allowed;
+  background: var(--inset-bg, var(--el-fill-color-light));
+}
+.panel :deep(.check-row) {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary, var(--el-text-color-regular));
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  transition: background-color 0.15s ease;
+}
+.panel :deep(.check-row:hover) {
+  background: var(--inset-bg, var(--el-fill-color-light));
+}
+.panel :deep(.check-row input[type="checkbox"]) {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--primary, var(--el-color-primary));
+}
+.panel :deep(button.primary) {
+  height: 36px;
+  padding: 0 22px;
+  border: none;
+  border-radius: 7px;
+  background: var(--primary, var(--el-color-primary));
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    transform 0.08s ease,
+    box-shadow 0.18s ease;
+  box-shadow: 0 2px 6px rgba(59, 143, 217, 0.28);
+}
+.panel :deep(button.primary:hover:not(:disabled)) {
+  background: var(--primary-hover, var(--el-color-primary-light-3));
+  box-shadow: 0 3px 10px rgba(59, 143, 217, 0.38);
+}
+.panel :deep(button.primary:active:not(:disabled)) {
+  transform: translateY(1px);
+}
+.panel :deep(button.primary:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- JSON 预览 ---- */
+.panel :deep(.trap-sim-out) {
+  margin-top: 14px;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  max-height: 280px;
+  overflow: auto;
+  background: var(--inset-bg, var(--el-fill-color-light));
+  border: 1px solid var(--line, var(--el-border-color-lighter));
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--text-secondary, var(--el-text-color-regular));
+  line-height: 1.55;
 }
 
 /* 分栏 */
@@ -705,25 +939,6 @@ onMounted(() => { void loadAll() })
 }
 .trap-offline-steps code {
   font-size: 13px;
-}
-
-/* 试推送 */
-.trap-sim-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 16px;
-}
-.trap-sim-out {
-  margin-top: 12px;
-  white-space: pre-wrap;
-  font-size: 0.8rem;
-  max-height: 240px;
-  overflow: auto;
-  background: var(--el-fill-color-light, var(--inset-bg));
-  border: 1px solid var(--el-border-color-lighter, var(--line));
-  border-radius: 6px;
-  padding: 10px 12px;
-  color: var(--el-text-color-primary);
 }
 
 /* 模态框 */

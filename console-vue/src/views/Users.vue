@@ -1,33 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, markRaw, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import {
-  ElAlert,
-  ElAvatar,
-  ElButton,
-  ElCard,
-  ElCol,
-  ElDescriptions,
-  ElDescriptionsItem,
-  ElDialog,
-  ElDrawer,
-  ElEmpty,
-  ElForm,
-  ElFormItem,
-  ElInput,
-  ElInputNumber,
-  ElMessage,
-  ElMessageBox,
-  ElOption,
-  ElPopover,
-  ElRow,
-  ElSelect,
-  ElSwitch,
-  ElTable,
-  ElTableColumn,
-  ElTag,
-  ElTooltip,
-} from 'element-plus'
+import { ElAlert, ElAvatar, ElButton, ElCard, ElCol, ElDescriptions, ElDescriptionsItem, ElDialog, ElDrawer, ElEmpty, ElForm, ElFormItem, ElInput, ElInputNumber, ElMessage, ElMessageBox, ElOption, ElPopover, ElRow, ElSelect, ElSwitch, ElTable, ElTree, ElTableColumn, ElTag, ElTooltip, ElDivider } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import {
   Delete,
@@ -119,7 +93,7 @@ interface AuditLogQuery {
 }
 
 interface PermissionItem {
-  key: string
+  code: string
   label?: string
   group?: string
 }
@@ -268,14 +242,66 @@ const departmentMap = computed<Record<string, Department>>(() => {
   return m
 })
 const departmentOptions = computed<{ label: string; value: string | null }[]>(() => {
-  const opts: { label: string; value: string | null }[] = [
-    { label: '顶层', value: null },
-  ]
+  const opts: { label: string; value: string | null }[] = [{ label: '(顶层)', value: null }]
   for (const d of departments.value) {
     opts.push({ label: d.name, value: d.id })
   }
   return opts
 })
+// 部门树形结构（ElTable tree-props）
+interface DeptTreeNode extends Department { children?: DeptTreeNode[] }
+const deptTree = computed<DeptTreeNode[]>(() => {
+  const list = departments.value
+  if (list.length === 0) return []
+  const byId = new Map<string, DeptTreeNode>()
+  for (const d of list) byId.set(d.id, { ...d, children: [] })
+  const roots: DeptTreeNode[] = []
+  for (const d of list) {
+    const node = byId.get(d.id)!
+    if (!d.parent_id || !byId.has(d.parent_id)) {
+      roots.push(node)
+    } else {
+      byId.get(d.parent_id)!.children!.push(node)
+    }
+  }
+  // sort by sort_order, then name
+  const sortRec = (arr: DeptTreeNode[]): void => {
+    arr.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name))
+    for (const n of arr) if (n.children && n.children.length) sortRec(n.children)
+  }
+  sortRec(roots)
+  return roots
+})
+
+// 部门选项（树形缩进 + 路径回显）
+const indentedDeptOptions = computed<{ label: string; value: string | null }[]>(() => {
+  const walk = (nodes: DeptTreeNode[], depth: number, out: { label: string; value: string | null }[]) => {
+    for (const n of nodes) {
+      // 深度 0: 无前缀; 深度 1+: 4空格*(depth-1) + '└─ ' + 空格
+      // 视觉对齐：子项缩进= 4*(depth-1) + '└─ ' 宽度
+      const prefix = depth === 0 ? '' : '    '.repeat(depth - 1) + '└─ '
+      out.push({ label: prefix + n.name, value: n.id })
+      if (n.children && n.children.length) walk(n.children, depth + 1, out)
+    }
+  }
+  const out: { label: string; value: string | null }[] = []
+  walk(deptTree.value, 0, out)
+  return out
+})
+// 部门 id -> 全路径名（Select 回显值：默认组织 / 运维 / yw1）
+const deptIdToPath = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  const walk = (nodes: DeptTreeNode[], trail: string[]) => {
+    for (const n of nodes) {
+      const cur = [...trail, n.name]
+      out[n.id] = cur.join(' / ')
+      if (n.children && n.children.length) walk(n.children, cur)
+    }
+  }
+  walk(deptTree.value, [])
+  return out
+})
+
 async function loadDepartments(force = false): Promise<void> {
   if (departments.value.length && !force) return
   departmentsLoading.value = true
@@ -390,12 +416,39 @@ const roles = ref<Role[]>([])
 const rolesLoading = ref(false)
 const permissions = ref<PermissionItem[]>([])
 const permissionsLoaded = ref(false)
-const permissionOptions = computed<{ label: string; value: string }[]>(() => {
+// 权限分组顺序（与后端 catalog 一致）
+const GROUP_ORDER = ['运营', '接入', '通知', '系统', '审计']
+interface GroupedPerm { name: string; items: PermissionItem[] }
+const groupedPermissions = computed<GroupedPerm[]>(() => {
   if (permissions.value.length === 0) return []
-  return permissions.value.map((p) => ({
-    label: p.label ?? p.key,
-    value: p.key,
-  }))
+  const map = new Map<string, PermissionItem[]>()
+  for (const p of permissions.value) {
+    const g = p.group ?? '其他'
+    if (!map.has(g)) map.set(g, [])
+    map.get(g)!.push(p)
+  }
+  const out: GroupedPerm[] = []
+  for (const g of GROUP_ORDER) {
+    if (map.has(g)) { out.push({ name: g, items: map.get(g)! }); map.delete(g) }
+  }
+  for (const [g, items] of map) out.push({ name: g, items })
+  return out
+})
+
+// 全部权限 (*) 状态：backend 约定 roles.permissions 包含 "*" 时表示全部权限
+const hasAllStar = computed<boolean>({
+  get: () => roleForm.permissions.includes('*'),
+  set: (val: boolean) => {
+    if (val) roleForm.permissions = ['*']
+    else roleForm.permissions = []
+  },
+})
+const starIndeterminate = computed<boolean>(() => {
+  if (roleForm.permissions.includes('*')) return false
+  const allCodes = permissions.value.map((p) => p.code)
+  if (allCodes.length === 0) return false
+  const checked = roleForm.permissions.filter((c) => c !== '*')
+  return checked.length > 0 && checked.length < allCodes.length
 })
 async function loadPermissions(force = false): Promise<void> {
   if (permissionsLoaded.value && !force) return
@@ -546,6 +599,36 @@ const userForm = reactive<{
   enabled: true,
 })
 const userFormRef = ref<FormInstance>()
+const userDeptTreeRef = ref<InstanceType<typeof ElTree> | null>(null)
+const parentDeptTreeRef = ref<InstanceType<typeof ElTree> | null>(null)
+const userDeptKw = ref('')
+const parentDeptKw = ref('')
+// 树节点过滤：匹配本节点 name，或任意祖先/后代节点 name 包含 kw
+function deptFilterNodeMethod(kw: string, data: DeptTreeNode): boolean {
+  if (!data) return true
+  if (!kw) return true
+  const k = kw.trim().toLowerCase()
+  if (!k) return true
+  const hit = (n: DeptTreeNode) => (n.name ?? '').toLowerCase().includes(k)
+  const down = (n: DeptTreeNode): boolean => hit(n) || !!(n.children && n.children.some(down))
+  return down(data)
+}
+// 递归自动展开命中的父节点 keys（用于搜索时自动展开）
+function deptExpandedKeys(kw: string, roots: DeptTreeNode[]): (string | number)[] {
+  if (!kw) return []
+  const k = kw.trim().toLowerCase(); if (!k) return []
+  const keys: (string | number)[] = []
+  const hasHitBelow = (n: DeptTreeNode): boolean => {
+    const selfHit = (n.name ?? '').toLowerCase().includes(k)
+    const chHit = !!(n.children && n.children.length) ? n.children!.some(hasHitBelow) : false
+    if ((selfHit || chHit) && n.children && n.children.length) keys.push(n.id)
+    return selfHit || chHit
+  }
+  roots.forEach(hasHitBelow)
+  return keys
+}
+const userDeptExpandedKeys = computed(() => deptExpandedKeys(userDeptKw.value, deptTree.value))
+const parentDeptExpandedKeys = computed(() => deptExpandedKeys(parentDeptKw.value, deptTree.value))
 const userRules: FormRules = {
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
@@ -754,13 +837,9 @@ onMounted(async () => {
               </div>
             </div>
           </template>
-          <ElTable :data="departments" v-loading="departmentsLoading" stripe>
+          <ElTable :data="deptTree" row-key="id" :tree-props="{ children: 'children', hasChildren: 'hasChildren' }" v-loading="departmentsLoading" stripe :default-expand-all="true">
             <ElTableColumn prop="name" label="名称" min-width="140" />
-            <ElTableColumn label="父级" min-width="100">
-              <template #default="{ row: raw }">
-                {{ parentNameOf((raw as Department).parent_id) }}
-              </template>
-            </ElTableColumn>
+
             <ElTableColumn prop="sort_order" label="排序" width="70" align="right" />
             <ElTableColumn label="启用" width="70" align="center">
               <template #default="{ row: raw }">
@@ -808,14 +887,45 @@ onMounted(async () => {
                 <ElInput v-model="deptForm.name" placeholder="请输入部门名称" />
               </ElFormItem>
               <ElFormItem label="父级" prop="parent_id">
-                <ElSelect v-model="deptForm.parent_id as unknown as string" placeholder="选择父级部门" clearable style="width: 100%">
-                  <ElOption
-                    v-for="opt in departmentOptions"
-                    :key="String(opt.value)"
-                    :label="opt.label"
-                    :value="opt.value as unknown as string"
+                <ElPopover placement="bottom-start" :width="300" trigger="click" :teleported="true">
+                  <template #reference>
+                    <div class="dept-picker" :class="{ 'is-empty': !deptForm.parent_id }">
+                      <span v-if="deptForm.parent_id" class="dp-label">{{ deptIdToPath[deptForm.parent_id] }}</span>
+                      <span v-else class="dp-placeholder">选择父级部门（留空=顶层）</span>
+                      <span class="dp-actions">
+                        <ElIcon v-if="deptForm.parent_id" class="dp-clear" @click.stop="deptForm.parent_id = null"><Close /></ElIcon>
+                        <span class="dp-arrow"></span>
+                      </span>
+                    </div>
+                  </template>
+                  <div class="dept-tree-topbar">
+                    <ElButton size="small" type="primary" link @click="deptForm.parent_id = null">
+                      📍 (顶层) · 作为根部门
+                    </ElButton>
+                  </div>
+                  <ElDivider style="margin: 4px 0 8px" />
+                  <ElInput
+                    v-model="parentDeptKw"
+                    size="small"
+                    clearable
+                    placeholder="搜索部门名称"
+                    style="margin-bottom: 8px"
+                    @input="(val) => { if (parentDeptTreeRef) parentDeptTreeRef.filter(val || '') }" @clear="() => { if (parentDeptTreeRef) parentDeptTreeRef.filter('') }"
                   />
-                </ElSelect>
+                  <ElTree
+                    :data="deptTree"
+                    node-key="id"
+                    ref="parentDeptTreeRef"
+                    :props="{ label: 'name', children: 'children' }"
+                    :current-node-key="(deptForm.parent_id || undefined) as string"
+                    highlight-current
+                    expand-on-click-node
+                    class="dept-tree"
+                    :filter-node-method="(val, data) => deptFilterNodeMethod(val, data as DeptTreeNode)"
+                    :expanded-keys="parentDeptExpandedKeys"
+                    @node-click="(n: DeptTreeNode) => { deptForm.parent_id = n.id }"
+                  />
+                </ElPopover>
               </ElFormItem>
             </div>
             <div class="form-two-col">
@@ -924,24 +1034,29 @@ onMounted(async () => {
             </div>
             <div class="form-two-col">
               <ElFormItem label="权限" prop="permissions" style="flex: 2">
-                <ElSelect
-                  v-if="!roleEditingIsSystem"
-                  v-model="roleForm.permissions"
-                  multiple
-                  filterable
-                  collapse-tags
-                  collapse-tags-tooltip
-                  reserve-keyword
-                  placeholder="选择权限"
-                  style="width: 100%"
-                >
-                  <ElOption
-                    v-for="opt in permissionOptions"
-                    :key="opt.value"
-                    :label="opt.label"
-                    :value="opt.value"
-                  />
-                </ElSelect>
+                <div v-if="!roleEditingIsSystem" class="perm-list">
+                  <div class="perm-star-row">
+                    <ElCheckbox
+                      v-model="hasAllStar"
+                      :indeterminate="starIndeterminate"
+                    >全部权限 <code>*</code></ElCheckbox>
+                  </div>
+                  <template v-for="group in groupedPermissions" :key="group.name">
+                    <div class="perm-group">{{ group.name }}</div>
+                    <ElCheckbox
+                      v-for="item in group.items"
+                      :key="item.code"
+                      :label="item.code"
+                      :value="item.code"
+                      v-model="roleForm.permissions"
+                      :disabled="hasAllStar"
+                    >
+                      <span class="perm-label">{{ item.label }}</span>
+                      <code class="perm-code">{{ item.code }}</code>
+                    </ElCheckbox>
+                  </template>
+                  <div v-if="permissions.length === 0" class="perm-empty">加载权限列表中...</div>
+                </div>
                 <ElTag v-else type="info" effect="dark" style="font-size: 14px; padding: 6px 12px;">
                   🔒 系统角色权限不可编辑 ({{ roleForm.permissions.length }} 项)
                 </ElTag>
@@ -1094,14 +1209,39 @@ onMounted(async () => {
                 />
               </ElFormItem>
               <ElFormItem label="部门" prop="department_id">
-                <ElSelect v-model="userForm.department_id as unknown as string" placeholder="选择部门" clearable style="width: 100%">
-                  <ElOption
-                    v-for="opt in departmentOptions.filter((o) => o.value !== null)"
-                    :key="String(opt.value)"
-                    :label="opt.label"
-                    :value="opt.value as unknown as string"
+                <ElPopover placement="bottom-start" :width="300" trigger="click" :teleported="true">
+                  <template #reference>
+                    <div class="dept-picker" :class="{ 'is-empty': !userForm.department_id }">
+                      <span v-if="userForm.department_id" class="dp-label">{{ deptIdToPath[userForm.department_id] }}</span>
+                      <span v-else class="dp-placeholder">选择部门</span>
+                      <span class="dp-actions">
+                        <ElIcon v-if="userForm.department_id" class="dp-clear" @click.stop="userForm.department_id = null"><Close /></ElIcon>
+                        <span class="dp-arrow"></span>
+                      </span>
+                    </div>
+                  </template>
+                  <ElInput
+                    v-model="userDeptKw"
+                    size="small"
+                    clearable
+                    placeholder="搜索部门名称"
+                    style="margin-bottom: 8px"
+                    @input="(val) => { if (userDeptTreeRef) userDeptTreeRef.filter(val || '') }" @clear="() => { if (userDeptTreeRef) userDeptTreeRef.filter('') }"
                   />
-                </ElSelect>
+                  <ElTree
+                    :data="deptTree"
+                    node-key="id"
+                    ref="userDeptTreeRef"
+                    :props="{ label: 'name', children: 'children' }"
+                    :current-node-key="(userForm.department_id || undefined) as string"
+                    highlight-current
+                    expand-on-click-node
+                    class="dept-tree"
+                    :filter-node-method="(val, data) => deptFilterNodeMethod(val, data as DeptTreeNode)"
+                    :expanded-keys="userDeptExpandedKeys"
+                    @node-click="(n: DeptTreeNode) => { userForm.department_id = n.id }"
+                  />
+                </ElPopover>
               </ElFormItem>
             </div>
             <div class="form-two-col">
@@ -1419,4 +1559,112 @@ onMounted(async () => {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ===== 角色权限 Checkbox 列表 ===== */
+.perm-dlg-hint {
+  margin: -8px 0 12px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.perm-dlg-hint code {
+  background: var(--el-fill-color-light);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--el-color-primary);
+}
+.perm-list {
+  max-height: 48vh;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: var(--el-fill-color-blank);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+}
+.perm-star-row {
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  margin-bottom: 6px;
+}
+.perm-group {
+  margin-top: 10px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--el-text-color-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.perm-group:first-of-type { margin-top: 0; }
+.perm-label {
+  margin-right: 6px;
+}
+.perm-code {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+  font-family: Menlo, Consolas, monospace;
+}
+.perm-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--el-text-color-placeholder);
+  font-size: 13px;
+}
+
+
+/* ===== 部门树形选择器 (ElPopover + ElTree) ===== */
+.dept-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 1px 12px;
+  background: var(--el-fill-color-blank);
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color .2s, box-shadow .2s;
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+}
+.dept-picker:hover { border-color: var(--el-color-primary-light-5); }
+.dept-picker.is-empty { color: var(--el-text-color-placeholder); }
+.dept-picker:focus-within {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px rgba(64,158,255,.15);
+}
+.dp-label, .dp-placeholder { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dp-actions {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  gap: 4px;
+  color: var(--el-text-color-secondary);
+}
+.dp-clear {
+  font-size: 14px;
+  color: var(--el-text-color-placeholder);
+  transition: color .15s;
+}
+.dp-clear:hover { color: var(--el-color-danger); }
+.dp-arrow {
+  display: inline-block;
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  opacity: .6;
+}
+.dept-tree {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 0 4px 6px;
+}
+.dept-tree-topbar {
+  margin: 0 4px;
+  padding: 6px 8px;
+  background: var(--el-fill-color-light);
+  border-radius: 4px;
+}
+
 </style>

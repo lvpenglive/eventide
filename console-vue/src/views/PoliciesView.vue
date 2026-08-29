@@ -22,6 +22,7 @@ import {
   ElTag,
   ElTooltip,
   ElUpload,
+  ElPagination,
 } from 'element-plus'
 import type { FormInstance, FormRules, UploadInstance, UploadProps, UploadRawFile } from 'element-plus'
 import {
@@ -194,6 +195,26 @@ const filterMatchMode = ref<PolicyMatchMode | ''>('')
 const filterSeverity = ref<AlertSeverity | ''>('')
 const filterEnabled = ref<'all' | 'on' | 'off'>('all')
 const filterQ = ref('')
+
+// —— 分页
+const POL_PAGE_SIZES = [10, 20, 50, 100] as const
+const polPage = ref(1)
+const polPageSize = ref<number>(POL_PAGE_SIZES[1])
+const pagedPolicies = computed<TrapPolicy[]>(() => {
+  const src = filtered.value
+  if (src.length <= polPageSize.value) return src
+  const start = (polPage.value - 1) * polPageSize.value
+  return src.slice(start, start + polPageSize.value)
+})
+function polOnPage(p: number) { polPage.value = Math.max(1, p) }
+function polOnSize(s: number) { polPageSize.value = s; polPage.value = 1 }
+// 显示总数：没筛选时尽量使用后端 listMeta.count（策略总数），否则用筛选后的长度
+const polTotal = computed(() => {
+  const anyFilter = Boolean(filterMatchMode.value || filterSeverity.value || filterEnabled.value !== 'all' || filterQ.value.trim())
+  return anyFilter ? filtered.value.length : Math.max(listMeta.count ?? 0, filtered.value.length)
+})
+import { watch as _polWatch } from 'vue'
+_polWatch([filterMatchMode, filterSeverity, filterEnabled, filterQ, policies], () => { polPage.value = 1 })
 
 const filtered = computed<TrapPolicy[]>(() => {
   let arr = policies.value
@@ -563,7 +584,7 @@ onMounted(() => { void loadAll() })
     <!-- 列表 -->
     <el-card shadow="never" style="border: 1px solid var(--line); background: var(--panel-bg, var(--panel));">
       <el-table
-        :data="filtered as unknown as TrapPolicy[]"
+        :data="pagedPolicies as unknown as TrapPolicy[]"
         size="small"
         stripe
         v-loading="loading"
@@ -655,6 +676,25 @@ onMounted(() => { void loadAll() })
         </el-table-column>
       </el-table>
     </el-card>
+
+    <div class="pol-pager">
+      <div class="pager-tip">
+        <template v-if="polTotal > filtered.length">
+          已加载 <span class="mono">{{ filtered.length }}</span> / 总计 <span class="mono">{{ polTotal }}</span>
+        </template>
+        <template v-else>共 <span class="mono">{{ polTotal }}</span> 条</template>
+      </div>
+      <el-pagination
+        v-model:current-page="polPage"
+        v-model:page-size="polPageSize"
+        :page-sizes="Array.from(POL_PAGE_SIZES)"
+        :total="polTotal"
+        layout="sizes, prev, pager, next, jumper, ->, total"
+        background
+        @current-change="polOnPage"
+        @size-change="polOnSize"
+      />
+    </div>
 
     <!-- 编辑 / 新建 Dialog (xl) -->
     <el-dialog v-model="dlgVisible" :title="dlgMode === 'create' ? '新建策略' : '编辑策略'" width="1100px" top="6vh">
@@ -891,3 +931,30 @@ onMounted(() => { void loadAll() })
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+/* === 分页条 === */
+.pol-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 18px;
+  margin: 14px 0;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  background: var(--el-bg-color, #fff);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.pol-pager .pager-tip {
+  font-size: 13px;
+  color: var(--el-text-color-secondary, #909399);
+}
+.pol-pager .mono {
+  font-family: Consolas, Menlo, monospace;
+  font-weight: 600;
+  color: var(--el-text-color-primary, #303133);
+  padding: 0 2px;
+}
+</style>

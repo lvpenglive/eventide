@@ -1,6 +1,6 @@
 // B3 批次：Notify Logs
 import { request } from './request'
-import type { NotifyLogItem, NotifyQuery, NotifyQuerySuccess } from './types'
+import type { NotifyListResp, NotifyLogItem, NotifyQuery, NotifyQuerySuccess } from './types'
 
 function normalizeSuccess(
   v: NotifyQuerySuccess | undefined,
@@ -20,7 +20,7 @@ function normalizeSuccess(
 /**
  * 通知发送日志：GET /api/notifies
  */
-export function listNotifies(params?: NotifyQuery): Promise<NotifyLogItem[]> {
+export function listNotifies(params?: NotifyQuery): Promise<NotifyLogItem[] | NotifyListResp> {
   const query: Record<string, string | number | boolean | undefined | null> = {}
   if (params) {
     if (params.channel_id !== undefined && params.channel_id !== null) {
@@ -34,8 +34,11 @@ export function listNotifies(params?: NotifyQuery): Promise<NotifyLogItem[]> {
     if (typeof params.limit === 'number') {
       query.limit = params.limit
     }
+    if (typeof params.page === 'number' && params.page > 0) {
+      query.page = params.page
+    }
   }
-  return request<NotifyLogItem[]>('/api/notifies', {
+  return request<NotifyLogItem[] | NotifyListResp>('/api/notifies', {
     method: 'GET',
     query: Object.keys(query).length ? query : undefined,
   })

@@ -14,6 +14,7 @@ import {
   ElTable,
   ElTableColumn,
   ElTag,
+  ElPagination,
 } from 'element-plus'
 import {
   Delete,
@@ -211,6 +212,21 @@ const channels = ref<NotifyChannel[]>([])
 const filterDatasource = ref<string>('')
 const filterQ = ref('')
 const filterEnabled = ref<'' | 'true' | 'false'>('')
+
+// —— 分页
+const RULES_PAGE_SIZES = [10, 20, 50, 100] as const
+const rulesPage = ref(1)
+const rulesPageSize = ref<number>(RULES_PAGE_SIZES[1])
+const pagedRules = computed(() => {
+  const src = filteredRules.value
+  if (src.length <= rulesPageSize.value) return src
+  const start = (rulesPage.value - 1) * rulesPageSize.value
+  return src.slice(start, start + rulesPageSize.value)
+})
+function rulesOnPage(p: number) { rulesPage.value = Math.max(1, p) }
+function rulesOnSize(s: number) { rulesPageSize.value = s; rulesPage.value = 1 }
+import { watch as _rulesWatch } from 'vue'
+_rulesWatch([filterDatasource, filterQ, filterEnabled, rules, datasources], () => { rulesPage.value = 1 })
 
 const filteredRules = computed(() => {
   return rules.value.filter((r) => {
@@ -652,7 +668,7 @@ function goDatasources() {
     <!-- 表格 -->
     <el-table
       v-else
-      :data="filteredRules"
+      :data="pagedRules"
       v-loading="loading"
       stripe
       style="width: 100%; margin-top: 12px"
@@ -714,6 +730,20 @@ function goDatasources() {
         </template>
       </el-table-column>
     </el-table>
+
+    <div class="panel rules-pager">
+      <div class="pager-tip">共 <span class="mono">{{ filteredRules.length }}</span> 条</div>
+      <el-pagination
+        v-model:current-page="rulesPage"
+        v-model:page-size="rulesPageSize"
+        :page-sizes="Array.from(RULES_PAGE_SIZES)"
+        :total="filteredRules.length"
+        layout="sizes, prev, pager, next, jumper, ->, total"
+        background
+        @current-change="rulesOnPage"
+        @size-change="rulesOnSize"
+      />
+    </div>
 
     <!-- 试跑 Drawer -->
     <ElDrawer
@@ -963,6 +993,39 @@ function goDatasources() {
 </template>
 
 <style scoped>
+.panel {
+  background: var(--el-bg-color, #fff);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  margin-bottom: 14px;
+}
+
+/* === 分页条 === */
+.rules-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 18px;
+  margin: 14px 0;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  background: var(--el-bg-color, #fff);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.rules-pager .pager-tip {
+  font-size: 13px;
+  color: var(--el-text-color-secondary, #909399);
+}
+.rules-pager .mono {
+  font-family: Consolas, Menlo, monospace;
+  font-weight: 600;
+  color: var(--el-text-color-primary, #303133);
+  padding: 0 2px;
+}
+
 .rules-view {
   padding: 8px 16px 24px 16px;
 }

@@ -7,7 +7,26 @@ import type {
   EnrichPreviewResp,
   LookupTable,
   LookupInput,
+  IngressRoute,
 } from './types'
+
+function _enrichInputFromRow(row: EnrichRule): EnrichInput {
+  return {
+    name: row.name,
+    kind: typeof row.kind === 'string' ? row.kind : undefined,
+    enabled: row.enabled,
+    priority: typeof row.priority === 'number' ? row.priority : 100,
+    matchers: row.matchers ? { ...row.matchers } : {},
+    templates: row.templates ? { ...row.templates } : {},
+    field_templates: row.field_templates ? { ...row.field_templates } : {},
+    label_extracts: row.label_extracts ? { ...row.label_extracts } : {},
+    write_labels: Boolean(row.write_labels),
+    match_key: row.match_key ?? undefined,
+    mappings: row.mappings ? Object.fromEntries(Object.entries(row.mappings).map(([k, v]) => [k, { ...v }])) : {},
+    lookup_table_ids: row.lookup_table_ids ? [...row.lookup_table_ids] : [],
+    lookup_match_keys: row.lookup_match_keys ? { ...row.lookup_match_keys } : {},
+  }
+}
 
 // ——————————————————————————————————————
 // Enrich Rules
@@ -59,15 +78,35 @@ export async function deleteEnrich(id: string): Promise<{ ok: true }> {
 }
 
 // ——————————————————————————————————————
+// Ingress Routes (for enrich preview)
+// ——————————————————————————————————————
+export function listIngresses(): Promise<IngressRoute[]> {
+  return request<IngressRoute[]>('/api/ingress', {
+    method: 'GET',
+  })
+}
+
+// ——————————————————————————————————————
 // Enrich Preview
 // ——————————————————————————————————————
 
-export function previewEnrich(
+export async function previewEnrich(
   body: EnrichPreviewInput,
 ): Promise<EnrichPreviewResp> {
+  const merged: EnrichPreviewInput = { ...body }
+  // 兼容：如果传了 rule_id 但没传 rule / use_saved，则自动把 rule_id 转为 rule 草稿
+  if (merged.rule_id && !merged.rule && !merged.use_saved) {
+    try {
+      const rule = await getEnrich(merged.rule_id)
+      merged.rule = _enrichInputFromRow(rule)
+      if (!merged.rule_name) merged.rule_name = rule.name
+    } catch (_e) {
+      // 失败就回退：忽略 rule_id 直接按原样请求
+    }
+  }
   return request<EnrichPreviewResp>('/api/enrich/preview', {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify(merged),
   })
 }
 

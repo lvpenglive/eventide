@@ -58,9 +58,6 @@ export async function request<T = unknown>(
       ...rest,
     })
   } catch (e: unknown) {
-    // 网络级失败（DNS/直连 vite preview 时 /api 不存在、CORS 预检失败等）：
-    // 不是鉴权失败，不要清 token 也不要发 auth:unauthorized。
-    // 调用方（me / overview loader）要 catch 后降级走缓存兜底。
     const message =
       e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : '网络请求失败'
     throw new RequestError(message, 0)
@@ -85,7 +82,9 @@ export async function request<T = unknown>(
     const message =
       (data && typeof data === 'object' && 'message' in data && typeof (data as { message: unknown }).message === 'string')
         ? (data as { message: string }).message
-        : `请求失败 (${response.status})`
+        : (data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string')
+          ? (data as { error: string }).error
+          : `请求失败 (${response.status})`
     throw new RequestError(message, response.status, data)
   }
 

@@ -114,7 +114,7 @@ export const routes: RouteRecordRaw[] = [
         path: 'lookups',
         name: 'Lookups',
         component: LookupsView,
-        meta: { perm: 'lookups:read', title: '查询字典' },
+        meta: { perm: 'lookups:read', title: '外表管理' },
       },
       {
         path: 'users',

@@ -11,6 +11,7 @@ import {
   ElSelect,
   ElTable,
   ElTableColumn,
+  ElPagination,
 } from 'element-plus'
 import {
   Monitor,
@@ -206,6 +207,21 @@ const datasources = ref<LocalDatasource[]>([])
 const loading = ref(false)
 const filterKind = ref<DatasourceKind | ''>('')
 const filterQ = ref('')
+
+// —— 分页
+const DS_PAGE_SIZES = [10, 20, 50, 100] as const
+const dsPage = ref(1)
+const dsPageSize = ref<number>(DS_PAGE_SIZES[1])
+const pagedDatasources = computed<LocalDatasource[]>(() => {
+  const src = filtered.value
+  if (src.length <= dsPageSize.value) return src
+  const start = (dsPage.value - 1) * dsPageSize.value
+  return src.slice(start, start + dsPageSize.value)
+})
+function dsOnPage(p: number) { dsPage.value = Math.max(1, p) }
+function dsOnSize(s: number) { dsPageSize.value = s; dsPage.value = 1 }
+import { watch as _dsWatch } from 'vue'
+_dsWatch([filterKind, filterQ, datasources], () => { dsPage.value = 1 })
 
 const filtered = computed<LocalDatasource[]>(() => {
   let rows = datasources.value
@@ -532,7 +548,7 @@ async function submitForm(): Promise<void> {
     <!-- 列表 -->
     <div v-else class="ds-table-wrap panel" style="padding: 0;">
       <el-table
-        :data="filtered"
+        :data="pagedDatasources"
         v-loading="loading"
         stripe
         border
@@ -589,6 +605,20 @@ async function submitForm(): Promise<void> {
           </template>
         </el-table-column>
       </el-table>
+    </div>
+
+    <div class="ds-pager">
+      <div class="pager-tip">共 <span class="mono">{{ filtered.length }}</span> 条</div>
+      <el-pagination
+        v-model:current-page="dsPage"
+        v-model:page-size="dsPageSize"
+        :page-sizes="Array.from(DS_PAGE_SIZES)"
+        :total="filtered.length"
+        layout="sizes, prev, pager, next, jumper, ->, total"
+        background
+        @current-change="dsOnPage"
+        @size-change="dsOnSize"
+      />
     </div>
 
     <!-- 类型选择 Dialog：先选类型再填表单（与老版一致） -->
@@ -768,6 +798,31 @@ async function submitForm(): Promise<void> {
 
 <style>
 /* 非 scoped；类名加 ds- 前缀避免与全局样式冲突 */
+
+/* === 分页条 === */
+.ds-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 18px;
+  margin: 14px 0;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  background: var(--el-bg-color, #fff);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.ds-pager .pager-tip {
+  font-size: 13px;
+  color: var(--el-text-color-secondary, #909399);
+}
+.ds-pager .mono {
+  font-family: Consolas, Menlo, monospace;
+  font-weight: 600;
+  color: var(--el-text-color-primary, #303133);
+  padding: 0 2px;
+}
 
 .datasources-page {
   display: flex;

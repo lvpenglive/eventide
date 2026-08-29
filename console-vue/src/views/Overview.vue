@@ -56,13 +56,6 @@ async function loadData() {
   const t0 = performance.now()
   try {
     data.value = await apiOverview()
-    // 如果没有告警数据，添加演示数据以便测试弹窗功能
-    // TODO: 生产环境移除此逻辑
-    if (data.value && (!data.value.recent_alerts || data.value.recent_alerts.length === 0)) {
-      data.value.recent_alerts = getMockAlerts()
-      data.value.alerts_firing = data.value.recent_alerts.filter(a => a.status === 'firing').length
-      data.value.alerts_total = data.value.recent_alerts.length
-    }
   } catch (e) {
     const msg = e && typeof e === 'object' && 'message' in e ? String((e as { message: unknown }).message) : '加载总览数据失败'
     errMsg.value = msg
@@ -89,13 +82,6 @@ async function loadData() {
       is_leader: false,
       leader_holder_id: '',
       cluster_enabled: false,
-    }
-    // 添加演示数据以便测试弹窗功能
-    // TODO: 生产环境移除此逻辑
-    if (data.value && data.value.recent_alerts.length === 0) {
-      data.value.recent_alerts = getMockAlerts()
-      data.value.alerts_firing = data.value.recent_alerts.filter(a => a.status === 'firing').length
-      data.value.alerts_total = data.value.recent_alerts.length
     }
   } finally {
     const elapsed = performance.now() - t0
@@ -327,119 +313,7 @@ function getSourceLabel(item: AlertRecentItem): string {
 }
 
 // ===== 演示数据（仅开发环境使用） =====
-function getMockAlerts(): AlertRecentItem[] {
-  const now = Date.now()
-  return [
-    {
-      id: '550e8400-e29b-41d4-a716-446655440001',
-      fingerprint: 'abc123def4567890abcdef1234567890',
-      summary: '【P0】核心 Oracle RAC 节点 2 脑裂宕机',
-      description: 'RAC 节点2 ORA-29701 被驱逐；ASM 磁盘组 MOUNTED 失败，备份集 N-2 前无法保障',
-      severity: 'critical',
-      status: 'firing',
-      created_at: new Date(now - 3600000).toISOString(),
-      datasource: '监控系统',
-      rule_id: '550e8400-e29b-41d4-a716-446655440011',
-      annotations: {
-        rule_name: '数据库脑裂检测',
-        source: 'Oracle RAC',
-        summary: '【P0】核心 Oracle RAC 节点 2 脑裂宕机',
-        host: 'db-rac-node2',
-        cluster: 'prod-cluster',
-        error_code: 'ORA-29701',
-      },
-      labels: {
-        business: '核心交易',
-        system: 'oracle-rac',
-        level: 'P0',
-      },
-    },
-    {
-      id: '550e8400-e29b-41d4-a716-446655440002',
-      fingerprint: 'def456abc7890123def4567890123456',
-      summary: '【P1】信用卡反欺诈规则引擎 TPS 下降 70%',
-      description: '规则引擎执行耗时从 38ms → 312ms；CPU/Mem 同时飙升；最近 3 分钟误拒率 5.8%',
-      severity: 'warning',
-      status: 'firing',
-      created_at: new Date(now - 7200000).toISOString(),
-      datasource: 'APM监控',
-      rule_id: '550e8400-e29b-41d4-a716-446655440012',
-      annotations: {
-        rule_name: '性能异常检测',
-        source: '应用性能监控',
-        summary: '【P1】信用卡反欺诈规则引擎 TPS 下降 70%',
-        service: 'fraud-engine',
-        metric: 'tps',
-        threshold: '70%',
-      },
-      labels: {
-        business: '反欺诈',
-        service: 'fraud-engine',
-        level: 'P1',
-      },
-    },
-    {
-      id: '550e8400-e29b-41d4-a716-446655440003',
-      fingerprint: 'ghi789def0123456ghi789012345678',
-      summary: '【P1】开放银行 API 8 个第三方接入降级',
-      description: '8 个开放银行合作方 API 连续 5xx，熔断打开；SDK 版本低于 v2.1.7 的接口报错',
-      severity: 'warning',
-      status: 'pending',
-      created_at: new Date(now - 10800000).toISOString(),
-      datasource: 'API网关',
-      rule_id: '550e8400-e29b-41d4-a716-446655440013',
-      annotations: {
-        rule_name: '第三方服务健康度',
-        source: 'API网关监控',
-        summary: '【P1】开放银行 API 8 个第三方接入降级',
-        affected_apis: '8',
-        error_type: '5xx',
-      },
-      labels: {
-        business: '开放银行',
-        level: 'P1',
-      },
-    },
-    {
-      id: '550e8400-e29b-41d4-a716-446655440004',
-      fingerprint: 'jkl012mno3456789jkl0123456789012',
-      summary: '【P2】Hadoop 数据湖 2TB/day ODS 抽取延迟 > 6 小时',
-      description: 'Spark ODS 抽取 Stage-2 Shuffle Fetch Failed，多次重试；下游 BI 日报 T+1 出件受影响',
-      severity: 'info',
-      status: 'firing',
-      created_at: new Date(now - 14400000).toISOString(),
-      datasource: '大数据平台',
-      rule_id: '550e8400-e29b-41d4-a716-446655440014',
-      annotations: {
-        rule_name: '数据延迟监控',
-        source: '大数据平台',
-        summary: '【P2】Hadoop 数据湖 2TB/day ODS 抽取延迟 > 6 小时',
-        pipeline: 'ods_daily_etl',
-        stage: 'stage-2',
-      },
-      labels: {
-        business: '数据分析',
-        level: 'P2',
-      },
-    },
-    {
-      id: '550e8400-e29b-41d4-a716-446655440005',
-      fingerprint: 'pqr345stu6789012pqr3456789012345',
-      summary: '试推送 Demo Alertmanager',
-      description: '控制台试推送：模拟告警触发',
-      severity: 'info',
-      status: 'resolved',
-      created_at: new Date(now - 18000000).toISOString(),
-      datasource: 'Demo',
-      rule_id: '550e8400-e29b-41d4-a716-446655440015',
-      annotations: {
-        rule_name: '演示规则',
-        source: '演示',
-      },
-      labels: {},
-    },
-  ]
-}
+
 
 // inflight 进度条
 const inflightPercent = computed(() => {
@@ -480,6 +354,11 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
     </el-skeleton>
 
     <template v-else>
+      <div class="ov-page-header">
+        <h2 class="ov-page-title">总览</h2>
+        <p class="ov-page-sub">系统健康 · 核心指标 · 实时告警 · 接入压力 — 30 秒自动刷新</p>
+      </div>
+
       <!-- 顶部操作栏 -->
       <div class="ov-actions">
         <span class="ov-refresh-hint">{{ refreshHint }}</span>
@@ -633,22 +512,6 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
         </div>
       </el-card>
 
-      <!-- ====== 3. 告警折线趋势（空占位） ====== -->
-      <el-card class="panel panel-trend" shadow="never">
-        <template #header>
-          <div class="panel-head">
-            <span class="panel-title">📈 告警趋势（近 24h）</span>
-            <el-tag type="info" size="small">折线图占位</el-tag>
-          </div>
-        </template>
-        <div class="trend-empty">
-          <el-empty description="趋势图占位：批次 1 接入 ECharts（含 firing / resolved / pending 三条折线 + 对比上周）">
-            <template #image>
-              <el-icon :size="56" color="var(--muted)"><WarningFilled /></el-icon>
-            </template>
-          </el-empty>
-        </div>
-      </el-card>
 
       <!-- ====== 4. 最近告警 + 通知跳过（两栏） ====== -->
       <el-row :gutter="16">
@@ -919,6 +782,10 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
 </template>
 
 <style scoped>
+/* === 页面标题区 === */
+.ov-page-header { margin-bottom: 8px; }
+.ov-page-title { margin: 0 0 4px; font-size: 22px; font-weight: 600; color: var(--heading, #303133); }
+.ov-page-sub { margin: 0; font-size: 13px; color: var(--muted, #909399); }
 .overview-page {
   display: flex;
   flex-direction: column;
@@ -942,14 +809,14 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
 .ov-skeleton {
   background: var(--panel-surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 20px 22px;
 }
 
 .panel {
   background: var(--panel-surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 8px;
   box-shadow: 0 1px 0 var(--overlay-soft) inset;
 }
 .panel :deep(.el-card__header) {

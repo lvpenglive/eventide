@@ -420,6 +420,13 @@ export interface NotifyLogItem {
   created_at: string
 }
 
+export interface NotifyListResp {
+  items: NotifyLogItem[]
+  total: number
+  page: number
+  limit: number
+}
+
 export type NotifyQuerySuccess =
   | '1' | 'true' | 'ok'
   | '0' | 'false' | 'fail'
@@ -431,6 +438,7 @@ export interface NotifyQuery {
   channel_id?: string
   success?: NotifyQuerySuccess
   q?: string
+  page?: number
   limit?: number
 }
 
@@ -479,13 +487,41 @@ export interface EnrichInput {
 }
 
 export type EnrichPreviewInput = EnrichInput & {
+  /** 原始 alert（labels/annotations/severity/status 平铺对象，deprecated：建议用 payload） */
   alert?: unknown
+  /** 指定一条已保存规则试跑（预览引擎建议直接用 rule/use_saved） */
   rule_id?: string
+  /** 原始 ingress / 外部 JSON payload；试跑时会走字段映射解析 */
+  payload?: unknown
+  /** 选择一条 Ingress 来解析 payload（Ingress 内 options 控制映射字段） */
+  ingress_id?: string
+  /** 当 rule 未配置时，应用全部已保存规则 */
+  use_saved?: boolean
+  /** Enrich engine 入参：原始 value（可选，payload 模式可不填） */
+  value?: number
+  /** 显示/入参用的 rule 名字（缺省=PreviewRule） */
+  rule_name?: string
+  /** 草稿规则（优先级最高） */
+  rule?: EnrichInput
 }
 
 export interface EnrichPreviewResp {
   ok?: boolean
   alert?: unknown
+  /** 引擎实际结果：丰富后的 labels */
+  labels?: Labels
+  /** 引擎实际结果：丰富后的 annotations */
+  annotations?: Labels
+  /** 引擎实际结果：丰富后的 severity 字符串（见 Severity） */
+  severity?: string
+  /** 入参解析方式：labels / builtin_parser / ingress_mapping */
+  parsed_via?: string
+  /** 丰富前的 labels/annotations/severity（Diff 用） */
+  before?: { labels?: Labels; annotations?: Labels; severity?: string }
+  /** 原始告警（engine 输入的 AlertEvent 快照；可选） */
+  original?: unknown
+  /** 引擎执行失败时的文案 */
+  error?: string
   [k: string]: unknown
 }
 
