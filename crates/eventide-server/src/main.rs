@@ -41,8 +41,83 @@ use crate::state::AppState;
 use std::time::Duration;
 use eventide_trap_data::{MibStore, PolicyRedis, PolicyStore, S3Store};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // 日志初始化（先于 tokio runtime）
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    // 动态确定 worker_threads：环境变量 > cgroup 限制 > 物理核心数
+    let worker_threads = get_worker_threads();
+    tracing::info!(worker_threads, "tokio runtime configured");
+
+    // 手动构建 tokio runtime（替代 #[tokio::main]），以便控制 worker_threads
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .thread_name("eventide-worker")
+        .build()
+        .context("build tokio runtime")?;
+
+    runtime.block_on(async_main())
+}
+
+fn get_worker_threads() -> usize {
+    // 1. 环境变量优先（运维手动指定）
+    if let Ok(s) = std::env::var("EVENTIDE_WORKER_THREADS") {
+        if let Ok(n) = s.parse::<usize>() {
+            return n.clamp(2, 64);
+        }
+    }
+
+    // 2. cgroup 限制检测（容器环境，如 K8s/Docker）
+    if let Some(cores) = read_cgroup_cpu_quota() {
+        return cores;
+    }
+
+    // 3. 系统物理核心数兜底
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(4)
+        .min(64)
+}
+
+/// 读取 cgroup v1 / v2 的 CPU quota，推算可用核心数。
+/// 容器环境（如 K8s）下，available_parallelism() 可能返回宿主机核数而非配额。
+fn read_cgroup_cpu_quota() -> Option<usize> {
+    // cgroup v1: /sys/fs/cgroup/cpu/cpu.cfs_quota_us + cpu.cfs_period_us
+    if let Ok(quota_str) = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") {
+        if let Ok(quota) = quota_str.trim().parse::<i64>() {
+            if quota > 0 && quota != 100000 {
+                if let Ok(period_str) = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us") {
+                    if let Ok(period) = period_str.trim().parse::<i64>() {
+                        let cores = (quota as f64 / period as f64).round() as usize;
+                        return Some(cores.clamp(1, 64));
+                    }
+                }
+            }
+        }
+    }
+
+    // cgroup v2: /sys/fs/cgroup/cpu.max  格式 "<quota> <period>"，quota=0 表示无限
+    if let Ok(content) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        let parts: Vec<&str> = content.split_whitespace().collect();
+        if parts.len() >= 1 && !parts[0].starts_with('0') {
+            if let Ok(quota) = parts[0].parse::<u64>() {
+                let period = parts.get(1).and_then(|p| p.parse::<u64>().ok()).unwrap_or(100000);
+                let cores = (quota as f64 / period as f64).round() as usize;
+                return Some(cores.clamp(1, 64));
+            }
+        }
+    }
+
+    None
+}
+
+async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
