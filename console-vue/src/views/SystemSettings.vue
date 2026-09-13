@@ -237,35 +237,63 @@ async function handleRegenerateTrapToken(): Promise<boolean> {
 }
 
 // ============================================================
-// 分组 c) 告警风暴抑制 Storm
+// 分组 c) 抗告警风暴 Storm（与旧版 / README §11.8 对齐）
 // ============================================================
-const stormGroupByCandidates: string[] = ['severity', 'alertname', 'instance', 'ip', 'team']
-const stormActionOptions: { label: string; value: string }[] = [
-  { label: '仅静默 silence_only', value: 'silence_only' },
-  { label: '仅一次通知 notify_once', value: 'notify_once' },
-  { label: '静默 + 一次通知 both', value: 'both' },
-  { label: '关闭抑制 disable', value: 'disable' },
+const stormAggModeOptions = [
+  { label: 'head+summary（首条+摘要）', value: 'head+summary' },
+  { label: 'summary_only（仅摘要）', value: 'summary_only' },
 ]
 const storm = reactive<StormSettingsView>({
-  enabled: false,
-  window_seconds: 300,
-  threshold: 10,
-  group_by: ['alertname', 'severity'],
-  action: 'notify_once',
-  silence_seconds: 900,
+  throttle_enabled: true,
+  min_interval_seconds: 60,
+  max_per_window: 20,
+  window_seconds: 60,
+  throttle_key: 'fingerprint',
+  resolve_max_per_window: null,
+  aggregate_enabled: false,
+  aggregate_window_seconds: 30,
+  group_by: 'alertname',
+  aggregate_mode: 'head+summary',
+  aggregate_sample_labels: 'ip,instance,alertIp',
+  aggregate_sample_limit: 10,
+  ingress_max_inflight: 100,
+  degrade_skip_notify: false,
+  degrade_notify_per_sec: 50,
   source: 'toml',
 })
 const stormSaving = ref(false)
 const stormLoading = ref(false)
+
+function applyStormResp(resp: StormSettingsView): void {
+  storm.throttle_enabled = !!resp.throttle_enabled
+  storm.min_interval_seconds = Number(resp.min_interval_seconds) || 60
+  storm.max_per_window = Number(resp.max_per_window) || 20
+  storm.window_seconds = Number(resp.window_seconds) || 60
+  storm.throttle_key = String(resp.throttle_key || 'fingerprint')
+  storm.resolve_max_per_window =
+    resp.resolve_max_per_window == null
+      ? null
+      : Number(resp.resolve_max_per_window)
+  storm.aggregate_enabled = !!resp.aggregate_enabled
+  storm.aggregate_window_seconds = Number(resp.aggregate_window_seconds) || 30
+  storm.group_by = String(resp.group_by || 'alertname')
+  storm.aggregate_mode = String(resp.aggregate_mode || 'head+summary')
+  storm.aggregate_sample_labels = String(resp.aggregate_sample_labels || '')
+  storm.aggregate_sample_limit = Number(resp.aggregate_sample_limit) || 10
+  storm.ingress_max_inflight = Number(resp.ingress_max_inflight ?? 100)
+  storm.degrade_skip_notify = !!resp.degrade_skip_notify
+  storm.degrade_notify_per_sec = Number(resp.degrade_notify_per_sec) || 50
+  storm.source = resp.source || 'toml'
+}
 
 async function loadStorm(force = false): Promise<void> {
   if (stormLoading.value && !force) return
   stormLoading.value = true
   try {
     const resp = await getStorm()
-    Object.assign(storm, resp)
+    applyStormResp(resp)
   } catch (e) {
-    ElMessage.error(errMsgOf(e, '加载告警风暴设置失败'))
+    ElMessage.error(errMsgOf(e, '加载抗风暴设置失败'))
   } finally {
     stormLoading.value = false
   }
@@ -275,19 +303,31 @@ async function saveStorm(): Promise<boolean> {
   stormSaving.value = true
   try {
     const body: StormSettingsUpdate = {
-      enabled: !!storm.enabled,
-      window_seconds: Number(storm.window_seconds) || 0,
-      threshold: Number(storm.threshold) || 0,
-      group_by: [...(storm.group_by ?? [])],
-      action: storm.action,
-      silence_seconds: Number(storm.silence_seconds) || 0,
+      throttle_enabled: !!storm.throttle_enabled,
+      min_interval_seconds: Number(storm.min_interval_seconds) || 60,
+      max_per_window: Number(storm.max_per_window) || 20,
+      window_seconds: Number(storm.window_seconds) || 60,
+      throttle_key: String(storm.throttle_key || '').trim() || 'fingerprint',
+      resolve_max_per_window:
+        storm.resolve_max_per_window == null || Number.isNaN(Number(storm.resolve_max_per_window))
+          ? null
+          : Number(storm.resolve_max_per_window),
+      aggregate_enabled: !!storm.aggregate_enabled,
+      aggregate_window_seconds: Number(storm.aggregate_window_seconds) || 30,
+      group_by: String(storm.group_by || '').trim() || 'alertname',
+      aggregate_mode: storm.aggregate_mode || 'head+summary',
+      aggregate_sample_labels: String(storm.aggregate_sample_labels || '').trim(),
+      aggregate_sample_limit: Number(storm.aggregate_sample_limit) || 10,
+      ingress_max_inflight: Number(storm.ingress_max_inflight ?? 100),
+      degrade_skip_notify: !!storm.degrade_skip_notify,
+      degrade_notify_per_sec: Number(storm.degrade_notify_per_sec) || 50,
     }
     const resp = await putStorm(body)
-    Object.assign(storm, resp)
-    ElMessage.success('告警风暴抑制设置已保存')
+    applyStormResp(resp)
+    ElMessage.success('抗风暴配置已保存并生效')
     return true
   } catch (e) {
-    ElMessage.error(errMsgOf(e, '保存告警风暴设置失败'))
+    ElMessage.error(errMsgOf(e, '保存抗风暴设置失败'))
     return false
   } finally {
     stormSaving.value = false
@@ -297,18 +337,18 @@ async function saveStorm(): Promise<boolean> {
 async function resetStorm(): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      '确定将告警风暴设置重置为 eventide.toml 中的默认值？',
-      '重置告警风暴',
-      { type: 'warning' }
+      '清除控制台覆盖，恢复为 eventide.toml [storm] 默认值？',
+      '恢复 toml 默认',
+      { type: 'warning' },
     )
   } catch {
     return
   }
   stormSaving.value = true
   try {
-    const resp = await putStorm({ enabled: storm.enabled, window_seconds: storm.window_seconds, reset: true })
-    Object.assign(storm, resp)
-    ElMessage.success('已重置为默认配置')
+    const resp = await putStorm({ reset: true })
+    applyStormResp(resp)
+    ElMessage.success('已恢复 toml [storm]')
   } catch (e) {
     ElMessage.error(errMsgOf(e, '重置失败'))
   } finally {
@@ -522,7 +562,7 @@ onMounted(() => {
 <template>
   <div class="system-settings-page">
     <h2 class="page-title">系统设置</h2>
-    <p class="page-subtitle">历史事件 / Trap Token / 告警风暴 / UI Beta 开关 / 产品许可</p>
+    <p class="page-subtitle">历史事件 / Trap Token / 抗告警风暴 / UI Beta / 产品许可</p>
 
     <ElAffix :offset="0" class="toolbar-affix">
       <div class="toolbar-bar">
@@ -672,7 +712,7 @@ onMounted(() => {
       </div>
     </ElCard>
 
-    <!-- c) 告警风暴抑制 -->
+    <!-- c) 抗告警风暴 -->
     <ElCard shadow="never" class="section-card" v-loading="stormLoading">
       <template #header>
         <div class="card-header" @click="toggleSection('storm')">
@@ -680,85 +720,167 @@ onMounted(() => {
             <span class="collapse-icon" :class="{ 'is-collapsed': sectionCollapsed.storm }">
               <el-icon :size="14"><ArrowDown v-if="!sectionCollapsed.storm" /><ArrowRight v-else /></el-icon>
             </span>
-            <span class="card-title">c) 告警风暴抑制（Storm）</span>
+            <span class="card-title">c) 抗告警风暴</span>
           </div>
           <div class="card-actions">
-            <ElButton :icon="Refresh" :loading="stormSaving" @click.stop="resetStorm">重置为默认</ElButton>
+            <ElButton :loading="stormSaving" @click.stop="resetStorm">恢复 toml 默认</ElButton>
             <ElButton type="primary" :icon="UploadFilled" :loading="stormSaving" @click.stop="saveStorm">保存</ElButton>
           </div>
         </div>
       </template>
 
       <div v-show="!sectionCollapsed.storm">
-      <ElForm label-position="top" class="storm-form">
-        <ElFormItem label="启用风暴抑制 enabled">
-          <ElSwitch v-model="storm.enabled" />
-          <span class="form-hint">当前配置来源：{{ storm.source === 'runtime' ? '运行时覆盖' : 'eventide.toml 默认' }}</span>
-        </ElFormItem>
-        <ElRow :gutter="20">
-          <ElCol :xs="24" :sm="12">
-            <ElFormItem label="窗口（秒）window_seconds">
-              <ElInputNumber
-                v-model="storm.window_seconds"
-                :min="1"
-                :max="86400"
-                controls-position="right"
-                style="width: 100%"
-              />
-            </ElFormItem>
-          </ElCol>
-          <ElCol :xs="24" :sm="12">
-            <ElFormItem label="阈值 threshold">
-              <ElInputNumber
-                v-model="storm.threshold"
-                :min="1"
-                :max="100000"
-                controls-position="right"
-                style="width: 100%"
-              />
-            </ElFormItem>
-          </ElCol>
-        </ElRow>
-        <ElFormItem label="分组字段 group_by">
-          <ElSelect
-            v-model="storm.group_by"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            :reserve-keyword="false"
-            placeholder="选择或输入分组字段"
-            style="width: 100%"
-          >
-            <ElOption
-              v-for="c in stormGroupByCandidates"
-              :key="c"
-              :label="c"
-              :value="c"
+        <ElAlert
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 14px"
+          title="节流 / 聚合 / 接入削峰。保存后当前进程立即生效（写入 MySQL；多实例其他节点需重启或各自保存一次）。"
+        >
+          <template #default>
+            来源 <code>{{ storm.source || 'toml' }}</code>。详解见 README §11.8。
+          </template>
+        </ElAlert>
+
+        <ElForm label-position="top" class="storm-form">
+          <ElDivider content-position="left">通知节流（P0）</ElDivider>
+          <ElFormItem label="启用节流">
+            <ElSwitch v-model="storm.throttle_enabled" />
+          </ElFormItem>
+          <ElRow :gutter="16">
+            <ElCol :xs="24" :sm="12" :md="6">
+              <ElFormItem label="最短间隔（秒）">
+                <ElInputNumber
+                  v-model="storm.min_interval_seconds"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+            <ElCol :xs="24" :sm="12" :md="6">
+              <ElFormItem label="窗口秒数">
+                <ElInputNumber
+                  v-model="storm.window_seconds"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+            <ElCol :xs="24" :sm="12" :md="6">
+              <ElFormItem label="窗口内最多发送">
+                <ElInputNumber
+                  v-model="storm.max_per_window"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+            <ElCol :xs="24" :sm="12" :md="6">
+              <ElFormItem label="恢复通知上限（可选）">
+                <ElInputNumber
+                  v-model="storm.resolve_max_per_window"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                  placeholder="默认=最多发送"
+                />
+              </ElFormItem>
+            </ElCol>
+          </ElRow>
+          <ElFormItem label="节流键 throttle_key">
+            <ElInput
+              v-model="storm.throttle_key"
+              placeholder="fingerprint 或 labels:alertname"
+              clearable
+              style="max-width: 480px"
             />
-          </ElSelect>
-          <div class="form-hint">内置候选：severity、alertname、instance、ip、team；支持自由输入自定义标签名。</div>
-        </ElFormItem>
-        <ElFormItem label="动作 action">
-          <ElSelect v-model="storm.action" placeholder="选择动作" style="max-width: 360px">
-            <ElOption
-              v-for="o in stormActionOptions"
-              :key="o.value"
-              :label="o.label"
-              :value="o.value"
+            <div class="form-hint">常用：fingerprint；按告警名聚合节流可用 labels:alertname。</div>
+          </ElFormItem>
+
+          <ElDivider content-position="left">时间窗聚合（P1）</ElDivider>
+          <ElFormItem label="启用聚合">
+            <ElSwitch v-model="storm.aggregate_enabled" />
+          </ElFormItem>
+          <ElRow :gutter="16">
+            <ElCol :xs="24" :sm="12">
+              <ElFormItem label="聚合窗口（秒）">
+                <ElInputNumber
+                  v-model="storm.aggregate_window_seconds"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+            <ElCol :xs="24" :sm="12">
+              <ElFormItem label="采样条数上限">
+                <ElInputNumber
+                  v-model="storm.aggregate_sample_limit"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+          </ElRow>
+          <ElFormItem label="分组 group_by">
+            <ElInput
+              v-model="storm.group_by"
+              placeholder="alertname 或 alertname,namespace"
+              clearable
+              style="max-width: 480px"
             />
-          </ElSelect>
-        </ElFormItem>
-        <ElFormItem label="静默时长（秒）silence_seconds">
-          <ElInputNumber
-            v-model="storm.silence_seconds"
-            :min="0"
-            :max="86400 * 30"
-            controls-position="right"
-          />
-          <span class="form-hint" style="margin-left: 12px">仅 silence_only / both 生效。</span>
-        </ElFormItem>
-      </ElForm>
+          </ElFormItem>
+          <ElFormItem label="模式">
+            <ElSelect v-model="storm.aggregate_mode" style="max-width: 360px">
+              <ElOption
+                v-for="o in stormAggModeOptions"
+                :key="o.value"
+                :label="o.label"
+                :value="o.value"
+              />
+            </ElSelect>
+          </ElFormItem>
+          <ElFormItem label="摘要采样标签">
+            <ElInput
+              v-model="storm.aggregate_sample_labels"
+              placeholder="ip,instance,alertIp"
+              clearable
+              style="max-width: 480px"
+            />
+          </ElFormItem>
+
+          <ElDivider content-position="left">接入削峰（P2）</ElDivider>
+          <ElRow :gutter="16">
+            <ElCol :xs="24" :sm="12">
+              <ElFormItem label="最大并发 inflight（0=不限）">
+                <ElInputNumber
+                  v-model="storm.ingress_max_inflight"
+                  :min="0"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+            <ElCol :xs="24" :sm="12">
+              <ElFormItem label="降级通知速率阈值 / 秒">
+                <ElInputNumber
+                  v-model="storm.degrade_notify_per_sec"
+                  :min="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </ElFormItem>
+            </ElCol>
+          </ElRow>
+          <ElFormItem label="高压策略">
+            <ElSwitch v-model="storm.degrade_skip_notify" active-text="高压时只落库不发通知" />
+            <div class="form-hint">对应 degrade_skip_notify；适合 Webhook 被压测打爆时保入库。</div>
+          </ElFormItem>
+        </ElForm>
       </div>
     </ElCard>
 

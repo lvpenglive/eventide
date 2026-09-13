@@ -671,18 +671,37 @@ export interface TrapTokenSettingsUpdate {
 }
 
 export interface StormSettingsView {
-  enabled: boolean
-  window_seconds?: number
-  threshold?: number
-  group_by?: string[]
-  action?: string
-  silence_seconds?: number
+  /** 通知节流 P0 */
+  throttle_enabled: boolean
+  min_interval_seconds: number
+  max_per_window: number
+  window_seconds: number
+  /** fingerprint 或 labels:alertname,ip */
+  throttle_key: string
+  /** 恢复通知上限；null/省略 = 与 max_per_window 相同 */
+  resolve_max_per_window?: number | null
+  /** 时间窗聚合 P1 */
+  aggregate_enabled: boolean
+  aggregate_window_seconds: number
+  /** 逗号分隔标签，如 alertname 或 alertname,namespace */
+  group_by: string
+  /** head+summary | summary_only */
+  aggregate_mode: string
+  aggregate_sample_labels: string
+  aggregate_sample_limit: number
+  /** 接入削峰 P2 */
+  ingress_max_inflight: number
+  degrade_skip_notify: boolean
+  degrade_notify_per_sec: number
+  /** `runtime` (app_kv) | `toml` */
   source?: string
-  reset?: boolean
   [k: string]: unknown
 }
 
-export type StormSettingsUpdate = Partial<StormSettingsView>
+export type StormSettingsUpdate = Partial<StormSettingsView> & {
+  /** 清除 app_kv，恢复 eventide.toml [storm] */
+  reset?: boolean
+}
 
 /**
  * UI Beta Toggle Settings View
