@@ -129,7 +129,12 @@ function parseLookupText(text: string): ParseResult {
   const lines = text.split(/\r?\n/).map((l) => l.replace(/\uFEFF/g, ''))
     .filter((l) => l.trim() !== '' && !l.trim().startsWith('//') && !l.trim().startsWith('#'))
   if (!lines.length) { out.ok = true; return out }
-  const headerRaw = lines[0].split(/[\t\s]+/).map((s) => s.trim()).filter(Boolean)
+  const useTab = lines[0].includes('\t')
+  const splitLine = (line: string) =>
+    useTab
+      ? line.split('\t').map((s) => s.trim())
+      : line.split(/[\t\s]+/).map((s) => s.trim()).filter(Boolean)
+  const headerRaw = splitLine(lines[0]).filter(Boolean)
   if (headerRaw.length < 1) {
     out.error = '表头为空'; return out
   }
@@ -142,9 +147,9 @@ function parseLookupText(text: string): ParseResult {
   for (let i = 1; i < lines.length; i++) {
     lineNo++
     const line = lines[i]
-    const cells = line.split(/[\t\s]+/).map((s) => s.trim()).filter(Boolean)
-    if (!cells.length) continue
-    if (cells.length < 2) {
+    const cells = splitLine(line)
+    if (!cells.length || !cells[0]) continue
+    if (!useTab && cells.length < 2) {
       out.error = `第 ${lineNo} 行：至少需要 key + 一个属性列`; return out
     }
     const key = cells[0]
@@ -382,6 +387,15 @@ async function onDelete(row: LookupTable) {
       <ElTableColumn label="外部同步" width="100" align="center">
         <template #default="{ row }">
           <ElTag v-if="asLookup(row).external_sync" type="warning" size="small" effect="plain">同步</ElTag>
+          <span v-else class="empty-tip">—</span>
+        </template>
+      </ElTableColumn>
+      <ElTableColumn label="最近同步" width="170">
+        <template #default="{ row }">
+          <div v-if="asLookup(row).synced_at">
+            <div class="cell-updated">{{ formatTime(asLookup(row).synced_at) }}</div>
+            <div class="empty-tip">{{ asLookup(row).sync_source || 'external' }}</div>
+          </div>
           <span v-else class="empty-tip">—</span>
         </template>
       </ElTableColumn>
