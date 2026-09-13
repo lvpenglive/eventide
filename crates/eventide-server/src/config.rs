@@ -35,6 +35,9 @@ pub struct AppConfig {
     /// Reverse-proxy target for console `/trap-api/*` (Trap service HTTP).
     #[serde(default)]
     pub trap: TrapProxyConfig,
+    /// MeridianOps / external lookup rows sync (token + optional allowlist).
+    #[serde(default)]
+    pub lookup_sync: LookupSyncConfig,
 }
 
 /// `[trap]` — Trap service BFF + MIB/policy storage (RustFS).
@@ -85,6 +88,17 @@ impl Default for TrapProxyConfig {
             mib_cache_dir: default_mib_cache(),
         }
     }
+}
+
+/// `[lookup_sync]` — external systems (e.g. MeridianOps) push lookup rows.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LookupSyncConfig {
+    /// Fallback sync token when runtime `app_kv` token is empty.
+    #[serde(default)]
+    pub token: String,
+    /// Optional UUID allowlist; empty = any table with `external_sync=true`.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
 }
 
 impl TrapProxyConfig {
@@ -427,6 +441,7 @@ impl Default for AppConfig {
             cluster: ClusterConfig::default(),
             elasticsearch: ElasticsearchConfig::default(),
             trap: TrapProxyConfig::default(),
+            lookup_sync: LookupSyncConfig::default(),
         }
     }
 }

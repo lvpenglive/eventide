@@ -13,7 +13,7 @@ use crate::audit::audit_mutators;
 use crate::scheduler;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
@@ -40,6 +40,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/ingress/{id}/push",
             post(crate::ingress_api::receive_auto),
+        )
+        .route(
+            "/api/lookups/{id}/rows",
+            put(sync_lookup_rows),
         )
         .with_state(state.clone());
 
@@ -154,6 +158,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/settings/trap-token",
             get(settings::get_trap_token).put(settings::put_trap_token),
+        )
+        .route(
+            "/api/settings/lookup-sync",
+            get(settings::get_lookup_sync).put(settings::put_lookup_sync),
         )
         .route(
             "/api/settings/storm",
@@ -1984,16 +1992,36 @@ struct LookupInput {
     sync_key_from_text: bool,
     #[serde(default = "default_true")]
     enabled: bool,
+    /// Allow MeridianOps / sync-token to push rows for this table.
+    #[serde(default)]
+    external_sync: bool,
 }
 
 fn default_lookup_key() -> String {
     "instance".into()
 }
 
+fn default_reject_empty() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct LookupRowsSyncInput {
+    #[serde(default)]
+    rows: BTreeMap<String, BTreeMap<String, String>>,
+    /// When true (default), refuse to overwrite with an empty `rows` map.
+    #[serde(default = "default_reject_empty")]
+    reject_empty: bool,
+    /// Caller identity stored on the table (e.g. MeridianOps).
+    #[serde(default)]
+    sync_source: Option<String>,
+}
+
 fn lookup_from_input(
     id: Uuid,
     input: LookupInput,
     created_at: DateTime<Utc>,
+    existing: Option<&LookupTable>,
 ) -> ApiResult<LookupTable> {
     if input.name.trim().is_empty() {
         return Err(ApiError::bad("name required"));
@@ -2032,6 +2060,11 @@ fn lookup_from_input(
         key_label,
         rows,
         enabled: input.enabled,
+        external_sync: input.external_sync,
+        synced_at: existing.and_then(|e| e.synced_at),
+        sync_source: existing
+            .map(|e| e.sync_source.clone())
+            .unwrap_or_default(),
         created_at,
         updated_at: Utc::now(),
     })
@@ -2062,7 +2095,7 @@ async fn create_lookup(
     State(state): State<Arc<AppState>>,
     Json(input): Json<LookupInput>,
 ) -> ApiResult<(StatusCode, Json<LookupTable>)> {
-    let table = lookup_from_input(Uuid::new_v4(), input, Utc::now())?;
+    let table = lookup_from_input(Uuid::new_v4(), input, Utc::now(), None)?;
     state
         .db
         .upsert_lookup_table(&table)
@@ -2081,7 +2114,7 @@ async fn update_lookup(
         .get_lookup_table(id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("lookup table not found"))?;
-    let table = lookup_from_input(id, input, existing.created_at)?;
+    let table = lookup_from_input(id, input, existing.created_at, Some(&existing))?;
     state
         .db
         .upsert_lookup_table(&table)
@@ -2102,6 +2135,119 @@ async fn delete_lookup(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found("lookup table not found"))
+    }
+}
+
+/// Replace lookup `rows` only. Auth: sync token **or** JWT with `enrich:write`.
+/// Mounted on the public router so MeridianOps can push without a user session.
+async fn sync_lookup_rows(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<LookupRowsSyncInput>,
+) -> ApiResult<Json<LookupTable>> {
+    let id = parse_id(&id)?;
+    let mut table = state
+        .db
+        .get_lookup_table(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("lookup table not found"))?;
+
+    authorize_lookup_rows_sync(&state, &headers, &table)?;
+
+    if input.reject_empty && input.rows.is_empty() {
+        return Err(ApiError::bad(
+            "rows empty：拒绝覆盖空表（可设 reject_empty=false 强制清空）",
+        ));
+    }
+
+    let now = Utc::now();
+    table.rows = input.rows;
+    table.external_sync = true;
+    table.synced_at = Some(now);
+    if let Some(src) = input.sync_source {
+        let src = src.trim();
+        if !src.is_empty() {
+            table.sync_source = src.to_string();
+        }
+    }
+    if table.sync_source.trim().is_empty() {
+        table.sync_source = "external".into();
+    }
+    table.updated_at = now;
+
+    state
+        .db
+        .upsert_lookup_table(&table)
+        .map_err(ApiError::internal)?;
+    Ok(Json(table))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn authorize_lookup_rows_sync(
+    state: &AppState,
+    headers: &HeaderMap,
+    table: &LookupTable,
+) -> ApiResult<()> {
+    let Some(token) = bearer_token(headers) else {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "未登录：需要 Bearer sync token 或 JWT".into(),
+        });
+    };
+
+    let sync_token = state.effective_lookup_sync_token();
+    if !sync_token.is_empty() && token == sync_token {
+        let prefs = state.lookup_sync_prefs();
+        let allow = prefs.normalized_allowlist();
+        if !allow.is_empty() {
+            let id_s = table.id.to_string();
+            if !allow.iter().any(|x| x == &id_s) {
+                return Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    message: "该外表不在 lookup sync allowlist 中".into(),
+                });
+            }
+        } else if !table.external_sync {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                message: "该外表未开启 external_sync；请先在控制台勾选，或配置 allowlist"
+                    .into(),
+            });
+        }
+        return Ok(());
+    }
+
+    // JWT with enrich:write
+    let mut validation = jsonwebtoken::Validation::default();
+    validation.validate_exp = true;
+    match jsonwebtoken::decode::<crate::auth::Claims>(
+        &token,
+        &jsonwebtoken::DecodingKey::from_secret(state.config.auth.jwt_secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(data) => {
+            if data.claims.has_perm("enrich:write") {
+                Ok(())
+            } else {
+                Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    message: "缺少权限 enrich:write".into(),
+                })
+            }
+        }
+        Err(_) => Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "登录已失效或 sync token 无效".into(),
+        }),
     }
 }
 

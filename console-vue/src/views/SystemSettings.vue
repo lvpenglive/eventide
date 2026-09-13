@@ -35,6 +35,8 @@ import {
   putAlertHistory,
   getTrapToken,
   putTrapToken,
+  getLookupSync,
+  putLookupSync,
   getStorm,
   putStorm,
   getUiBetaToggle,
@@ -48,6 +50,7 @@ import type {
   AlertHistorySettingsView,
   AlertHistorySettingsUpdate,
   TrapTokenSettingsView,
+  LookupSyncSettingsView,
   StormSettingsView,
   StormSettingsUpdate,
   UiBetaSettingsView,
@@ -105,6 +108,7 @@ function fallbackCopy(text: string, onDone: () => void): void {
 const sectionCollapsed = reactive({
   alertHistory: false,
   trapToken: false,
+  lookupSync: false,
   storm: false,
   uiBeta: false,
   license: false,
@@ -233,6 +237,81 @@ async function handleRegenerateTrapToken(): Promise<boolean> {
     return false
   } finally {
     trapTokenRegenerating.value = false
+  }
+}
+
+// ============================================================
+// 分组 b2) Lookup Sync Token（MeridianOps 外表同步）
+// ============================================================
+const lookupSync = reactive<LookupSyncSettingsView>({
+  configured: false,
+  allowlist: [],
+} as LookupSyncSettingsView)
+const lookupSyncLoading = ref(false)
+const lookupSyncRegenerating = ref(false)
+const lookupSyncCleartext = ref<string | null>(null)
+const lookupSyncAllowlistText = ref('')
+
+async function loadLookupSync(force = false): Promise<void> {
+  if (lookupSyncLoading.value && !force) return
+  lookupSyncLoading.value = true
+  try {
+    const resp = await getLookupSync()
+    Object.assign(lookupSync, resp)
+    lookupSyncAllowlistText.value = (resp.allowlist || []).join('\n')
+    lookupSyncCleartext.value = null
+  } catch (e) {
+    ElMessage.error(errMsgOf(e, '加载外表同步 Token 失败'))
+  } finally {
+    lookupSyncLoading.value = false
+  }
+}
+
+async function handleRegenerateLookupSync(): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      '重新生成后，MeridianOps 需更新为新 Token。继续？',
+      '重新生成外表同步 Token',
+      { type: 'warning', confirmButtonText: '确定生成' },
+    )
+  } catch {
+    return false
+  }
+  lookupSyncRegenerating.value = true
+  try {
+    const resp = await putLookupSync({ rotate: true })
+    Object.assign(lookupSync, resp)
+    lookupSyncCleartext.value = resp.token || null
+    if (lookupSyncCleartext.value) {
+      await ElMessageBox.alert(
+        `新的外表同步 Token：\n\n${lookupSyncCleartext.value}\n\n请立即复制，关闭后不再显示明文。`,
+        '外表同步 Token 已重新生成',
+        { confirmButtonText: '我已复制并关闭' },
+      )
+    }
+    return true
+  } catch (e) {
+    ElMessage.error(errMsgOf(e, '重新生成失败'))
+    return false
+  } finally {
+    lookupSyncRegenerating.value = false
+  }
+}
+
+async function saveLookupSyncAllowlist(): Promise<boolean> {
+  const allowlist = lookupSyncAllowlistText.value
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  try {
+    const resp = await putLookupSync({ allowlist })
+    Object.assign(lookupSync, resp)
+    lookupSyncAllowlistText.value = (resp.allowlist || []).join('\n')
+    ElMessage.success('allowlist 已保存')
+    return true
+  } catch (e) {
+    ElMessage.error(errMsgOf(e, '保存 allowlist 失败'))
+    return false
   }
 }
 
@@ -525,6 +604,7 @@ async function refreshAll(): Promise<void> {
   await Promise.all([
     loadAlertHistory(true),
     loadTrapToken(true),
+    loadLookupSync(true),
     loadStorm(true),
     loadUiBeta(true),
     loadLicense(true),
@@ -536,6 +616,7 @@ const anyLoading = computed(
   () =>
     alertHistoryLoading.value ||
     trapTokenLoading.value ||
+    lookupSyncLoading.value ||
     stormLoading.value ||
     uiBetaLoading.value ||
     licenseLoading.value
@@ -552,6 +633,7 @@ onMounted(() => {
   void Promise.all([
     loadAlertHistory(),
     loadTrapToken(),
+    loadLookupSync(),
     loadStorm(),
     loadUiBeta(),
     loadLicense(),
@@ -709,6 +791,71 @@ onMounted(() => {
           </div>
         </ElDescriptionsItem>
       </ElDescriptions>
+      </div>
+    </ElCard>
+
+    <!-- b2) Lookup Sync Token -->
+    <ElCard shadow="never" class="section-card" v-loading="lookupSyncLoading">
+      <template #header>
+        <div class="card-header" @click="toggleSection('lookupSync')">
+          <div class="card-header-left">
+            <span class="collapse-icon" :class="{ 'is-collapsed': sectionCollapsed.lookupSync }">
+              <el-icon :size="14"><ArrowDown v-if="!sectionCollapsed.lookupSync" /><ArrowRight v-else /></el-icon>
+            </span>
+            <span class="card-title">b2) 外表同步 Token（MeridianOps）</span>
+          </div>
+          <ElButton
+            type="warning"
+            :loading="lookupSyncRegenerating"
+            @click.stop="handleRegenerateLookupSync"
+          >
+            重新生成
+          </ElButton>
+        </div>
+      </template>
+
+      <div v-show="!sectionCollapsed.lookupSync">
+        <ElAlert
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 12px"
+          title="MeridianOps 使用 Bearer sync token 调用 PUT /api/lookups/{id}/rows。allowlist 为空时仅允许 external_sync=true 的外表；非空则只允许名单内 id。"
+        />
+        <ElDescriptions :column="1" border>
+          <ElDescriptionsItem label="Token 状态">
+            <ElTag
+              :type="lookupSync.configured ? 'success' : 'danger'"
+              size="large"
+              effect="dark"
+              style="font-weight: 600; padding: 6px 14px;"
+            >
+              {{ lookupSync.configured ? '已设置' : '未设置' }}
+            </ElTag>
+          </ElDescriptionsItem>
+          <ElDescriptionsItem label="Token 预览">
+            <span v-if="lookupSync.token_preview" class="mono">{{ lookupSync.token_preview }}</span>
+            <span v-else style="color: var(--el-text-color-secondary)">（未配置）</span>
+          </ElDescriptionsItem>
+          <ElDescriptionsItem v-if="lookupSync.source" label="配置来源">
+            {{ lookupSync.source === 'runtime' ? '运行时' : lookupSync.source === 'toml' ? 'eventide.toml' : '未配置' }}
+          </ElDescriptionsItem>
+          <ElDescriptionsItem v-if="lookupSyncCleartext" label="一次性明文（仅此次显示）">
+            <code class="mono">{{ lookupSyncCleartext }}</code>
+            <ElButton size="small" style="margin-left: 12px" @click="copyText(lookupSyncCleartext!, 'Token 已复制')">
+              复制
+            </ElButton>
+          </ElDescriptionsItem>
+          <ElDescriptionsItem label="Allowlist（每行一个 lookup id，可空）">
+            <ElInput
+              v-model="lookupSyncAllowlistText"
+              type="textarea"
+              :rows="3"
+              placeholder="留空 = 仅 external_sync 外表"
+            />
+            <ElButton type="primary" style="margin-top: 8px" @click="saveLookupSyncAllowlist">保存 allowlist</ElButton>
+          </ElDescriptionsItem>
+        </ElDescriptions>
       </div>
     </ElCard>
 

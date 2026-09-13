@@ -38,6 +38,7 @@ Eventide 是一款用 **Rust** 实现的轻量级多数据源告警引擎，实�
   - [14.3 构建影子前端（Vue3）](#143-构建影子前端vue3)
   - [14.4 本地调试日志](#144-本地调试日志)
   - [14.5 控制台 E2E](#145-控制台-e2e)
+  - [14.6 API 冒烟（整体关联）](#146-api-冒烟整体关联)
 
 ---
 
@@ -403,6 +404,8 @@ Header：`Authorization: Bearer <jwt>`
 | `/api/enrich` | 丰富规则 CRUD |
 | `/api/enrich/preview` | 试跑预览（可带接入映射 + 草稿规则） |
 | `/api/lookups` | 台账 CRUD |
+| `PUT /api/lookups/{id}/rows` | 仅覆盖 rows（JWT `enrich:write` 或 lookup sync token） |
+| `/api/settings/lookup-sync` | 外表同步 Token + allowlist |
 
 ---
 
@@ -508,6 +511,30 @@ cargo run -p eventide-license -- verify customer.eventide-lic.json
 1. **告警丰富 → 台账数据**：导入主机对照表（匹配键如 `ip`）  
 2. **丰富规则**：勾选台账，描述写 `{{labels.台账名.主机名}}`  
 3. 用「试跑预览」验证；真实通知内容为丰富后的告警  
+
+### 9.7 MeridianOps 同步外表（部分台账）
+
+MeridianOps 为主数据，Eventide 只接收**选定外表**的 rows 投影：
+
+1. 控制台「外表管理」打开目标台账，勾选 **外部同步**，记下 `id`
+2. 「系统设置 → 外表同步 Token」生成 token；可选填写 allowlist（只同步这些 id）
+3. MeridianOps 定时/变更后推送：
+
+```http
+PUT /api/lookups/{id}/rows
+Authorization: Bearer <lookup_sync_token>
+Content-Type: application/json
+
+{
+  "rows": {
+    "10.20.0.1": { "主机名": "web01", "联系人": "张三" }
+  },
+  "reject_empty": true,
+  "sync_source": "MeridianOps"
+}
+```
+
+规则：allowlist 非空 → 仅名单内 id；allowlist 空 → 仅 `external_sync=true` 的表。默认拒绝空 `rows` 覆盖。也可用用户 JWT（`enrich:write`）调用同一接口。
 
 ---
 
@@ -1454,6 +1481,29 @@ python scripts/e2e_console.py
 覆盖：错误/正确登录、URL 不泄露密码、侧栏各页加载、接入帮助与一键创建、试推送弹窗、告警/设置页、退出登录。失败时截图写入 `docs/e2e-artifacts/`（可用 `EVENTIDE_E2E_ARTIFACTS=0` 关闭）。
 
 相关脚本：`scripts/capture_console_screenshots.py`（手册配图采集）。
+
+### 14.6 API 冒烟（整体关联）
+
+不依赖浏览器，验证后端核心读接口与 **Ingress → 渠道通知（MeridianOps）** 闭环：
+
+```powershell
+# 需已启动 Eventide；联调 MeridianOps 时渠道需 enabled 且可达
+powershell -File scripts/smoke-eventide.ps1
+
+# 可选
+# $env:EVENTIDE_URL='http://127.0.0.1:8080'
+# $env:MERIDIAN_CHANNEL='MeridianOps'
+# $env:SKIP_MERIDIAN='1'   # 跳过通知联调
+```
+
+覆盖：`/api/health`、登录、总览/数据源/规则/渠道/接入/告警/静默/维护窗/通知/审计/风暴设置、`/v2/`、渠道测试、新 fingerprint 接入并校验 notify `success`。
+
+压测接入（MeridianOps 链路，唯一 fingerprint 并发推送）：
+
+```powershell
+powershell -File scripts/load-ingress.ps1 -Total 300 -Concurrency 30
+powershell -File scripts/load-ingress.ps1 -Total 500 -Concurrency 80
+```
 
 ---
 

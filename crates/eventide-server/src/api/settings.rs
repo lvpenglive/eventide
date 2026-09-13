@@ -227,6 +227,118 @@ fn trap_token_view(state: &AppState, reveal: Option<String>) -> TrapTokenView {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LookupSyncView {
+    pub configured: bool,
+    pub token_preview: String,
+    pub token_length: usize,
+    pub source: String,
+    pub allowlist: Vec<String>,
+    /// Present only right after rotate / explicit set.
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LookupSyncUpdate {
+    pub token: Option<String>,
+    #[serde(default)]
+    pub rotate: bool,
+    #[serde(default)]
+    pub clear: bool,
+    /// Replace allowlist when present (empty clears → fall back to external_sync tables).
+    pub allowlist: Option<Vec<String>>,
+}
+
+pub async fn get_lookup_sync(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<LookupSyncView>> {
+    Ok(Json(lookup_sync_view(&state, None)))
+}
+
+pub async fn put_lookup_sync(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<LookupSyncUpdate>,
+) -> ApiResult<Json<LookupSyncView>> {
+    let mut prefs = if let Ok(g) = state.lookup_sync.read() {
+        g.clone()
+    } else {
+        crate::lookup_sync::LookupSyncPrefs::default()
+    };
+
+    let mut reveal: Option<String> = None;
+    if body.clear {
+        prefs.token.clear();
+    } else if body.rotate {
+        let t = crate::lookup_sync::generate_token();
+        prefs.token = t.clone();
+        reveal = Some(t);
+    } else if let Some(t) = body.token {
+        let t = t.trim().to_string();
+        if t.len() < 8 {
+            return Err(ApiError::bad("token 至少 8 个字符"));
+        }
+        prefs.token = t.clone();
+        reveal = Some(t);
+    } else if body.allowlist.is_none() {
+        return Err(ApiError::bad(
+            "请提供 token、rotate=true、clear=true 或 allowlist",
+        ));
+    }
+
+    if let Some(list) = body.allowlist {
+        prefs.allowlist = list
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    prefs.updated_at = chrono::Utc::now().to_rfc3339();
+
+    let json = serde_json::to_string(&prefs).map_err(ApiError::internal)?;
+    state
+        .db
+        .set_kv(crate::lookup_sync::LOOKUP_SYNC_KEY, &json)
+        .map_err(ApiError::internal)?;
+    state.set_lookup_sync_prefs(prefs);
+
+    Ok(Json(lookup_sync_view(&state, reveal)))
+}
+
+fn lookup_sync_view(state: &AppState, reveal: Option<String>) -> LookupSyncView {
+    let runtime = state
+        .lookup_sync
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let toml_token = state.config.lookup_sync.token.trim().to_string();
+    let (source, effective_token) = if !runtime.token.trim().is_empty() {
+        ("runtime", runtime.token.trim().to_string())
+    } else if !toml_token.is_empty() {
+        ("toml", toml_token)
+    } else {
+        ("empty", String::new())
+    };
+    let mut allowlist = runtime.normalized_allowlist();
+    if allowlist.is_empty() {
+        allowlist = state
+            .config
+            .lookup_sync
+            .allowlist
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    LookupSyncView {
+        configured: !effective_token.is_empty(),
+        token_preview: crate::lookup_sync::mask_token(&effective_token),
+        token_length: effective_token.len(),
+        source: source.into(),
+        allowlist,
+        token: reveal,
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct StormSettingsView {
     #[serde(flatten)]
     pub storm: StormConfig,

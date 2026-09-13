@@ -532,6 +532,10 @@ export interface LookupTable {
   key_label: string
   rows: Record<string, Labels>
   enabled: boolean
+  /** 允许外部系统（如 MeridianOps）用 sync token 推送 rows */
+  external_sync?: boolean
+  synced_at?: string | null
+  sync_source?: string
   created_at: string
   updated_at: string
 }
@@ -544,6 +548,14 @@ export interface LookupInput {
   text?: string
   key_label_from_header?: boolean
   enabled?: boolean
+  external_sync?: boolean
+}
+
+export interface LookupRowsSyncInput {
+  rows: Record<string, Labels>
+  /** 默认 true：拒绝用空 rows 覆盖 */
+  reject_empty?: boolean
+  sync_source?: string
 }
 
 // —— IAM：Department / Role / User / Audit ——
@@ -668,6 +680,22 @@ export interface TrapTokenSettingsView {
 
 export interface TrapTokenSettingsUpdate {
   regenerate?: boolean
+}
+
+export interface LookupSyncSettingsView {
+  configured: boolean
+  token_preview?: string
+  token_length?: number
+  source?: string
+  allowlist: string[]
+  token?: string | null
+}
+
+export interface LookupSyncSettingsUpdate {
+  token?: string
+  rotate?: boolean
+  clear?: boolean
+  allowlist?: string[]
 }
 
 export interface StormSettingsView {

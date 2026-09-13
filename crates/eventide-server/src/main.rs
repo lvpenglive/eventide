@@ -21,6 +21,7 @@ mod escalation;
 mod state;
 mod trap_proxy;
 mod trap_token;
+mod lookup_sync;
 mod storm_sync;
 
 use anyhow::Context;
@@ -274,6 +275,21 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::warn!("trap api_token empty — /trap-api upstream auth off until set in 系统设置");
     }
 
+    let lookup_sync_runtime = {
+        use crate::lookup_sync::{LookupSyncPrefs, LOOKUP_SYNC_KEY};
+        match db.get_kv(LOOKUP_SYNC_KEY) {
+            Ok(Some(s)) => serde_json::from_str::<LookupSyncPrefs>(&s).unwrap_or_default(),
+            _ => LookupSyncPrefs::default(),
+        }
+    };
+    if !lookup_sync_runtime.token.trim().is_empty() {
+        tracing::info!("lookup sync token loaded from app_kv (console)");
+    } else if !config.lookup_sync.token.trim().is_empty() {
+        tracing::info!("lookup sync token from eventide.toml [lookup_sync]");
+    } else {
+        tracing::info!("lookup sync token empty — use JWT or set token in 系统设置 / toml");
+    }
+
     let license = crate::license::LicenseGate::from_db(&db).context("evaluate product license")?;
 
     let login_limiter = LoginLimiter::new(LoginLimitConfig {
@@ -323,6 +339,7 @@ async fn async_main() -> anyhow::Result<()> {
         policies,
         policy_redis,
         trap_api_token: Arc::new(std::sync::RwLock::new(trap_api_token_runtime)),
+        lookup_sync: Arc::new(std::sync::RwLock::new(lookup_sync_runtime)),
         license,
         login_limiter,
     });

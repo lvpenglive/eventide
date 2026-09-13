@@ -1589,8 +1589,13 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           </el-table-column>
           <el-table-column label="告警名称" min-width="220">
             <template #default="{ row }">
-              <div style="font-weight:600;color:var(--heading);cursor:pointer;" @click.stop="openDetail(row as any)">
-                {{ alertName(row as any) }}
+              <div
+                class="alert-name-link"
+                title="点击查看详情"
+                @click.stop="openDetail(row as any)"
+              >
+                <span>{{ alertName(row as any) }}</span>
+                <el-icon class="alert-name-link-ico" :size="14"><View /></el-icon>
               </div>
               <div v-if="(row as any).labels?.instance" style="color:var(--muted);font-size:12px;margin-top:2px;">
                 实例：{{ (row as any).labels.instance }}
@@ -1682,13 +1687,6 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           <el-table-column label="次数" width="80" align="center">
             <template #default="{ row }">
               <el-tag size="small" effect="plain">{{ (row as any).count || (row as any).trigger_count || 1 }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="详情" width="80" align="center" fixed="right">
-            <template #default="{ row }">
-              <el-button size="small" type="primary" link @click.stop="openDetail(row as any)">
-                <el-icon><View /></el-icon>详情
-              </el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -2451,6 +2449,31 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
   padding: 10px 20px 14px;
   border-top: 1px solid var(--line);
   background: var(--panel-2);
+}
+
+.alert-name-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  font-weight: 600;
+  color: var(--heading);
+  cursor: pointer;
+}
+.alert-name-link:hover {
+  color: var(--primary, var(--el-color-primary));
+}
+.alert-name-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-name-link-ico {
+  flex-shrink: 0;
+  opacity: 0.45;
+}
+.alert-name-link:hover .alert-name-link-ico {
+  opacity: 0.9;
 }
 
 .alert-history-timeline {

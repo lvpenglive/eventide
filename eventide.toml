@@ -46,3 +46,8 @@ s3_secret_key = "admin123"
 s3_bucket = "eventide-mibs"
 s3_region = "us-east-1"
 mib_cache_dir = "data/mib-cache"
+
+# MeridianOps / 外部系统同步台账 rows（也可在系统设置里配置 runtime token）
+# [lookup_sync]
+# token = "change-me-lookup-sync-token"
+# allowlist = ["xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"]

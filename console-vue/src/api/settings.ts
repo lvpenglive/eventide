@@ -4,6 +4,8 @@ import type {
   AlertHistorySettingsView,
   AlertHistorySettingsUpdate,
   TrapTokenSettingsView,
+  LookupSyncSettingsView,
+  LookupSyncSettingsUpdate,
   StormSettingsView,
   StormSettingsUpdate,
   UiBetaSettingsView,
@@ -39,6 +41,22 @@ export function putTrapToken(
   body: { regenerate?: boolean },
 ): Promise<TrapTokenSettingsView> {
   return request<TrapTokenSettingsView>('/api/settings/trap-token', {
+    method: 'PUT',
+    body: JSON.stringify({ rotate: Boolean(body.regenerate) }),
+  })
+}
+
+// —— 2b. Lookup Sync Token ——
+export function getLookupSync(): Promise<LookupSyncSettingsView> {
+  return request<LookupSyncSettingsView>('/api/settings/lookup-sync', {
+    method: 'GET',
+  })
+}
+
+export function putLookupSync(
+  body: LookupSyncSettingsUpdate,
+): Promise<LookupSyncSettingsView> {
+  return request<LookupSyncSettingsView>('/api/settings/lookup-sync', {
     method: 'PUT',
     body: JSON.stringify(body),
   })

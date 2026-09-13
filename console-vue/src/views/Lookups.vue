@@ -165,6 +165,7 @@ interface DialogState {
   description: string
   key_label: string
   enabled: boolean
+  external_sync: boolean
   text: string
   viewTab: 'text' | 'json'
 }
@@ -172,6 +173,7 @@ function emptyDialog(): DialogState {
   return {
     visible: false, mode: 'create', id: '',
     name: '', description: '', key_label: 'ip', enabled: true,
+    external_sync: false,
     text: '', viewTab: 'text',
   }
 }
@@ -245,6 +247,7 @@ async function openEdit(id: string) {
   dlg.visible = true; dlg.mode = 'edit'; dlg.id = l.id
   dlg.name = l.name; dlg.description = l.description || ''
   dlg.enabled = l.enabled; dlg.key_label = l.key_label || 'ip'
+  dlg.external_sync = Boolean(l.external_sync)
   const lText = (l as LookupTable & { text?: string }).text
   if (lText && lText.trim()) {
     dlg.text = lText
@@ -266,6 +269,7 @@ async function onDlgSave() {
     description: dlg.description || undefined,
     key_label: dlg.key_label || 'ip',
     enabled: dlg.enabled,
+    external_sync: dlg.external_sync,
     rows: pr.rowCount ? pr.rows : undefined,
     text: dlg.text || undefined,
   }
@@ -340,6 +344,12 @@ async function onDelete(row: LookupTable) {
           <code class="mono">{{ colsCount(asLookup(row).rows) }}</code>
         </template>
       </ElTableColumn>
+      <ElTableColumn label="外部同步" width="100" align="center">
+        <template #default="{ row }">
+          <ElTag v-if="asLookup(row).external_sync" type="warning" size="small" effect="plain">同步</ElTag>
+          <span v-else class="empty-tip">—</span>
+        </template>
+      </ElTableColumn>
       <ElTableColumn label="启用" width="72" align="center">
         <template #default="{ row }">
           <ElSwitch class="en-switch" :model-value="asLookup(row).enabled"
@@ -386,7 +396,7 @@ async function onDelete(row: LookupTable) {
       width="980px" :close-on-click-modal="false" destroy-on-close top="5vh">
       <ElForm ref="dlgFormRef" :model="dlg" :rules="dlgFormRules" label-position="top">
         <ElRow :gutter="16">
-          <ElCol :span="10">
+          <ElCol :span="8">
             <ElFormItem label="名称" prop="name">
               <ElInput v-model="dlg.name" placeholder="如 cmdb_hosts / trap_ips" maxlength="128" show-word-limit />
             </ElFormItem>
@@ -398,9 +408,14 @@ async function onDelete(row: LookupTable) {
               </ElSelect>
             </ElFormItem>
           </ElCol>
-          <ElCol :span="4">
+          <ElCol :span="3">
             <ElFormItem label="启用">
               <ElSwitch v-model="dlg.enabled" />
+            </ElFormItem>
+          </ElCol>
+          <ElCol :span="3">
+            <ElFormItem label="外部同步">
+              <ElSwitch v-model="dlg.external_sync" />
             </ElFormItem>
           </ElCol>
           <ElCol :span="4" style="display:flex;align-items:flex-end;padding-bottom:20px">
@@ -408,6 +423,8 @@ async function onDelete(row: LookupTable) {
             <input ref="hiddenInputRef" type="file" accept=".lookup,.txt,.tsv,.csv" style="display:none" @change="onFileSelected" />
           </ElCol>
         </ElRow>
+        <ElAlert v-if="dlg.external_sync" type="info" :closable="false" show-icon style="margin-bottom:12px"
+          title="已开启外部同步：MeridianOps 可用 sync token 调用 PUT /api/lookups/{id}/rows 覆盖本表 rows（建议勿手工改行数据）。" />
         <ElFormItem label="描述">
           <ElInput v-model="dlg.description" placeholder="外表用途（最多 1000 字）" maxlength="1000" show-word-limit />
         </ElFormItem>

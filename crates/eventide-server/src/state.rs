@@ -40,6 +40,8 @@ pub struct AppState {
     pub policy_redis: Option<Arc<PolicyRedis>>,
     /// Runtime Trap HTTP api_token (MySQL `app_kv` / console); falls back to toml.
     pub trap_api_token: Arc<RwLock<String>>,
+    /// Runtime lookup sync token + allowlist (`app_kv`); falls back to toml.
+    pub lookup_sync: Arc<RwLock<crate::lookup_sync::LookupSyncPrefs>>,
     /// Product license / trial gate.
     pub license: Arc<LicenseGate>,
     /// Brute-force protection for `/api/auth/login`.
@@ -62,6 +64,35 @@ impl AppState {
         if let Ok(mut g) = self.trap_api_token.write() {
             *g = token;
         }
+    }
+
+    /// Effective lookup sync prefs: runtime app_kv merged with toml fallbacks.
+    pub fn lookup_sync_prefs(&self) -> crate::lookup_sync::LookupSyncPrefs {
+        let runtime = self
+            .lookup_sync
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let mut out = runtime;
+        if out.token.trim().is_empty() {
+            out.token = self.config.lookup_sync.token.trim().to_string();
+        }
+        if out.normalized_allowlist().is_empty()
+            && !self.config.lookup_sync.allowlist.is_empty()
+        {
+            out.allowlist = self.config.lookup_sync.allowlist.clone();
+        }
+        out
+    }
+
+    pub fn set_lookup_sync_prefs(&self, prefs: crate::lookup_sync::LookupSyncPrefs) {
+        if let Ok(mut g) = self.lookup_sync.write() {
+            *g = prefs;
+        }
+    }
+
+    pub fn effective_lookup_sync_token(&self) -> String {
+        self.lookup_sync_prefs().token.trim().to_string()
     }
 
     pub fn sync_trap_api_token_to_redis(&self) {

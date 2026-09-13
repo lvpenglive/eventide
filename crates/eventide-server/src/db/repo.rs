@@ -824,7 +824,8 @@ impl Db {
     pub fn list_lookup_tables(&self) -> Result<Vec<LookupTable>> {
         let mut conn = self.conn()?;
         let rows: Vec<Row> = conn.query(
-            "SELECT id, name, description, key_label, rows_json, enabled, created_at, updated_at
+            "SELECT id, name, description, key_label, rows_json, enabled,
+                    external_sync, synced_at, sync_source, created_at, updated_at
              FROM lookup_tables ORDER BY name ASC",
         )?;
         rows.iter().map(map_lookup).collect()
@@ -841,7 +842,8 @@ impl Db {
     pub fn get_lookup_table(&self, id: Uuid) -> Result<Option<LookupTable>> {
         let mut conn = self.conn()?;
         let row: Option<Row> = conn.exec_first(
-            "SELECT id, name, description, key_label, rows_json, enabled, created_at, updated_at
+            "SELECT id, name, description, key_label, rows_json, enabled,
+                    external_sync, synced_at, sync_source, created_at, updated_at
              FROM lookup_tables WHERE id=?",
             positional(vec![v(id.to_string())]),
         )?;
@@ -852,12 +854,15 @@ impl Db {
         let mut conn = self.conn()?;
         conn.exec_drop(
             "INSERT INTO lookup_tables (
-                id, name, description, key_label, rows_json, enabled, created_at, updated_at
-             ) VALUES (?,?,?,?,?,?,?,?)
+                id, name, description, key_label, rows_json, enabled,
+                external_sync, synced_at, sync_source, created_at, updated_at
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE
                name=VALUES(name), description=VALUES(description),
                key_label=VALUES(key_label), rows_json=VALUES(rows_json),
-               enabled=VALUES(enabled), updated_at=VALUES(updated_at)",
+               enabled=VALUES(enabled), external_sync=VALUES(external_sync),
+               synced_at=VALUES(synced_at), sync_source=VALUES(sync_source),
+               updated_at=VALUES(updated_at)",
             positional(vec![
                 v(t.id.to_string()),
                 v(t.name.as_str()),
@@ -865,6 +870,9 @@ impl Db {
                 v(t.key_label.as_str()),
                 v(serde_json::to_string(&t.rows)?),
                 v(t.enabled as i64),
+                v(t.external_sync as i64),
+                v(t.synced_at.map(fmt_dt).unwrap_or_default()),
+                v(t.sync_source.as_str()),
                 v(fmt_dt(t.created_at)),
                 v(fmt_dt(t.updated_at)),
             ]),
@@ -1290,8 +1298,9 @@ fn map_enrich(row: &Row) -> Result<EnrichRule> {
 
 fn map_lookup(row: &Row) -> Result<LookupTable> {
     let rows_json = col_str(row, 4)?;
-    let created = col_str(row, 6)?;
-    let updated = col_str(row, 7)?;
+    let synced_at_s = col_str_opt(row, 7).unwrap_or_default();
+    let created = col_str(row, 9)?;
+    let updated = col_str(row, 10)?;
     let rows_map: BTreeMap<String, Labels> = serde_json::from_str(&rows_json).unwrap_or_default();
     Ok(LookupTable {
         id: col_uuid(row, 0)?,
@@ -1300,6 +1309,13 @@ fn map_lookup(row: &Row) -> Result<LookupTable> {
         key_label: col_str(row, 3).unwrap_or_else(|_| "instance".into()),
         rows: rows_map,
         enabled: col_i64(row, 5) != 0,
+        external_sync: col_i64(row, 6) != 0,
+        synced_at: if synced_at_s.trim().is_empty() {
+            None
+        } else {
+            parse_dt(&synced_at_s).ok()
+        },
+        sync_source: col_str(row, 8).unwrap_or_default(),
         created_at: parse_dt(&created).unwrap_or_else(|_| Utc::now()),
         updated_at: parse_dt(&updated).unwrap_or_else(|_| Utc::now()),
     })

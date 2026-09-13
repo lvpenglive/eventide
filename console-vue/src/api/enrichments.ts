@@ -158,3 +158,14 @@ export async function deleteLookup(id: string): Promise<{ ok: true }> {
     throw e
   }
 }
+
+/** 仅覆盖 rows（JWT enrich:write 或 lookup sync token） */
+export function syncLookupRows(
+  id: string,
+  body: import('./types').LookupRowsSyncInput,
+): Promise<LookupTable> {
+  return request<LookupTable>(`/api/lookups/${encodeURIComponent(id)}/rows`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}

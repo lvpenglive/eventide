@@ -208,6 +208,9 @@ impl Db {
     key_label VARCHAR(128) NOT NULL DEFAULT 'instance',
     rows_json LONGTEXT NOT NULL,
     enabled TINYINT NOT NULL DEFAULT 1,
+    external_sync TINYINT NOT NULL DEFAULT 0,
+    synced_at VARCHAR(64) NULL,
+    sync_source VARCHAR(128) NOT NULL DEFAULT '',
     created_at VARCHAR(64) NOT NULL,
     updated_at VARCHAR(64) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
@@ -425,8 +428,24 @@ impl Db {
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"#,
         )
         .with_context(|| "migrate: create audit_logs")?;
+        // v23: lookup external sync metadata
+        for col_sql in [
+            "ALTER TABLE lookup_tables ADD COLUMN external_sync TINYINT NOT NULL DEFAULT 0",
+            "ALTER TABLE lookup_tables ADD COLUMN synced_at VARCHAR(64) NULL",
+            "ALTER TABLE lookup_tables ADD COLUMN sync_source VARCHAR(128) NOT NULL DEFAULT ''",
+        ] {
+            match conn.query_drop(col_sql) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("Duplicate column") && !msg.contains("1060") {
+                        return Err(e).context(format!("migrate: {col_sql}"));
+                    }
+                }
+            }
+        }
         conn.exec_drop(
-            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '22')
+            r#"INSERT INTO schema_meta (`key`, `value`) VALUES ('version', '23')
                ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)"#,
             (),
         )?;
