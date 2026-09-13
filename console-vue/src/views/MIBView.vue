@@ -975,7 +975,7 @@ onMounted(() => { void loadModules() })
     <el-dialog
       v-model="applyDlgVisible"
       :title="applyScope === 'all' ? '应用全部策略' : '应用本模块策略'"
-      width="520px"
+      width="640px"
       class="mib-apply-dialog"
     >
       <el-form label-width="100px">
@@ -985,7 +985,7 @@ onMounted(() => { void loadModules() })
           </el-tag>
         </el-form-item>
         <el-form-item label="应用模式">
-          <el-radio-group v-model="applyMode">
+          <el-radio-group v-model="applyMode" class="dlg-radio-stack">
             <el-radio label="merge">合并（保留不在策略文件中的旧策略）</el-radio>
             <el-radio label="replace">替换（删除不在策略文件中的旧策略）</el-radio>
           </el-radio-group>
@@ -1276,6 +1276,19 @@ onMounted(() => { void loadModules() })
 .mib-apply-dialog :deep(.el-form-item__label) {
   font-weight: 600;
   color: var(--heading, var(--el-text-color-primary));
+}
+.mib-apply-dialog :deep(.dlg-radio-stack) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.mib-apply-dialog :deep(.dlg-radio-stack .el-radio) {
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  align-items: flex-start;
+  line-height: 1.45;
 }
 .mib-apply-dialog :deep(.el-alert pre) {
   margin: 0;

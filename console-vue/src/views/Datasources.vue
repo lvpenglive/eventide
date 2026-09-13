@@ -161,7 +161,7 @@ const KINDS: KindMeta[] = [
     name: 'Prometheus',
     icon: 'PM',
     tone: 'orange',
-    typeDesc: 'PromQL 指标查询',
+    typeDesc: '标准 PromQL 指标查询，规则评估按查询结果做阈值判断。',
     urlPlaceholder: 'http://127.0.0.1:9090',
   },
   {
@@ -169,7 +169,7 @@ const KINDS: KindMeta[] = [
     name: 'VictoriaMetrics',
     icon: 'VM',
     tone: 'blue',
-    typeDesc: '兼容 PromQL',
+    typeDesc: '兼容 PromQL 的时序库；连接方式与 Prometheus 相同。',
     urlPlaceholder: 'http://127.0.0.1:8428',
   },
   {
@@ -177,7 +177,7 @@ const KINDS: KindMeta[] = [
     name: 'Kafka',
     icon: 'K',
     tone: 'amber',
-    typeDesc: '消息管道 · JSON 字段告警',
+    typeDesc: '从 Topic 消费 JSON，按字段/堆积深度/消息数做阈值告警。',
     urlPlaceholder: '127.0.0.1:9092',
   },
   {
@@ -185,7 +185,7 @@ const KINDS: KindMeta[] = [
     name: 'Loki 日志',
     icon: 'Lo',
     tone: 'teal',
-    typeDesc: 'LogQL 日志统计',
+    typeDesc: 'LogQL 日志统计查询，适合错误率、关键字命中等场景。',
     urlPlaceholder: 'http://127.0.0.1:3100',
   },
 ]
@@ -624,38 +624,38 @@ async function submitForm(): Promise<void> {
     <!-- 类型选择 Dialog：先选类型再填表单（与老版一致） -->
     <el-dialog
       v-model="typePickerVisible"
-      width="880px"
+      width="920px"
+      class="ds-type-picker-dialog"
       :close-on-click-modal="false"
       append-to-body
-      :show-close="false"
+      destroy-on-close
     >
       <template #header>
-        <div class="ds-modal-head">
+        <div class="type-picker-head">
           <h3>选择数据源类型</h3>
-          <p class="ds-modal-desc">先选类型，再填写连接信息；规则评估会按类型自动拉数。</p>
+          <p>先选类型，再填写连接信息；规则评估会按类型自动拉数。</p>
         </div>
       </template>
-      <div class="ds-modal-body">
-        <div class="ds-type-pick-grid">
-          <button
-            v-for="k in KINDS"
-            :key="k.kind"
-            type="button"
-            class="ds-type-pick-card"
-            @click="pickKind(k.kind)"
-          >
-            <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]">
-              {{ k.icon }}
-            </span>
+      <div class="ds-type-pick-grid">
+        <button
+          v-for="k in KINDS"
+          :key="k.kind"
+          type="button"
+          class="ds-type-pick-card"
+          @click="pickKind(k.kind)"
+        >
+          <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]">
+            {{ k.icon }}
+          </span>
+          <span class="ds-type-pick-text">
             <span class="ds-type-pick-name">{{ k.name }}</span>
             <span class="ds-type-pick-desc">{{ k.typeDesc }}</span>
-          </button>
-        </div>
+            <span class="ds-type-pick-endpoint">{{ k.urlPlaceholder }}</span>
+          </span>
+        </button>
       </div>
       <template #footer>
-        <div class="ds-modal-actions">
-          <button type="button" class="ds-btn-ghost" @click="typePickerVisible = false">取消</button>
-        </div>
+        <el-button @click="typePickerVisible = false">取消</el-button>
       </template>
     </el-dialog>
 
@@ -1011,36 +1011,37 @@ async function submitForm(): Promise<void> {
 }
 
 /* ============================================================
- * 类型选择卡片（与老版 .type-pick-grid / .type-pick-card 一致）
+ * 类型选择卡片：2×2 横向，避免挤窄截断
  * ============================================================ */
 .ds-type-pick-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 .ds-type-pick-card {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  height: auto;
-  min-height: 148px;
-  padding: 20px 14px 16px;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 14px;
+  min-height: 112px;
+  padding: 18px 16px;
   border: 1px solid var(--el-border-color, #e5e6eb);
   border-radius: 12px;
-  background: var(--fill-color-lighter, #f7f8fa);
+  background: var(--el-bg-color, var(--panel, #fff));
   color: var(--el-text-color-primary, #1f2329);
   cursor: pointer;
-  text-align: center;
+  text-align: left;
   font: inherit;
+  width: 100%;
+  box-sizing: border-box;
   white-space: normal;
-  transition: border-color 0.15s, background 0.15s, transform 0.12s;
+  transition: border-color 0.15s, background 0.15s, transform 0.12s, box-shadow 0.15s;
 }
 .ds-type-pick-card:hover {
   border-color: var(--el-color-primary, #1677ff);
-  background: color-mix(in srgb, #1677ff 8%, var(--fill-color-lighter, #f7f8fa));
+  background: color-mix(in srgb, #1677ff 8%, var(--el-bg-color, #fff));
   transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
 }
 
 /* 类型图标（tone 渐变，与老版一致） */
@@ -1054,6 +1055,7 @@ async function submitForm(): Promise<void> {
   font-weight: 700;
   letter-spacing: -0.02em;
   color: #fff;
+  flex-shrink: 0;
 }
 .ds-tone-orange {
   background: linear-gradient(145deg, #f59e0b, #ea580c);
@@ -1069,16 +1071,72 @@ async function submitForm(): Promise<void> {
   background: linear-gradient(145deg, #2dd4bf, #0f766e);
 }
 
+.ds-type-pick-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
 .ds-type-pick-name {
   font-weight: 650;
   color: var(--el-text-color-primary, #1f2329);
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.3;
 }
 .ds-type-pick-desc {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--el-text-color-secondary, #86909c);
-  line-height: 1.4;
-  display: block;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+}
+.ds-type-pick-endpoint {
+  display: inline-flex;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--el-color-primary, #1677ff);
+  background: color-mix(in srgb, var(--el-color-primary, #1677ff) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--el-color-primary, #1677ff) 22%, transparent);
+}
+
+.ds-type-picker-dialog.el-dialog,
+.el-dialog.ds-type-picker-dialog {
+  width: min(920px, 94vw) !important;
+  max-width: 94vw;
+}
+.ds-type-picker-dialog .el-dialog__header {
+  padding: 18px 24px 12px;
+}
+.ds-type-picker-dialog .el-dialog__body {
+  padding: 8px 24px 16px;
+  overflow: visible;
+}
+.ds-type-picker-dialog .el-dialog__footer {
+  padding: 12px 24px 18px;
+}
+.type-picker-head h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--el-text-color-primary, var(--heading));
+}
+.type-picker-head p {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary, var(--muted));
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 52em;
+}
+@media (max-width: 720px) {
+  .ds-type-pick-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ============================================================

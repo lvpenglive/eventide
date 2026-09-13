@@ -742,7 +742,7 @@ count_over_time({app="api"} |= "ERROR" [5m])
 | `map_fingerprint` | 去重标识 | `fingerprint` |
 | `map_severity` | 级别原始值 | `labels.severity` + 引擎级别 |
 | `map_critical` | 哪些取值算严重 | → Critical |
-| `map_warning` | 警告取值列表（引擎支持；控制台无单独框） | → Warning |
+| `map_warning` | 警告取值列表 | → Warning |
 | `map_labels` | 额外标签，`目标标签:源路径,...` | 对应 `labels.*` |
 | `map_enabled` | 强制开启映射 | — |
 

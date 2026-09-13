@@ -1192,7 +1192,7 @@ function optionsCount(row: LocalChannel): number {
     <el-dialog
       v-model="dialogVisible"
       :title="isEdit ? '编辑渠道' : '新建通知渠道'"
-      width="820px"
+      width="900px"
       :close-on-click-modal="false"
       destroy-on-close
       top="6vh"

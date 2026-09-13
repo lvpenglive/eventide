@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ElAffix, ElButton, ElDatePicker, ElDialog, ElEmpty, ElForm, ElFormItem,
   ElInput, ElMessage, ElMessageBox, ElOption, ElPagination, ElSelect,
@@ -10,6 +11,10 @@ import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import type { Silence, SilenceInput } from '@/api/types'
 import { listSilences, createSilence, deleteSilence } from '@/api/silences'
 import { listRules } from '@/api/rules'
+
+const route = useRoute()
+const router = useRouter()
+const PREFILL_SILENCE_KEY = 'eventide_prefill_silence'
 
 interface RuleBrief { id: string; name?: string }
 const loading = ref(false)
@@ -137,6 +142,22 @@ function dlgReset() {
   try { dlg.formRef?.clearValidate() } catch {}
 }
 function openCreate() { dlg.mode = 'create'; dlgReset(); dlg.visible = true }
+
+function openCreateFromPrefill(): void {
+  openCreate()
+  const raw = sessionStorage.getItem(PREFILL_SILENCE_KEY)
+  sessionStorage.removeItem(PREFILL_SILENCE_KEY)
+  if (!raw) return
+  try {
+    const p = JSON.parse(raw) as { comment?: string; matchers?: Record<string, string> }
+    if (p.comment) dlg.form.comment = String(p.comment)
+    if (p.matchers && typeof p.matchers === 'object') {
+      dlg.form.matchersJson = JSON.stringify(p.matchers, null, 2)
+    }
+  } catch {
+    /* ignore bad prefill */
+  }
+}
 function openEdit(row: Silence) {
   dlg.mode = 'edit'; dlg.editing = row
   dlg.form.comment = row.comment || ''
@@ -206,7 +227,13 @@ async function loadAll() {
   } finally { loading.value = false }
 }
 
-onMounted(loadAll)
+onMounted(async () => {
+  await loadAll()
+  if (route.query.create === '1') {
+    openCreateFromPrefill()
+    void router.replace({ name: 'Silences', query: {} })
+  }
+})
 </script>
 
 <template>
@@ -295,7 +322,7 @@ onMounted(loadAll)
     </template>
 
     <ElDialog v-model="dlg.visible" :title="dlg.mode === 'create' ? '新建静默策略' : '编辑静默策略'"
-      width="640px" :close-on-click-modal="false" destroy-on-close top="6vh" @closed="dlgReset">
+      width="720px" :close-on-click-modal="false" destroy-on-close top="6vh" @closed="dlgReset">
       <ElAlert v-if="dlg.mode === 'edit'" type="warning" :closable="false" style="margin-bottom:12px">
         后端暂不支持更新静默策略，保存将执行「删除旧 → 新建新」。生效中策略的抑制会短暂中断。
       </ElAlert>

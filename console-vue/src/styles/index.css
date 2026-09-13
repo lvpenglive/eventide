@@ -444,10 +444,62 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   background-color: var(--primary);
 }
 
-/* ElTag → 圆角胶囊 */
+/* Tag：默认胶囊；typed 标签用 EP 变量（已在 variables.css 修好 light-8/9 对比度） */
 .el-tag {
   border-radius: 999px;
-  font-weight: 500;
+  font-weight: 600;
+  --el-tag-font-size: 12px;
+}
+/* 无 type 的默认 Tag 走 primary 浅底，避免落到 EP 灰底看不清 */
+.el-tag:not(.el-tag--success):not(.el-tag--warning):not(.el-tag--danger):not(.el-tag--error):not(.el-tag--info):not(.el-tag--primary) {
+  --el-tag-bg-color: var(--primary-bg);
+  --el-tag-border-color: var(--primary-border);
+  --el-tag-text-color: var(--primary-soft);
+}
+.el-tag--primary {
+  --el-tag-bg-color: var(--el-color-primary-light-9);
+  --el-tag-border-color: var(--el-color-primary-light-8);
+  --el-tag-text-color: var(--primary-soft);
+}
+.el-tag--info {
+  --el-tag-bg-color: var(--el-color-info-light-9);
+  --el-tag-border-color: var(--el-color-info-light-8);
+  --el-tag-text-color: var(--info-soft);
+}
+.el-tag--success {
+  --el-tag-bg-color: var(--el-color-success-light-9);
+  --el-tag-border-color: var(--el-color-success-light-8);
+  --el-tag-text-color: var(--ok-soft);
+}
+.el-tag--warning {
+  --el-tag-bg-color: var(--el-color-warning-light-9);
+  --el-tag-border-color: var(--el-color-warning-light-8);
+  --el-tag-text-color: var(--warn-soft);
+}
+.el-tag--danger,
+.el-tag--error {
+  --el-tag-bg-color: var(--el-color-danger-light-9);
+  --el-tag-border-color: var(--el-color-danger-light-8);
+  --el-tag-text-color: var(--crit-soft);
+}
+/* dark / plain 效果仍走 EP，确保深色底上用亮字 */
+.el-tag--dark.el-tag--info,
+.el-tag.el-tag--info.el-tag--dark {
+  --el-tag-bg-color: var(--info);
+  --el-tag-border-color: var(--info);
+  --el-tag-text-color: #fff;
+}
+.el-tag--dark.el-tag--success,
+.el-tag.el-tag--success.el-tag--dark {
+  --el-tag-bg-color: var(--ok);
+  --el-tag-border-color: var(--ok);
+  --el-tag-text-color: #fff;
+}
+.el-tag--dark.el-tag--danger,
+.el-tag.el-tag--danger.el-tag--dark {
+  --el-tag-bg-color: var(--crit);
+  --el-tag-border-color: var(--crit);
+  --el-tag-text-color: #fff;
 }
 
 /* ElForm label */
@@ -613,36 +665,31 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   font-weight: 500;
 }
 
-/* Tag 样式 */
-.el-tag {
-  --el-tag-bg-color: var(--primary-bg);
-  --el-tag-border-color: var(--primary-border);
-  --el-tag-text-color: var(--primary);
-}
+/* Tag 样式见上方 typed 覆盖；此处不再强制全部 primary */
 
-/* Alert 样式 */
+/* Alert 样式：背景用半透明，文字用 soft 亮色，避免 soft 当底色导致看不清 */
 .el-alert {
   --el-alert-bg-color: var(--panel-2);
   --el-alert-text-color: var(--text);
   --el-alert-title-color: var(--heading);
 }
 .el-alert--info {
-  --el-alert-bg-color: var(--info-soft);
-  --el-alert-text-color: var(--info);
-  --el-alert-border-color: var(--info);
+  --el-alert-bg-color: var(--el-color-info-light-9);
+  --el-alert-text-color: var(--info-soft);
+  --el-alert-border-color: var(--el-color-info-light-8);
 }
 .el-alert--success {
-  --el-alert-bg-color: var(--ok-soft);
-  --el-alert-text-color: var(--ok);
-  --el-alert-border-color: var(--ok);
+  --el-alert-bg-color: var(--el-color-success-light-9);
+  --el-alert-text-color: var(--ok-soft);
+  --el-alert-border-color: var(--el-color-success-light-8);
 }
 .el-alert--warning {
-  --el-alert-bg-color: var(--warn-soft);
-  --el-alert-text-color: var(--warn);
-  --el-alert-border-color: var(--warn);
+  --el-alert-bg-color: var(--el-color-warning-light-9);
+  --el-alert-text-color: var(--warn-soft);
+  --el-alert-border-color: var(--el-color-warning-light-8);
 }
 .el-alert--error {
-  --el-alert-bg-color: var(--crit-soft);
-  --el-alert-text-color: var(--crit);
-  --el-alert-border-color: var(--crit);
+  --el-alert-bg-color: var(--el-color-danger-light-9);
+  --el-alert-text-color: var(--crit-soft);
+  --el-alert-border-color: var(--el-color-danger-light-8);
 }

@@ -4,17 +4,26 @@ import { useRouter } from 'vue-router'
 import {
   ElAffix,
   ElButton,
+  ElCol,
   ElDescriptions,
   ElDescriptionsItem,
   ElDialog,
   ElDrawer,
   ElEmpty,
+  ElForm,
+  ElFormItem,
+  ElInput,
+  ElInputNumber,
   ElMessage,
   ElMessageBox,
+  ElOption,
+  ElPagination,
+  ElRow,
+  ElSelect,
+  ElSwitch,
   ElTable,
   ElTableColumn,
   ElTag,
-  ElPagination,
 } from 'element-plus'
 import {
   Delete,
@@ -130,10 +139,10 @@ const _shimRules: RulesApiShim = {
   evaluateRule: () => Promise.reject(_unimpl('evaluateRule')),
 }
 const _shimDatasources: DatasourcesApiShim = {
-  listDatasources: () => Promise.resolve([]),
+  listDatasources: () => Promise.reject(_unimpl('listDatasources')),
 }
 const _shimCommon: CommonApiShim = {
-  listChannels: () => Promise.resolve([]),
+  listChannels: () => Promise.reject(_unimpl('listChannels')),
 }
 // @ts-ignore 若 @/api/rules 模块尚未创建则忽略解析错误
 import * as _rawRules from '@/api/rules'
@@ -844,7 +853,7 @@ function goDatasources() {
     <!-- 新建 / 编辑 Dialog -->
     <el-dialog
       v-model="dlg.visible"
-      width="880px"
+      width="920px"
       :close-on-click-modal="false"
       append-to-body
       :show-close="false"
@@ -856,136 +865,143 @@ function goDatasources() {
         </div>
       </template>
       <div class="ds-modal-body">
-        <!-- 规则 -->
-        <div class="ds-seg">
-          <div class="ds-seg-title">规则</div>
-          <div class="ds-field">
-            <label>名称</label>
-            <input v-model="dlg.name" type="text" required placeholder="例如：API 不可用" />
+        <el-form label-position="top" class="rules-ep-form" @submit.prevent>
+          <div class="ds-seg">
+            <div class="ds-seg-title">规则</div>
+            <el-form-item label="名称" required>
+              <el-input v-model="dlg.name" placeholder="例如：API 不可用" />
+            </el-form-item>
+            <el-form-item label="数据源" required>
+              <el-select v-model="dlg.datasource_id" filterable style="width:100%" placeholder="选择数据源">
+                <el-option
+                  v-for="d in datasources"
+                  :key="d.id"
+                  :label="`${d.name} · ${d.kind}`"
+                  :value="d.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="查询表达式" required>
+              <el-input v-model="dlg.expr" placeholder="PromQL / LogQL / JSON 字段路径" />
+              <div class="ds-hint">Prometheus/VM 用 PromQL；Loki 用 LogQL；Kafka 填数值字段路径（可覆盖数据源 field，如 latency_ms）。</div>
+            </el-form-item>
           </div>
-          <div class="ds-field">
-            <label>数据源</label>
-            <select v-model="dlg.datasource_id">
-              <option
-                v-for="d in datasources"
-                :key="d.id"
-                :value="d.id"
-              >{{ d.name }} · {{ d.kind }}</option>
-            </select>
-          </div>
-          <div class="ds-field">
-            <label>查询表达式</label>
-            <input v-model="dlg.expr" type="text" required placeholder="PromQL / LogQL / JSON 字段路径" />
-            <div class="ds-hint">Prometheus/VM 用 PromQL；Loki 用 LogQL；Kafka 填数值字段路径（可覆盖数据源 field，如 latency_ms）。</div>
-          </div>
-        </div>
 
-        <!-- 阈值条件 -->
-        <div class="ds-seg">
-          <div class="ds-seg-title">阈值条件</div>
-          <div class="ds-row">
-            <div class="ds-field">
-              <label>比较符</label>
-              <select v-model="dlg.comparator">
-                <option
-                  v-for="c in COMPARATOR_OPTIONS"
-                  :key="c.value"
-                  :value="c.value"
-                >{{ c.label }}</option>
-              </select>
-            </div>
-            <div class="ds-field">
-              <label>阈值</label>
-              <input v-model.number="dlg.threshold" type="number" step="any" required />
-            </div>
-          </div>
-          <div class="ds-row">
-            <div class="ds-field">
-              <label>持续 for（秒）</label>
-              <input v-model.number="dlg.for_seconds" type="number" min="0" />
-            </div>
-            <div class="ds-field">
-              <label>评估间隔（秒）</label>
-              <input v-model.number="dlg.interval_seconds" type="number" min="5" />
-            </div>
-          </div>
-          <div class="ds-row">
-            <div class="ds-field">
-              <label>严重级别</label>
-              <select v-model="dlg.severity">
-                <option
+          <div class="ds-seg">
+            <div class="ds-seg-title">阈值条件</div>
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="比较符">
+                  <el-select v-model="dlg.comparator" style="width:100%">
+                    <el-option
+                      v-for="c in COMPARATOR_OPTIONS"
+                      :key="c.value"
+                      :label="c.label"
+                      :value="c.value"
+                    />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="阈值" required>
+                  <el-input-number v-model="dlg.threshold" :step="1" controls-position="right" style="width:100%" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-row :gutter="12">
+              <el-col :span="12">
+                <el-form-item label="持续 for（秒）">
+                  <el-input-number v-model="dlg.for_seconds" :min="0" controls-position="right" style="width:100%" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="评估间隔（秒）">
+                  <el-input-number v-model="dlg.interval_seconds" :min="5" controls-position="right" style="width:100%" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+            <el-form-item label="严重级别">
+              <el-select v-model="dlg.severity" style="width:100%">
+                <el-option
                   v-for="s in SEVERITY_OPTIONS"
                   :key="s.value"
+                  :label="s.label"
                   :value="s.value"
-                >{{ s.label }}</option>
-              </select>
-            </div>
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="启用">
+              <el-switch v-model="dlg.enabled" active-text="启用此规则" />
+            </el-form-item>
           </div>
-          <div class="ds-field">
-            <label class="ds-check-row">
-              <input v-model="dlg.enabled" type="checkbox" />
-              <span>启用此规则</span>
-            </label>
-          </div>
-        </div>
 
-        <!-- 通知与标签 -->
-        <div class="ds-seg">
-          <div class="ds-seg-title">通知与标签</div>
-          <div class="ds-field">
-            <label>通知渠道</label>
-            <select v-model="dlg.channel_ids" multiple :size="Math.min(6, Math.max(3, channels.length || 3))">
-              <option
-                v-for="c in channels"
-                :key="c.id"
-                :value="c.id"
-              >{{ c.name }} ({{ c.kind }})</option>
-            </select>
-            <div class="ds-ms-hint">按住 <b>Ctrl</b>（Windows）或 <b>⌘</b>（Mac）点击可多选；已选中的再点一次即取消。</div>
-          </div>
-          <div class="ds-field">
-            <label>未接手升级（秒，0=关闭）</label>
-            <input v-model.number="dlg.escalate_after_seconds" type="number" min="0" />
-            <div class="ds-hint">告警中超过此时长仍未接手则发送升级通知；可选抬升级别与独立渠道。</div>
-          </div>
-          <div class="ds-row">
-            <div class="ds-field">
-              <label>升级级别（可选）</label>
-              <select v-model="dlg.escalate_severity">
-                <option value="">不改级别</option>
-                <option
+          <div class="ds-seg">
+            <div class="ds-seg-title">通知与标签</div>
+            <el-form-item label="通知渠道">
+              <el-select
+                v-model="dlg.channel_ids"
+                multiple
+                filterable
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="选择通知渠道"
+                style="width:100%"
+              >
+                <el-option
+                  v-for="c in channels"
+                  :key="c.id"
+                  :label="`${c.name} (${c.kind})`"
+                  :value="c.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="未接手升级（秒，0=关闭）">
+              <el-input-number v-model="dlg.escalate_after_seconds" :min="0" controls-position="right" style="width:100%" />
+              <div class="ds-hint">告警中超过此时长仍未接手则发送升级通知；可选抬升级别与独立渠道。</div>
+            </el-form-item>
+            <el-form-item label="升级级别（可选）">
+              <el-select v-model="dlg.escalate_severity" clearable placeholder="不改级别" style="width:100%">
+                <el-option label="不改级别" value="" />
+                <el-option
                   v-for="s in SEVERITY_OPTIONS"
-                  :key="s.value"
+                  :key="'esc-' + s.value"
+                  :label="s.label"
                   :value="s.value"
-                >{{ s.label }}</option>
-              </select>
-            </div>
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="升级通知渠道（可选，空=用上方渠道）">
+              <el-select
+                v-model="dlg.escalate_channel_ids"
+                multiple
+                filterable
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="留空则用上方渠道"
+                style="width:100%"
+              >
+                <el-option
+                  v-for="c in channels"
+                  :key="'esc-' + c.id"
+                  :label="`${c.name} (${c.kind})`"
+                  :value="c.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="附加标签（可选，JSON）">
+              <el-input v-model="dlg.labelsText" type="textarea" :rows="2" placeholder='{"team":"sre"}' />
+            </el-form-item>
+            <el-form-item label="注解 annotations（可选，JSON，支持模板）">
+              <el-input v-model="dlg.annotationsText" type="textarea" :rows="3" placeholder='{"summary":"..."}' />
+              <div class="ds-hint">{{ annotationsHint }}</div>
+            </el-form-item>
           </div>
-          <div class="ds-field">
-            <label>升级通知渠道（可选，空=用上方渠道）</label>
-            <select v-model="dlg.escalate_channel_ids" multiple :size="Math.min(6, Math.max(3, channels.length || 3))">
-              <option
-                v-for="c in channels"
-                :key="c.id"
-                :value="c.id"
-              >{{ c.name }} ({{ c.kind }})</option>
-            </select>
-          </div>
-          <div class="ds-field">
-            <label>附加标签（可选，JSON）</label>
-            <textarea v-model="dlg.labelsText" rows="2" placeholder='{"team":"sre"}'></textarea>
-          </div>
-          <div class="ds-field">
-            <label>注解 annotations（可选，JSON，支持模板）</label>
-            <textarea v-model="dlg.annotationsText" rows="3" placeholder='{"summary":"..."}'></textarea>
-            <div class="ds-hint">{{ annotationsHint }}</div>
-          </div>
-        </div>
+        </el-form>
       </div>
       <template #footer>
         <div class="ds-modal-actions">
-          <button type="button" class="ds-btn-ghost" @click="dlg.visible = false">取消</button>
-          <button type="button" class="ds-btn-primary" @click="onDlgSave">保存</button>
+          <el-button @click="dlg.visible = false">取消</el-button>
+          <el-button type="primary" @click="onDlgSave">保存</el-button>
         </div>
       </template>
     </el-dialog>

@@ -469,14 +469,14 @@ scrubLoginQueryFromUrl();
 // ============================================================
 // T6: hash 路由双写兼容 — Beta 开关时旧版 hash 自动重定向到 /v2/
 // ============================================================
-// 旧版 page key → 新版 Vue Router path 映射（大多 1:1，仅 users/roles/departments 合并为 iam_users）
+// 旧版 page key → 新版 Vue Router path（hash 段，不含 /v2/ 前缀）
 const V2_ROUTE_MAP = {
   overview: "overview", alerts: "alerts", silences: "silences", maintenance: "maintenance",
   datasources: "datasources", rules: "rules", ingress: "ingress",
   kafka: "kafka", trap: "trap", mib: "mib", policies: "policies",
-  channels: "channels", notifies: "notifies", enrich: "enrich",
-  users: "iam_users", roles: "iam_users", departments: "iam_users",
-  settings: "settings", audit: "settings",
+  channels: "channels", notifies: "notifies", enrich: "enrich", lookups: "lookups",
+  users: "users", roles: "roles", departments: "departments",
+  settings: "settings", audit: "audit",
 };
 
 (function redirectV2IfNeeded() {
@@ -5717,11 +5717,11 @@ async function editIngress(row, opts = {}) {
                   <tr><td><code>map_fingerprint</code></td><td>去重标识</td><td><code>fingerprint</code></td></tr>
                   <tr><td><code>map_severity</code></td><td>级别原始值</td><td><code>labels.severity</code> + 引擎级别</td></tr>
                   <tr><td><code>map_critical</code></td><td>哪些取值算 Disaster/High</td><td>→ disaster</td></tr>
+                  <tr><td><code>map_warning</code></td><td>哪些取值算 Warning</td><td>→ warning</td></tr>
                   <tr><td><code>map_labels</code></td><td>额外标签，<code>目标标签:源路径,...</code></td><td>对应 <code>labels.*</code></td></tr>
                   <tr><td><code>map_enabled</code></td><td>强制开启映射</td><td>—</td></tr>
                 </tbody>
               </table>
-              <p class="hint" style="margin:10px 0 0">引擎另支持 <code>map_warning</code>（警告取值列表），可在高级 options 中配置；控制台暂无单独输入框。</p>
             </div>
           </details>
           <div class="field">
@@ -5793,9 +5793,15 @@ async function editIngress(row, opts = {}) {
           </div>
           <div class="row">
             <div class="field">
-              <label>critical 取值</label>
+              <label>critical 取值 map_critical</label>
               <input name="map_critical" placeholder="Disaster,High,5,4" value="${esc(opt.map_critical || "")}" />
             </div>
+            <div class="field">
+              <label>warning 取值 map_warning</label>
+              <input name="map_warning" placeholder="Warning,Average,3,2" value="${esc(opt.map_warning || "")}" />
+            </div>
+          </div>
+          <div class="row">
             <div class="field">
               <label>额外标签 map_labels</label>
               <input name="map_labels" placeholder="region:zone,app:appName" value="${esc(
@@ -5997,6 +6003,7 @@ async function editIngress(row, opts = {}) {
         "map_fingerprint",
         "map_severity",
         "map_critical",
+        "map_warning",
         "map_labels",
       ];
       let anyMap = false;

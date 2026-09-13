@@ -43,7 +43,11 @@ pub async fn run_once(state: Arc<AppState>) -> anyhow::Result<()> {
         let sem = sem.clone();
         let rule_ref = rule.clone();
         let task = async move {
-            let _permit = sem.acquire_owned().await;
+            // acquire_owned 返回 Result：permit 必须直接持有，否则限流失效
+            let _permit = sem
+                .acquire_owned()
+                .await
+                .map_err(|_| anyhow::anyhow!("evaluation semaphore closed"))?;
             evaluate_one(state, &rule_ref, now).await
         };
         tasks.push(task);
@@ -57,10 +61,10 @@ pub async fn run_once(state: Arc<AppState>) -> anyhow::Result<()> {
         let _ = state.db.touch_rule_run(rule.id, now);
     }
 
-    for (_i, result) in results.into_iter().enumerate() {
+    // join_all 保序，结果按 due 顺序一一对应
+    for (rule, result) in due.iter().zip(results) {
         if let Err(e) = result {
-            // 记录评估失败（use rule name for logging if needed)
-            tracing::error!("evaluate failed: {e:#}");
+            tracing::error!(rule = %rule.name, rule_id = %rule.id, "evaluate failed: {e:#}");
         }
     }
 

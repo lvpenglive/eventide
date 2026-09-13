@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import {
   ElAlert,
@@ -12,7 +12,7 @@ import {
   type FormInstance,
   type FormRules,
 } from 'element-plus'
-import { Setting, SwitchButton, Sunny, Moon, Monitor, ArrowDown, ArrowRight } from '@element-plus/icons-vue'
+import { Setting, SwitchButton, Sunny, Moon, Monitor, ArrowDown, ArrowRight, Expand } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { useTheme, type ThemePref } from '@/composables/useTheme'
 import { useUiStore } from '@/stores/ui'
@@ -46,6 +46,40 @@ function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
   localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed.value ? '1' : '0')
 }
+
+// --- 窄屏：侧栏改为抽屉 ---
+const MOBILE_MQ = '(max-width: 900px)'
+const isMobile = ref(false)
+const mobileNavOpen = ref(false)
+let mobileMq: MediaQueryList | null = null
+function syncMobile() {
+  const next = !!mobileMq?.matches
+  isMobile.value = next
+  if (!next) mobileNavOpen.value = false
+}
+function openMobileNav() {
+  mobileNavOpen.value = true
+}
+function closeMobileNav() {
+  mobileNavOpen.value = false
+}
+function onNavNavigate() {
+  if (isMobile.value) closeMobileNav()
+}
+onMounted(() => {
+  mobileMq = window.matchMedia(MOBILE_MQ)
+  syncMobile()
+  mobileMq.addEventListener('change', syncMobile)
+})
+onUnmounted(() => {
+  mobileMq?.removeEventListener('change', syncMobile)
+})
+watch(
+  () => route.fullPath,
+  () => {
+    if (isMobile.value) closeMobileNav()
+  },
+)
 
 // --- BetaToggle ---
 const betaAvailable = ref(false)
@@ -260,9 +294,23 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
 </script>
 
 <template>
-  <div class="main-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
-    <!-- 左侧固定侧栏（宽 220px，TR-4.4） -->
-    <aside class="sidebar">
+  <div
+    class="main-layout"
+    :class="{
+      'sidebar-collapsed': sidebarCollapsed && !isMobile,
+      'is-mobile': isMobile,
+      'mobile-nav-open': isMobile && mobileNavOpen,
+    }"
+  >
+    <!-- 窄屏遮罩 -->
+    <div
+      v-if="isMobile && mobileNavOpen"
+      class="mobile-nav-backdrop"
+      @click="closeMobileNav"
+    />
+
+    <!-- 左侧固定侧栏（宽 220px，TR-4.4）；窄屏下为抽屉 -->
+    <aside class="sidebar" :aria-hidden="isMobile && !mobileNavOpen ? 'true' : undefined">
       <div class="sidebar-brand">
         <span class="brand-dot" />
         <span class="brand-title">Eventide</span>
@@ -275,6 +323,7 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
           :to="pageHref('overview')"
           class="nav-item"
           :class="{ active: activePage === 'overview' }"
+          @click="onNavNavigate"
         >
           <span class="nav-icon">{{ PAGE_ICON.overview }}</span>
           <span class="nav-label">{{ PAGE_LABEL.overview }}</span>
@@ -316,6 +365,7 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
                 disabled: !isPageImplemented(key),
               }"
               :aria-disabled="!isPageImplemented(key)"
+              @click="onNavNavigate"
             >
               <span class="nav-icon">{{ PAGE_ICON[key] }}</span>
               <span class="nav-label">{{ PAGE_LABEL[key] }}</span>
@@ -335,6 +385,15 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
       <header class="topbar">
         <div class="topbar-left">
           <el-button
+            v-if="isMobile"
+            class="sidebar-toggle mobile-menu-btn"
+            title="打开导航"
+            @click="openMobileNav"
+          >
+            <el-icon :size="16"><Expand /></el-icon>
+          </el-button>
+          <el-button
+            v-else
             class="sidebar-toggle"
             :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
             @click="toggleSidebar"
@@ -795,5 +854,51 @@ const themeOpts: { key: ThemePref; label: string; icon: typeof Sunny }[] = [
 .fade-leave-to {
   opacity: 0;
   transform: translateY(-4px);
+}
+
+/* ===== 窄屏：侧栏抽屉 ===== */
+.mobile-nav-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(15, 23, 42, 0.45);
+}
+.main-layout.is-mobile .sidebar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+  flex: none;
+  width: min(280px, 86vw);
+  min-height: 100vh;
+  transform: translateX(-105%);
+  transition: transform 0.22s ease;
+  box-shadow: 8px 0 24px rgba(15, 23, 42, 0.18);
+}
+.main-layout.is-mobile.mobile-nav-open .sidebar {
+  transform: translateX(0);
+}
+.main-layout.is-mobile .main-area {
+  width: 100%;
+  min-width: 0;
+}
+.main-layout.is-mobile .page-area {
+  padding: 14px 14px 28px;
+}
+.main-layout.is-mobile .topbar {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.main-layout.is-mobile .beta-label {
+  display: none;
+}
+.main-layout.is-mobile .user-name {
+  display: none;
+}
+@media (max-width: 560px) {
+  .main-layout.is-mobile .theme-switcher {
+    display: none;
+  }
 }
 </style>

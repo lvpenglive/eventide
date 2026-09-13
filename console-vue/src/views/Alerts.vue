@@ -56,6 +56,9 @@ import {
   ElTabPane,
   ElTabs,
   ElTag,
+  ElTimeline,
+  ElTimelineItem,
+  ElAlert,
 } from 'element-plus'
 import type { FormInstance, FormRules, TableInstance } from 'element-plus'
 
@@ -224,8 +227,11 @@ export interface LocalAlertQuery {
   severity?: Severity | 'all'
   source?: AlertSource | 'all'
   acked?: 'all' | 'acked' | 'unacked'
-  store?: 'default' | 'recent' | 'history'
+  /** 与后端一致：空=跟随系统设置，mysql=最近，es=历史 */
+  store?: '' | 'mysql' | 'es'
   page?: number
+  limit?: number
+  /** @deprecated 使用 limit */
   page_size?: number
 }
 
@@ -278,17 +284,17 @@ watch(qRaw, (v) => (qDeb.value = v))
 const severity = ref<Severity | 'all'>('all')
 const source = ref<AlertSource | 'all'>('all')
 const acked = ref<'all' | 'acked' | 'unacked'>('all')
-const store = ref<'default' | 'recent' | 'history'>('default')
+const store = ref<'' | 'mysql' | 'es'>('')
 const autoRefresh = ref<0 | 15 | 30 | 60>(0)
 const viewMode = ref<'cards' | 'table'>('cards')
 
-// --- 分页 ---
+// --- 分页（服务端分页：alerts 即当前页） ---
 const pageNum = ref(1)
 const pageSize = 50
-const pagedAlerts = computed<AlertEvent[]>(() => {
-  const start = (pageNum.value - 1) * pageSize
-  return alerts.value.slice(start, start + pageSize)
-})
+const pagedAlerts = computed<AlertEvent[]>(() => alerts.value)
+
+const PREFILL_SILENCE_KEY = 'eventide_prefill_silence'
+const PREFILL_MAINTENANCE_KEY = 'eventide_prefill_maintenance'
 
 // --- 选择 ---
 const selection = ref<Set<string>>(new Set())
@@ -309,6 +315,10 @@ const detailNotifies = ref<NotifyLog[]>([])
 const detailTab = ref<'overview' | 'notifies' | 'history'>('overview')
 const notifyViewVisible = ref(false)
 const notifyViewLog = ref<NotifyLog | null>(null)
+const historyLoading = ref(false)
+const historyRows = ref<AlertEvent[]>([])
+const historyError = ref('')
+const historySource = ref<'es' | 'mysql' | ''>('')
 
 // --- 批量操作弹框 ---
 const batchAckVisible = ref(false)
@@ -698,19 +708,61 @@ interface ListAlertsRespShape {
 }
 
 function buildQuery(): AlertQuery {
-  const q: AlertQuery = {
-    page: undefined,
-    page_size: undefined,
-  } as AlertQuery
-  if (statusTab.value !== 'all') (q as LocalAlertQuery).status = statusTab.value
-  const kv: LocalAlertQuery = q as LocalAlertQuery
-  if (qDeb.value) kv.q = qDeb.value
-  if (ipRaw.value) kv.ip = ipRaw.value
-  if (severity.value !== 'all') kv.severity = severity.value
-  if (source.value !== 'all') kv.source = source.value
-  kv.acked = acked.value
-  kv.store = store.value
-  return q
+  const q: Record<string, string | number> = {
+    page: pageNum.value,
+    limit: pageSize,
+  }
+  if (statusTab.value !== 'all') q.status = statusTab.value
+  if (qDeb.value) q.q = qDeb.value
+  if (ipRaw.value) q.ip = ipRaw.value
+  if (severity.value !== 'all') q.severity = severity.value
+  if (source.value !== 'all') q.source = source.value
+  if (acked.value === 'acked') q.acked = 'true'
+  else if (acked.value === 'unacked') q.acked = 'false'
+  if (store.value) q.store = store.value
+  return q as AlertQuery
+}
+
+/** 从告警 labels 生成静默/维护匹配（去掉 source） */
+function matchersFromAlert(a: AlertEvent): Record<string, string> {
+  const labels = { ...((a as AlertEvent & LocalAlertEvent).labels || {}) } as Record<string, string>
+  delete labels.source
+  return labels
+}
+
+function silenceFromAlert(a: AlertEvent): void {
+  if (!auth.can('silences:write')) {
+    ElMessage.warning('需要 silences:write 权限')
+    return
+  }
+  sessionStorage.setItem(
+    PREFILL_SILENCE_KEY,
+    JSON.stringify({
+      comment: `静默 ${alertName(a)}`,
+      matchers: matchersFromAlert(a),
+    }),
+  )
+  drawerVisible.value = false
+  closeCtx()
+  router.push({ name: 'Silences', query: { create: '1' } })
+}
+
+function maintenanceFromAlert(a: AlertEvent): void {
+  if (!auth.can('maintenance:write')) {
+    ElMessage.warning('需要 maintenance:write 权限')
+    return
+  }
+  sessionStorage.setItem(
+    PREFILL_MAINTENANCE_KEY,
+    JSON.stringify({
+      name: `维护 ${alertName(a)}`,
+      comment: `来自告警 ${alertName(a)}`,
+      matchers: matchersFromAlert(a),
+    }),
+  )
+  drawerVisible.value = false
+  closeCtx()
+  router.push({ name: 'Maintenance', query: { create: '1' } })
 }
 
 async function loadAlerts(): Promise<void> {
@@ -770,6 +822,9 @@ async function openDetail(idOrAlert: string | AlertEvent): Promise<void> {
   drawerVisible.value = true
   detailTab.value = 'overview'
   detailNotifies.value = []
+  historyRows.value = []
+  historyError.value = ''
+  historySource.value = ''
   notifyViewLog.value = null
   notifyViewVisible.value = false
 
@@ -794,6 +849,61 @@ async function openDetail(idOrAlert: string | AlertEvent): Promise<void> {
   }
 }
 
+async function loadHistory(a: AlertEvent): Promise<void> {
+  historyLoading.value = true
+  historyError.value = ''
+  historyRows.value = []
+  historySource.value = ''
+  const fp = String((a as AlertEvent & LocalAlertEvent).fingerprint || '').trim()
+  if (!fp) {
+    historyError.value = '无 fingerprint，无法查询历史'
+    historyLoading.value = false
+    return
+  }
+  const pickExact = (items: AlertEvent[]) =>
+    items.filter((x) => String((x as AlertEvent & LocalAlertEvent).fingerprint || '') === fp)
+  const sortHistory = (items: AlertEvent[]) =>
+    [...items].sort((x, y) => {
+      const tx = Date.parse(String((x as AlertEvent & LocalAlertEvent).starts_at || (x as any).created_at || '')) || 0
+      const ty = Date.parse(String((y as AlertEvent & LocalAlertEvent).starts_at || (y as any).created_at || '')) || 0
+      return ty - tx
+    })
+
+  const fetchStore = async (storeName: 'es' | 'mysql') => {
+    const resp = (await (listAlerts as unknown as (query: AlertQuery) => Promise<ListAlertsRespShape | AlertEvent[]>)({
+      store: storeName,
+      q: fp,
+      page: 1,
+      limit: 100,
+    } as AlertQuery)) as ListAlertsRespShape | AlertEvent[]
+    const items = Array.isArray(resp) ? resp : resp?.items || []
+    return pickExact(items as AlertEvent[])
+  }
+
+  try {
+    try {
+      const esItems = await fetchStore('es')
+      if (esItems.length > 0) {
+        historyRows.value = sortHistory(esItems)
+        historySource.value = 'es'
+        return
+      }
+    } catch (e) {
+      // ES 未配置或失败时回退 MySQL
+      historyError.value = e instanceof Error ? e.message : String(e)
+    }
+    const mysqlItems = await fetchStore('mysql')
+    historyRows.value = sortHistory(mysqlItems)
+    historySource.value = 'mysql'
+    if (mysqlItems.length > 0) historyError.value = ''
+    else if (!historyError.value) historyError.value = '未找到同 fingerprint 的历史记录'
+  } catch (e) {
+    historyError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
 async function loadNotifies(id: string): Promise<void> {
   if (detailNotifies.value.length) return
   const list = await safeCall<unknown>(
@@ -806,8 +916,12 @@ async function loadNotifies(id: string): Promise<void> {
 watch(
   () => [drawerVisible.value, detailTab.value],
   () => {
-    if (drawerVisible.value && detailTab.value === 'notifies' && detailAlert.value) {
+    if (!drawerVisible.value || !detailAlert.value) return
+    if (detailTab.value === 'notifies') {
       loadNotifies((detailAlert.value as AlertEvent & LocalAlertEvent).id)
+    }
+    if (detailTab.value === 'history' && !historyRows.value.length && !historyLoading.value) {
+      loadHistory(detailAlert.value)
     }
   },
 )
@@ -1054,8 +1168,10 @@ async function ctxAction(act: string): Promise<void> {
       closeDialogVisible.value = true
       break
     case 'silence':
+      silenceFromAlert(a)
+      break
     case 'maintenance':
-      ElMessage.info('批次 2 实现')
+      maintenanceFromAlert(a)
       break
     case 'copy_desc':
       await copyText(alertSummary(a, 10000), '描述')
@@ -1097,14 +1213,17 @@ watch(viewMode, (v) => {
   writeLS(LS_VIEW, v)
 })
 
-// 过滤条件变化时回到 page 1
+// 过滤条件变化：回到第 1 页并加载；若已在第 1 页则直接加载
 watch(
   [statusTab, qDeb, ipRaw, severity, source, acked, store],
   () => {
-    pageNum.value = 1
-    loadAlerts().catch(() => void 0)
+    if (pageNum.value !== 1) pageNum.value = 1
+    else void loadAlerts()
   },
 )
+watch(pageNum, () => {
+  void loadAlerts()
+})
 
 // =================================================================
 // 初始化
@@ -1259,9 +1378,9 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
         </el-col>
         <el-col :xs="24" :sm="24" :md="4">
           <el-select v-model="store" size="small" placeholder="存储" style="width:100%">
-            <el-option label="列表（默认）" value="default" />
-            <el-option label="最近事件 MySQL" value="recent" />
-            <el-option label="历史事件 ES" value="history" />
+            <el-option label="列表（跟随设置）" value="" />
+            <el-option label="最近事件 MySQL" value="mysql" />
+            <el-option label="历史事件 ES" value="es" />
           </el-select>
         </el-col>
       </el-row>
@@ -1576,7 +1695,7 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
       </template>
 
       <!-- 分页 -->
-      <div v-if="alerts.length > 0" class="alert-pagination">
+      <div v-if="total > 0" class="alert-pagination">
         <el-pagination
           v-model:current-page="pageNum"
           background
@@ -1617,10 +1736,18 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
           >
             <el-icon><CircleClose /></el-icon><span>关闭告警</span>
           </li>
-          <li class="ctx-menu-item is-disabled">
+          <li
+            class="ctx-menu-item"
+            :class="{ 'is-disabled': !auth.can('silences:write') }"
+            @click.stop="auth.can('silences:write') && ctxAction('silence')"
+          >
             <el-icon><Switch /></el-icon><span>据此静默</span>
           </li>
-          <li class="ctx-menu-item is-disabled">
+          <li
+            class="ctx-menu-item"
+            :class="{ 'is-disabled': !auth.can('maintenance:write') }"
+            @click.stop="auth.can('maintenance:write') && ctxAction('maintenance')"
+          >
             <el-icon><Setting /></el-icon><span>据此开维护</span>
           </li>
           <li class="ctx-menu-divider"></li>
@@ -1856,11 +1983,70 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
             </el-table>
           </el-tab-pane>
 
-          <!-- 历史占位 -->
+          <!-- 同 fingerprint 历史 -->
           <el-tab-pane label="历史" name="history">
-            <div style="padding:32px 8px;text-align:center;color:var(--muted);">
-              <el-icon :size="32" color="var(--muted)" style="margin-bottom:8px;"><DataAnalysis /></el-icon>
-              <div>告警历史独立 ES 查询：批次 3 接入 timeline。</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+              <div style="color:var(--muted);font-size:12px;">
+                按 fingerprint 查询
+                <code v-if="(detailAlert as any)?.fingerprint" style="margin-left:4px;">{{ (detailAlert as any).fingerprint }}</code>
+                <el-tag v-if="historySource" size="small" effect="plain" style="margin-left:8px;">
+                  来源：{{ historySource === 'es' ? 'Elasticsearch' : 'MySQL' }}
+                </el-tag>
+              </div>
+              <el-button
+                size="small"
+                :loading="historyLoading"
+                @click="detailAlert && loadHistory(detailAlert)"
+              >刷新</el-button>
+            </div>
+            <el-alert
+              v-if="historyError && !historyRows.length"
+              :title="historyError"
+              type="warning"
+              :closable="false"
+              show-icon
+              style="margin-bottom:10px;"
+            />
+            <div v-loading="historyLoading">
+              <el-empty v-if="!historyLoading && !historyRows.length" description="暂无历史记录" :image-size="72" />
+              <el-timeline v-else-if="historyRows.length" class="alert-history-timeline">
+                <el-timeline-item
+                  v-for="row in historyRows"
+                  :key="(row as any).id || (row as any).fingerprint + String((row as any).starts_at)"
+                  :timestamp="fmtTime((row as any).starts_at || (row as any).created_at)"
+                  placement="top"
+                  :type="(row as any).status === 'firing' ? 'danger' : (row as any).status === 'resolved' ? 'success' : 'primary'"
+                  :hollow="(row as any).id === (detailAlert as any)?.id"
+                >
+                  <div
+                    class="hist-card"
+                    :class="{ current: (row as any).id === (detailAlert as any)?.id }"
+                    @click="openDetail(row as any)"
+                  >
+                    <div class="hist-card-top">
+                      <span :class="['alerts-tag', 'alerts-status', statusMeta((row as any).status).cls]">
+                        {{ statusMeta((row as any).status).text }}
+                      </span>
+                      <span :class="['alerts-tag', 'alerts-sev', severityMeta((row as any).severity).cls]">
+                        {{ severityMeta((row as any).severity).text }}
+                      </span>
+                      <span class="hist-count">×{{ (row as any).occurrence_count ?? (row as any).count ?? 1 }}</span>
+                      <el-tag
+                        v-if="(row as any).id === (detailAlert as any)?.id"
+                        size="small"
+                        type="info"
+                        effect="plain"
+                      >当前</el-tag>
+                    </div>
+                    <div class="hist-summary">
+                      {{ (row as any).summary || (row as any).annotations?.summary || (row as any).alertname || '-' }}
+                    </div>
+                    <div class="hist-meta">
+                      最近 {{ fmtTime((row as any).last_occurrence_at || (row as any).starts_at) }}
+                    </div>
+                  </div>
+                </el-timeline-item>
+              </el-timeline>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -1891,16 +2077,18 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
                 <el-icon style="margin-right:4px;"><CircleClose /></el-icon>关闭告警
               </el-button>
             </template>
-            <el-tooltip content="批次 2 实现" placement="top" :show-after="200">
-              <el-button disabled>
-                <el-icon style="margin-right:4px;"><Switch /></el-icon>据此静默
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="批次 2 实现" placement="top" :show-after="200">
-              <el-button disabled>
-                <el-icon style="margin-right:4px;"><Setting /></el-icon>据此开维护
-              </el-button>
-            </el-tooltip>
+            <el-button
+              :disabled="!auth.can('silences:write')"
+              @click="detailAlert && silenceFromAlert(detailAlert)"
+            >
+              <el-icon style="margin-right:4px;"><Switch /></el-icon>据此静默
+            </el-button>
+            <el-button
+              :disabled="!auth.can('maintenance:write')"
+              @click="detailAlert && maintenanceFromAlert(detailAlert)"
+            >
+              <el-icon style="margin-right:4px;"><Setting /></el-icon>据此开维护
+            </el-button>
             <el-button @click="drawerVisible = false">关闭</el-button>
           </div>
         </div>
@@ -2263,6 +2451,47 @@ function snmpVarbinds(a: AlertEvent): Array<{ idx: number; oid: string; val: str
   padding: 10px 20px 14px;
   border-top: 1px solid var(--line);
   background: var(--panel-2);
+}
+
+.alert-history-timeline {
+  padding-left: 4px;
+}
+.hist-card {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--overlay-soft);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.hist-card:hover {
+  border-color: var(--primary, var(--el-color-primary));
+  background: var(--panel-2, var(--bg-elev));
+}
+.hist-card.current {
+  border-color: var(--primary, var(--el-color-primary));
+}
+.hist-card-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.hist-count {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.hist-summary {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--heading);
+}
+.hist-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .code-block {

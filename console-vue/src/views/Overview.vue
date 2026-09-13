@@ -668,7 +668,7 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
     <ElDialog
       v-model="detailVisible"
       title="告警详情"
-      width="800px"
+      width="900px"
       :close-on-click-modal="true"
       destroy-on-close
       class="alert-detail-dialog"
@@ -705,7 +705,7 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
 
         <ElDivider content-position="left">基本信息</ElDivider>
 
-        <ElDescriptions :column="3" border size="small">
+        <ElDescriptions :column="2" border size="small">
           <ElDescriptionsItem label="指纹">
             <span class="mono">{{ currentAlert.fingerprint }}</span>
           </ElDescriptionsItem>

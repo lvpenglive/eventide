@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ElAffix, ElButton, ElDatePicker, ElDialog, ElEmpty, ElForm, ElFormItem,
   ElInput, ElMessage, ElMessageBox, ElOption, ElPagination, ElSelect,
@@ -10,6 +11,10 @@ import { Plus, Refresh, Search, Setting } from '@element-plus/icons-vue'
 import type { MaintenanceWindow, MaintenanceInput } from '@/api/types'
 import { listMaintenance, createMaintenance, updateMaintenance, deleteMaintenance } from '@/api/maintenance'
 import { listRules } from '@/api/rules'
+
+const route = useRoute()
+const router = useRouter()
+const PREFILL_MAINTENANCE_KEY = 'eventide_prefill_maintenance'
 
 interface RuleBrief { id: string; name?: string }
 type MWRow = MaintenanceWindow
@@ -196,6 +201,31 @@ function openCreate(): void {
   setTimeout(() => { try { formRef.value?.clearValidate?.() } catch {} }, 0)
 }
 
+function openCreateFromPrefill(): void {
+  openCreate()
+  const raw = sessionStorage.getItem(PREFILL_MAINTENANCE_KEY)
+  sessionStorage.removeItem(PREFILL_MAINTENANCE_KEY)
+  if (!raw) return
+  try {
+    const p = JSON.parse(raw) as {
+      name?: string
+      comment?: string
+      matchers?: Record<string, string>
+    }
+    if (p.name) formData.name = String(p.name)
+    if (p.comment) formData.comment = String(p.comment)
+    if (p.matchers && typeof p.matchers === 'object') {
+      const entries = Object.entries(p.matchers).map(([key, value]) => ({
+        key,
+        value: String(value),
+      }))
+      formData.matchers = entries.length > 0 ? entries : [{ key: '', value: '' }]
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 async function openEdit(row: MWRow): Promise<void> {
   dialogMode.value = 'edit'
   editingId.value = row.id
@@ -323,6 +353,10 @@ async function onSubmit(): Promise<void> {
 onMounted(() => {
   void loadList()
   tickTimer = window.setInterval(() => { tick.value = Date.now() }, 30_000)
+  if (route.query.create === '1') {
+    openCreateFromPrefill()
+    void router.replace({ name: 'Maintenance', query: {} })
+  }
 })
 onBeforeUnmount(() => {
   if (tickTimer != null) { window.clearInterval(tickTimer); tickTimer = null }
@@ -474,7 +508,7 @@ onBeforeUnmount(() => {
     <ElDialog
       v-model="dialogVisible"
       :title="dialogMode === 'create' ? '新建维护窗' : '编辑维护窗'"
-      width="680px" :close-on-click-modal="false" destroy-on-close top="6vh"
+      width="760px" :close-on-click-modal="false" destroy-on-close top="6vh"
     >
       <ElForm ref="formRef" :model="formData" :rules="formRules" label-width="92px" label-position="right">
         <ElFormItem label="名称" prop="name">

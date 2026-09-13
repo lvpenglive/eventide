@@ -215,7 +215,12 @@ onMounted(() => load())
         </ElTableColumn>
         <ElTableColumn label="结果" width="90">
           <template #default="{ row }">
-            <ElTag v-if="(row as AuditLog).status_code != null" size="small" :type="statusTagType((row as AuditLog).status_code)">
+            <ElTag
+              v-if="(row as AuditLog).status_code != null"
+              size="small"
+              effect="dark"
+              :type="statusTagType((row as AuditLog).status_code)"
+            >
               {{ (row as AuditLog).status_code }}
             </ElTag>
             <span v-else>—</span>
@@ -224,7 +229,7 @@ onMounted(() => load())
         <ElTableColumn label="路径" min-width="200">
           <template #default="{ row }">
             <div class="path-cell">
-              <ElTag size="small" type="info">{{ (row as AuditLog).method || '—' }}</ElTag>
+              <ElTag size="small" type="info" effect="dark">{{ (row as AuditLog).method || '—' }}</ElTag>
               <span class="path-text" :title="(row as AuditLog).path || ''">{{ (row as AuditLog).path || '' }}</span>
             </div>
           </template>

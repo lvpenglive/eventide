@@ -319,37 +319,37 @@ const KINDS: KindMeta[] = [
   {
     kind: 'alertmanager',
     label: 'Alertmanager',
-    desc: 'Prometheus 告警 Webhook',
+    desc: '接收 Prometheus / Alertmanager Webhook，标准 alerts 载荷直接入库。',
     tagType: 'primary',
     icon: 'AM',
-    endpoint: 'HTTP',
+    endpoint: 'HTTP Webhook',
     tone: 'orange',
   },
   {
     kind: 'generic',
     label: 'Generic / 拨测',
-    desc: '通用 JSON · 自定义字段映射',
+    desc: '通用 JSON 推送；可用字段映射适配第三方与拨测平台格式。',
     tagType: 'success',
     icon: 'G',
-    endpoint: 'HTTP',
+    endpoint: 'HTTP Webhook',
     tone: 'blue',
   },
   {
     kind: 'kafka',
     label: 'Kafka',
-    desc: '告警总线 Topic 消费',
+    desc: '从告警总线 Topic 消费消息，支持位点、分区与 Group 配置。',
     tagType: 'warning',
     icon: 'K',
-    endpoint: 'Kafka',
+    endpoint: 'Kafka Consumer',
     tone: 'amber',
   },
   {
     kind: 'snmptrap',
     label: 'SNMP Trap',
-    desc: 'Trap→Kafka 样例（字段已对齐）',
+    desc: 'Trap→Kafka 开箱样例，字段已与 eventide-trap 写出格式对齐。',
     tagType: 'danger',
     icon: 'SN',
-    endpoint: 'Kafka',
+    endpoint: 'Kafka 样例',
     tone: 'teal',
   },
 ]
@@ -512,7 +512,18 @@ const form = reactive<
     channel_ids: string[]
     escalate_channel_ids: string[]
     escalate_after_seconds: number | undefined | null
-    escalate_severity: 'all' | 'critical' | 'error' | 'warning' | 'info' | 'ok'
+    escalate_severity:
+      | 'all'
+      | 'not_classified'
+      | 'information'
+      | 'warning'
+      | 'average'
+      | 'high'
+      | 'disaster'
+      | 'critical'
+      | 'error'
+      | 'info'
+      | 'ok'
     // form only extras
     brokers: string
     topic: string
@@ -531,6 +542,7 @@ const form = reactive<
     map_ip: string
     map_value: string
     map_critical: string
+    map_warning: string
     map_labels: string
   }
 >({
@@ -561,6 +573,7 @@ const form = reactive<
   map_ip: '',
   map_value: '',
   map_critical: '',
+  map_warning: '',
   map_labels: '',
 })
 
@@ -588,16 +601,6 @@ const formRules = reactive<FormRules<FormModelT>>({
         } else cb()
       },
       trigger: 'blur',
-    },
-  ],
-  channel_ids: [
-    {
-      validator: (_rule, value, cb) => {
-        if (!value || (value as unknown as string[]).length === 0) {
-          cb(new Error('至少选择一个通知渠道'))
-        } else cb()
-      },
-      trigger: 'change',
     },
   ],
 })
@@ -630,6 +633,7 @@ function resetForm(kindPreselect: IngressKind | null = null): void {
   form.map_ip = ''
   form.map_value = ''
   form.map_critical = ''
+  form.map_warning = ''
   form.map_labels = ''
 }
 
@@ -685,7 +689,19 @@ async function openEdit(r: IngressRoute): Promise<void> {
   const sev = full.escalate_severity as unknown as FormModelT['escalate_severity'] | undefined
   form.escalate_severity =
     sev != null &&
-    ['all', 'critical', 'error', 'warning', 'info', 'ok'].includes(String(sev))
+    [
+      'all',
+      'not_classified',
+      'information',
+      'warning',
+      'average',
+      'high',
+      'disaster',
+      'critical',
+      'error',
+      'info',
+      'ok',
+    ].includes(String(sev))
       ? (sev as FormModelT['escalate_severity'])
       : 'all'
   form.escalate_channel_ids = Array.isArray(full.escalate_channel_ids)
@@ -705,7 +721,7 @@ async function openEdit(r: IngressRoute): Promise<void> {
   // mapping
   const mapKeys: (keyof Pick<
     FormModelT,
-    'map_list' | 'map_status' | 'map_fire' | 'map_resolve' | 'map_severity' | 'map_fingerprint' | 'map_name' | 'map_description' | 'map_ip' | 'map_value' | 'map_critical' | 'map_labels'
+    'map_list' | 'map_status' | 'map_fire' | 'map_resolve' | 'map_severity' | 'map_fingerprint' | 'map_name' | 'map_description' | 'map_ip' | 'map_value' | 'map_critical' | 'map_warning' | 'map_labels'
   >)[] = [
     'map_list',
     'map_status',
@@ -718,6 +734,7 @@ async function openEdit(r: IngressRoute): Promise<void> {
     'map_ip',
     'map_value',
     'map_critical',
+    'map_warning',
     'map_labels',
   ]
   let hasMapping = false
@@ -745,7 +762,7 @@ function buildPayload(): IngressInput {
   if (form.useMapping) {
     const mapKeys: (keyof Pick<
       FormModelT,
-      'map_list' | 'map_status' | 'map_fire' | 'map_resolve' | 'map_severity' | 'map_fingerprint' | 'map_name' | 'map_description' | 'map_ip' | 'map_value' | 'map_critical' | 'map_labels'
+      'map_list' | 'map_status' | 'map_fire' | 'map_resolve' | 'map_severity' | 'map_fingerprint' | 'map_name' | 'map_description' | 'map_ip' | 'map_value' | 'map_critical' | 'map_warning' | 'map_labels'
     >)[] = [
       'map_list',
       'map_status',
@@ -758,11 +775,32 @@ function buildPayload(): IngressInput {
       'map_ip',
       'map_value',
       'map_critical',
+      'map_warning',
       'map_labels',
     ]
     for (const k of mapKeys) {
       const v = form[k]
       if (typeof v === 'string' && v.length > 0) optsRaw[k] = v
+      else delete optsRaw[k]
+    }
+  } else {
+    for (const k of [
+      'map_list',
+      'map_status',
+      'map_fire',
+      'map_resolve',
+      'map_severity',
+      'map_fingerprint',
+      'map_name',
+      'map_description',
+      'map_ip',
+      'map_value',
+      'map_critical',
+      'map_warning',
+      'map_labels',
+      'map_enabled',
+    ]) {
+      delete optsRaw[k]
     }
   }
   // 归一化：IngressInput.options 要求 Record<string, string>
@@ -1419,45 +1457,45 @@ function fmtKafkaMsgTimestamp(m: KafkaMsg): string {
     <!-- 类型选择 Dialog -->
     <el-dialog
       v-model="typePickerVisible"
-      width="720px"
+      width="920px"
+      class="ingress-type-picker-dialog"
       :close-on-click-modal="false"
       append-to-body
-      :show-close="false"
+      destroy-on-close
     >
       <template #header>
-        <div class="ds-modal-head">
+        <div class="type-picker-head">
           <h3>选择接入类型</h3>
-          <p class="ds-modal-desc">先选来源类型，再填写连接与字段映射。SNMP Trap 请选样例，字段已与 Trap 写出对齐。</p>
+          <p>先选来源类型，再填写连接与字段映射。SNMP Trap 请选样例，字段已与 Trap 写出对齐。</p>
         </div>
       </template>
-      <div class="ds-modal-body">
-        <div class="ds-type-pick-grid">
-          <button
-            v-for="k in KINDS"
-            :key="k.kind"
-            type="button"
-            class="ds-type-pick-card"
-            @click="pickKind(k.kind)"
-          >
-            <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]">
-              {{ k.icon }}
-            </span>
+      <div class="ds-type-pick-grid">
+        <button
+          v-for="k in KINDS"
+          :key="k.kind"
+          type="button"
+          class="ds-type-pick-card"
+          @click="pickKind(k.kind)"
+        >
+          <span :class="['ds-type-pick-ico', 'ds-tone-' + k.tone]">
+            {{ k.icon }}
+          </span>
+          <span class="ds-type-pick-text">
             <span class="ds-type-pick-name">{{ k.label }}</span>
             <span class="ds-type-pick-desc">{{ k.desc }}</span>
-          </button>
-        </div>
+            <span class="ds-type-pick-endpoint">{{ k.endpoint }}</span>
+          </span>
+        </button>
       </div>
       <template #footer>
-        <div class="ds-modal-actions">
-          <button type="button" class="ds-btn-ghost" @click="typePickerVisible = false">取消</button>
-        </div>
+        <el-button @click="typePickerVisible = false">取消</el-button>
       </template>
     </el-dialog>
 
     <!-- 新建 / 编辑 Dialog -->
     <el-dialog
       v-model="dialogVisible"
-      width="720px"
+      width="880px"
       :close-on-click-modal="false"
       append-to-body
       :show-close="false"
@@ -1469,109 +1507,116 @@ function fmtKafkaMsgTimestamp(m: KafkaMsg): string {
         </div>
       </template>
       <div class="ds-modal-body">
-        <!-- 1/4 基础信息 -->
-        <section class="ds-form-section">
-          <div class="ds-form-section-head">
-            <h4 class="ds-form-section-title">基础信息</h4>
-            <span class="ds-form-section-tag">1 / 4</span>
-          </div>
-          <div class="ds-field">
-            <label>名称</label>
-            <input v-model="form.name" type="text" required placeholder="例如：生产 AM" />
-          </div>
-          <div class="ds-field">
-            <label>类型</label>
-            <div class="ds-type-picked">
-              <span :class="['ds-type-pick-ico', 'ds-tone-' + kindMetaOf(form.kind).tone]">
-                {{ kindMetaOf(form.kind).icon }}
-              </span>
-              <div class="ds-type-picked-text">
-                <div class="t-name">{{ kindMetaOf(form.kind).label }}</div>
-                <div class="t-desc">{{ kindMetaOf(form.kind).desc }}</div>
-              </div>
-              <button
-                v-if="!isEdit"
-                type="button"
-                class="ds-btn-ghost ds-btn-sm"
-                @click="dialogVisible = false; typePickerVisible = true"
-              >重选类型</button>
+        <el-form
+          ref="formRef"
+          :model="form"
+          :rules="formRules"
+          label-position="top"
+          class="ingress-ep-form"
+          @submit.prevent
+        >
+          <!-- 1/4 基础信息 -->
+          <section class="ds-form-section">
+            <div class="ds-form-section-head">
+              <h4 class="ds-form-section-title">基础信息</h4>
+              <span class="ds-form-section-tag">1 / 4</span>
             </div>
-          </div>
-          <div class="ds-field" style="margin-bottom: 4px">
-            <label class="ds-check-row">
-              <input v-model="form.enabled" type="checkbox" />
-              <span>启用此接入路由</span>
-            </label>
-          </div>
-        </section>
+            <el-form-item label="名称" prop="name">
+              <el-input v-model="form.name" placeholder="例如：生产 AM" />
+            </el-form-item>
+            <el-form-item label="类型">
+              <div class="ds-type-picked">
+                <span :class="['ds-type-pick-ico', 'ds-tone-' + kindMetaOf(form.kind).tone]">
+                  {{ kindMetaOf(form.kind).icon }}
+                </span>
+                <div class="ds-type-picked-text">
+                  <div class="t-name">{{ kindMetaOf(form.kind).label }}</div>
+                  <div class="t-desc">{{ kindMetaOf(form.kind).desc }}</div>
+                </div>
+                <el-button
+                  v-if="!isEdit"
+                  size="small"
+                  @click="dialogVisible = false; typePickerVisible = true"
+                >重选类型</el-button>
+              </div>
+            </el-form-item>
+            <el-form-item label="启用">
+              <el-switch v-model="form.enabled" active-text="启用此接入路由" />
+            </el-form-item>
+          </section>
 
-        <!-- 2/4 接入参数 -->
-        <section class="ds-form-section">
-          <div class="ds-form-section-head">
-            <h4 class="ds-form-section-title">接入参数</h4>
-            <span class="ds-form-section-tag">2 / 4</span>
-          </div>
+          <!-- 2/4 接入参数 -->
+          <section class="ds-form-section">
+            <div class="ds-form-section-head">
+              <h4 class="ds-form-section-title">接入参数</h4>
+              <span class="ds-form-section-tag">2 / 4</span>
+            </div>
 
-          <!-- HTTP 类 -->
-          <template v-if="form.kind === 'alertmanager' || form.kind === 'generic'">
-            <div class="ds-field">
-              <label>鉴权 Token（必填）</label>
-              <div class="ds-url-row">
-                <input v-model="form.token" type="text" placeholder="至少 8 位；请求头 Bearer / X-Eventide-Token" style="flex: 1" />
-                <button type="button" class="ds-btn-ghost" @click="genToken">重新生成</button>
-              </div>
-              <div class="ds-hint">HTTP 接入必须配置 Token；推送时带 <code>Authorization: Bearer …</code> 或 <code>X-Eventide-Token</code>。</div>
-              <div v-if="form.kind === 'alertmanager'" class="ds-hint ds-sample-hint">
-                载荷示例：Alertmanager <code>{"alerts":[{"status":"firing","labels":{...}}]}</code>
-              </div>
-              <div v-else-if="form.kind === 'generic'" class="ds-hint ds-sample-hint">
-                默认支持 Generic / 拨测 JSON；其他格式请展开下方「字段映射」配置路径。
-              </div>
-            </div>
-          </template>
+            <template v-if="form.kind === 'alertmanager' || form.kind === 'generic'">
+              <el-form-item label="鉴权 Token（必填）">
+                <div class="ds-url-row" style="width:100%;">
+                  <el-input
+                    v-model="form.token"
+                    placeholder="至少 8 位；请求头 Bearer / X-Eventide-Token"
+                    style="flex:1"
+                  />
+                  <el-button @click="genToken">重新生成</el-button>
+                </div>
+                <div class="ds-hint">HTTP 接入必须配置 Token；推送时带 <code>Authorization: Bearer …</code> 或 <code>X-Eventide-Token</code>。</div>
+                <div v-if="form.kind === 'alertmanager'" class="ds-hint ds-sample-hint">
+                  载荷示例：Alertmanager <code>{"alerts":[{"status":"firing","labels":{...}}]}</code>
+                </div>
+                <div v-else-if="form.kind === 'generic'" class="ds-hint ds-sample-hint">
+                  默认支持 Generic / 拨测 JSON；其他格式请展开下方「字段映射」配置路径。
+                </div>
+              </el-form-item>
+            </template>
 
-          <!-- Kafka 类 -->
-          <template v-else-if="form.kind === 'kafka'">
-            <div class="ds-field">
-              <label>Brokers</label>
-              <input v-model="form.brokers" type="text" placeholder="127.0.0.1:9092" />
-            </div>
-            <div class="ds-row">
-              <div class="ds-field">
-                <label>Topic</label>
-                <input v-model="form.topic" type="text" placeholder="alerts" />
-              </div>
-              <div class="ds-field">
-                <label>起始位点</label>
-                <select v-model="form.start">
-                  <option value="latest">latest 仅新消息</option>
-                  <option value="earliest">earliest 从头消费</option>
-                </select>
-              </div>
-            </div>
-            <div class="ds-field">
-              <label>Consumer Group ID（可选）</label>
-              <input v-model="form.group_id" type="text" placeholder="默认 eventide-ingress-{route_id}" />
-              <div class="ds-hint">多实例共用同一 group_id 自动分摊分区；改 group_id 会按「起始位点」重新消费。</div>
-            </div>
-            <div class="ds-field" style="margin-bottom: 4px">
-              <label>分区数（订阅范围）</label>
-              <div class="ds-url-row">
-                <input v-model="form.partitions" type="number" min="1" placeholder="自动探测" style="flex: 1" />
-                <button type="button" class="ds-btn-ghost" @click="probePartitions">自动获取</button>
-              </div>
-              <div class="ds-hint">须覆盖 Topic 全部分区（优先 metadata 探测）。</div>
-            </div>
-          </template>
-        </section>
+            <template v-else-if="form.kind === 'kafka'">
+              <el-form-item label="Brokers" prop="brokers">
+                <el-input v-model="form.brokers" placeholder="127.0.0.1:9092" />
+              </el-form-item>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="Topic" prop="topic">
+                    <el-input v-model="form.topic" placeholder="alerts" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="起始位点">
+                    <el-select v-model="form.start" style="width:100%">
+                      <el-option label="latest 仅新消息" value="latest" />
+                      <el-option label="earliest 从头消费" value="earliest" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-form-item label="Consumer Group ID（可选）">
+                <el-input v-model="form.group_id" placeholder="默认 eventide-ingress-{route_id}" />
+                <div class="ds-hint">多实例共用同一 group_id 自动分摊分区；改 group_id 会按「起始位点」重新消费。</div>
+              </el-form-item>
+              <el-form-item label="分区数（订阅范围）">
+                <div class="ds-url-row" style="width:100%;">
+                  <el-input-number
+                    v-model="form.partitions"
+                    :min="1"
+                    controls-position="right"
+                    placeholder="自动探测"
+                    style="flex:1;width:100%"
+                  />
+                  <el-button @click="probePartitions">自动获取</el-button>
+                </div>
+                <div class="ds-hint">须覆盖 Topic 全部分区（优先 metadata 探测）。</div>
+              </el-form-item>
+            </template>
+          </section>
 
-        <!-- 3/4 字段映射 -->
-        <section class="ds-form-section">
-          <div class="ds-form-section-head">
-            <h4 class="ds-form-section-title">字段映射</h4>
-            <span class="ds-form-section-tag">3 / 4 · 通用 / Kafka 可选</span>
-          </div>
-          <div class="ds-seg">
+          <!-- 3/4 字段映射 -->
+          <section class="ds-form-section">
+            <div class="ds-form-section-head">
+              <h4 class="ds-form-section-title">字段映射</h4>
+              <span class="ds-form-section-tag">3 / 4 · 通用 / Kafka 可选</span>
+            </div>
             <div class="ds-hint" style="margin-bottom: 12px">
               填写对方 JSON 的点分路径（如 <code>data.title</code>）。可用变换截取字符串，例如
               <code>sourceciname|before:_</code> → <code>82.12.161.32</code>。
@@ -1597,141 +1642,169 @@ function fmtKafkaMsgTimestamp(m: KafkaMsg): string {
                     <tr><td><code>map_fingerprint</code></td><td>去重标识</td><td><code>fingerprint</code></td></tr>
                     <tr><td><code>map_severity</code></td><td>级别原始值</td><td><code>labels.severity</code> + 引擎级别</td></tr>
                     <tr><td><code>map_critical</code></td><td>哪些取值算 Disaster/High</td><td>→ disaster</td></tr>
+                    <tr><td><code>map_warning</code></td><td>哪些取值算 Warning</td><td>→ warning</td></tr>
                     <tr><td><code>map_labels</code></td><td>额外标签，<code>目标标签:源路径,...</code></td><td>对应 <code>labels.*</code></td></tr>
                     <tr><td><code>map_enabled</code></td><td>强制开启映射</td><td>—</td></tr>
                   </tbody>
                 </table>
-                <p class="ds-hint" style="margin: 10px 0 0">引擎另支持 <code>map_warning</code>（警告取值列表），可在高级 options 中配置；控制台暂无单独输入框。</p>
               </div>
             </details>
-            <div class="ds-field">
-              <label class="ds-check-row">
-                <input v-model="form.useMapping" type="checkbox" />
-                <span>启用自定义字段映射</span>
-              </label>
-            </div>
+            <el-form-item label="自定义映射">
+              <el-switch v-model="form.useMapping" active-text="启用自定义字段映射" />
+            </el-form-item>
             <template v-if="form.useMapping">
-              <div class="ds-row">
-                <div class="ds-field">
-                  <label>告警列表路径 map_list</label>
-                  <input v-model="form.map_list" type="text" placeholder="空=整条；或 data.items" />
-                </div>
-                <div class="ds-field">
-                  <label>状态字段 map_status</label>
-                  <input v-model="form.map_status" type="text" placeholder="state / status / eventType" />
-                </div>
-              </div>
-              <div class="ds-row">
-                <div class="ds-field">
-                  <label>触发取值 map_fire</label>
-                  <input v-model="form.map_fire" type="text" placeholder="默认 fire,firing,ALARM…" />
-                </div>
-                <div class="ds-field">
-                  <label>恢复取值 map_resolve</label>
-                  <input v-model="form.map_resolve" type="text" placeholder="默认 recover,resolved,OK…" />
-                </div>
-              </div>
-              <div class="ds-row">
-                <div class="ds-field">
-                  <label>告警名称 map_name</label>
-                  <input v-model="form.map_name" type="text" placeholder="title / alertName" />
-                </div>
-                <div class="ds-field">
-                  <label>告警描述 map_description</label>
-                  <input v-model="form.map_description" type="text" placeholder="msg / content" />
-                </div>
-              </div>
-              <div class="ds-row">
-                <div class="ds-field">
-                  <label>告警 IP map_ip</label>
-                  <input v-model="form.map_ip" type="text" placeholder="sourceciname|before:_" />
-                  <div class="ds-hint"><code>before:_</code> / <code>after:_</code> / <code>split:_:0</code> / <code>between:起点:终点</code></div>
-                </div>
-                <div class="ds-field">
-                  <label>当前值 map_value</label>
-                  <input v-model="form.map_value" type="text" placeholder="metric / value" />
-                </div>
-              </div>
-              <div class="ds-row">
-                <div class="ds-field">
-                  <label>告警标识 map_fingerprint</label>
-                  <input v-model="form.map_fingerprint" type="text" placeholder="id / alertId" />
-                </div>
-                <div class="ds-field">
-                  <label>级别 map_severity</label>
-                  <input v-model="form.map_severity" type="text" placeholder="level / severity" />
-                </div>
-              </div>
-              <div class="ds-row">
-                <div class="ds-field">
-                  <label>critical 取值</label>
-                  <input v-model="form.map_critical" type="text" placeholder="Disaster,High,5,4" />
-                </div>
-                <div class="ds-field">
-                  <label>额外标签 map_labels</label>
-                  <input v-model="form.map_labels" type="text" placeholder="region:zone,app:appName" />
-                </div>
-              </div>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="告警列表路径 map_list">
+                    <el-input v-model="form.map_list" placeholder="空=整条；或 data.items" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="状态字段 map_status">
+                    <el-input v-model="form.map_status" placeholder="state / status / eventType" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="触发取值 map_fire">
+                    <el-input v-model="form.map_fire" placeholder="默认 fire,firing,ALARM…" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="恢复取值 map_resolve">
+                    <el-input v-model="form.map_resolve" placeholder="默认 recover,resolved,OK…" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="告警名称 map_name">
+                    <el-input v-model="form.map_name" placeholder="title / alertName" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="告警描述 map_description">
+                    <el-input v-model="form.map_description" placeholder="msg / content" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="告警 IP map_ip">
+                    <el-input v-model="form.map_ip" placeholder="sourceciname|before:_" />
+                    <div class="ds-hint"><code>before:_</code> / <code>after:_</code> / <code>split:_:0</code> / <code>between:起点:终点</code></div>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="当前值 map_value">
+                    <el-input v-model="form.map_value" placeholder="metric / value" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="告警标识 map_fingerprint">
+                    <el-input v-model="form.map_fingerprint" placeholder="id / alertId" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="级别 map_severity">
+                    <el-input v-model="form.map_severity" placeholder="level / severity" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-row :gutter="12">
+                <el-col :span="12">
+                  <el-form-item label="critical 取值 map_critical">
+                    <el-input v-model="form.map_critical" placeholder="Disaster,High,5,4" />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="warning 取值 map_warning">
+                    <el-input v-model="form.map_warning" placeholder="Warning,Average,3,2" />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+              <el-form-item label="额外标签 map_labels">
+                <el-input v-model="form.map_labels" placeholder="region:zone,app:appName" />
+              </el-form-item>
             </template>
-          </div>
-        </section>
+          </section>
 
-        <!-- 4/4 通知与升级 -->
-        <section class="ds-form-section">
-          <div class="ds-form-section-head">
-            <h4 class="ds-form-section-title">通知与升级</h4>
-            <span class="ds-form-section-tag">4 / 4</span>
-          </div>
-          <div class="ds-field">
-            <label>通知渠道</label>
-            <select v-model="form.channel_ids" multiple :size="Math.min(6, Math.max(3, channels.length || 3))">
-              <option
-                v-for="c in channels"
-                :key="c.id"
-                :value="c.id"
-              >{{ c.name }} ({{ c.kind }})</option>
-            </select>
-            <div class="ds-ms-hint">可多选，告警同时推送到所有绑定渠道。未绑定渠道时告警仍会入库，但不会发送通知。</div>
-            <div class="ds-ms-hint">按住 <b>Ctrl</b>（Windows）或 <b>⌘</b>（Mac）点击可多选；已选中的再点一次即取消。</div>
-          </div>
-          <div class="ds-field">
-            <label>未接手升级（秒，0=关闭）</label>
-            <input v-model.number="form.escalate_after_seconds" type="number" min="0" />
-            <div class="ds-hint">告警 firing 超过此时长仍未接手则发送升级通知；可抬升级别与选择独立升级渠道。</div>
-          </div>
-          <div class="ds-row">
-            <div class="ds-field">
-              <label>升级级别（可选）</label>
-              <select v-model="form.escalate_severity">
-                <option value="">不改级别</option>
-                <option value="not_classified">未分类</option>
-                <option value="information">信息</option>
-                <option value="warning">警告</option>
-                <option value="average">一般</option>
-                <option value="high">严重</option>
-                <option value="disaster">灾害</option>
-              </select>
+          <!-- 4/4 通知与升级 -->
+          <section class="ds-form-section">
+            <div class="ds-form-section-head">
+              <h4 class="ds-form-section-title">通知与升级</h4>
+              <span class="ds-form-section-tag">4 / 4</span>
             </div>
-          </div>
-          <div class="ds-field" style="margin-bottom: 4px">
-            <label>升级通知渠道（可选，空=用上方渠道）</label>
-            <select v-model="form.escalate_channel_ids" multiple :size="Math.min(6, Math.max(3, channels.length || 3))">
-              <option
-                v-for="c in channels"
-                :key="'esc-' + c.id"
-                :value="c.id"
-              >{{ c.name }} ({{ c.kind }})</option>
-            </select>
-            <div class="ds-hint">留空则超时时使用上方相同的「通知渠道」；一般可升级时改推不同的领导/总值班渠道。</div>
-          </div>
-        </section>
+            <el-form-item label="通知渠道" prop="channel_ids">
+              <el-select
+                v-model="form.channel_ids"
+                multiple
+                filterable
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="选择通知渠道"
+                style="width:100%"
+              >
+                <el-option
+                  v-for="c in channels"
+                  :key="c.id"
+                  :label="`${c.name} (${c.kind})`"
+                  :value="c.id"
+                />
+              </el-select>
+              <div class="ds-ms-hint">可多选，告警同时推送到所有绑定渠道。未绑定渠道时告警仍会入库，但不会发送通知。</div>
+            </el-form-item>
+            <el-form-item label="未接手升级（秒，0=关闭）">
+              <el-input-number
+                v-model="form.escalate_after_seconds"
+                :min="0"
+                controls-position="right"
+                style="width:100%"
+              />
+              <div class="ds-hint">告警 firing 超过此时长仍未接手则发送升级通知；可抬升级别与选择独立升级渠道。</div>
+            </el-form-item>
+            <el-form-item label="升级级别（可选）">
+              <el-select v-model="form.escalate_severity" style="width:100%" clearable placeholder="不改级别">
+                <el-option label="不改级别" value="all" />
+                <el-option label="未分类" value="not_classified" />
+                <el-option label="信息" value="information" />
+                <el-option label="警告" value="warning" />
+                <el-option label="一般" value="average" />
+                <el-option label="严重" value="high" />
+                <el-option label="灾害" value="disaster" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="升级通知渠道（可选，空=用上方渠道）">
+              <el-select
+                v-model="form.escalate_channel_ids"
+                multiple
+                filterable
+                collapse-tags
+                collapse-tags-tooltip
+                placeholder="留空则用上方渠道"
+                style="width:100%"
+              >
+                <el-option
+                  v-for="c in channels"
+                  :key="'esc-' + c.id"
+                  :label="`${c.name} (${c.kind})`"
+                  :value="c.id"
+                />
+              </el-select>
+              <div class="ds-hint">留空则超时时使用上方相同的「通知渠道」；一般可升级时改推不同的领导/总值班渠道。</div>
+            </el-form-item>
+          </section>
+        </el-form>
       </div>
       <template #footer>
         <div class="ds-modal-actions">
-          <button type="button" class="ds-btn-ghost" @click="dialogVisible = false">取消</button>
-          <button type="button" class="ds-btn-primary" :disabled="dialogLoading" @click="submitForm">
+          <el-button @click="dialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="dialogLoading" @click="submitForm">
             {{ isEdit ? '保存修改' : '保存' }}
-          </button>
+          </el-button>
         </div>
       </template>
     </el-dialog>
@@ -2071,27 +2144,30 @@ function fmtKafkaMsgTimestamp(m: KafkaMsg): string {
   margin: 0 -20px -20px -20px;
 }
 
-/* 类型选择卡片网格 */
+/* 类型选择卡片网格：2×2 横向卡片，避免四列挤窄 */
 .ds-type-pick-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
 }
 .ds-type-pick-card {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 20px 14px;
-  background: var(--el-bg-color, var(--panel));;
-  border: 1px solid var(--el-border-color, var(--line));;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 16px;
+  min-height: 112px;
+  background: var(--el-bg-color, var(--panel));
+  border: 1px solid var(--el-border-color, var(--line));
   border-radius: 12px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s, transform 0.15s, box-shadow 0.15s;
-  text-align: center;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
 }
 .ds-type-pick-card:hover {
-  border-color: var(--el-color-primary, var(--primary));;
+  border-color: var(--el-color-primary, var(--primary));
   background: color-mix(in srgb, var(--el-color-primary, var(--primary)) 4%, var(--el-bg-color, #fff));
   transform: translateY(-1px);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
@@ -2109,15 +2185,72 @@ function fmtKafkaMsgTimestamp(m: KafkaMsg): string {
   letter-spacing: 0.02em;
   flex-shrink: 0;
 }
+.ds-type-pick-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
 .ds-type-pick-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 650;
-  color: var(--el-text-color-primary, var(--heading));;
+  color: var(--el-text-color-primary, var(--heading));
+  line-height: 1.3;
 }
 .ds-type-pick-desc {
-  font-size: 12px;
-  color: var(--el-text-color-secondary, var(--muted));;
-  line-height: 1.45;
+  font-size: 13px;
+  color: var(--el-text-color-secondary, var(--muted));
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+}
+.ds-type-pick-endpoint {
+  display: inline-flex;
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--el-color-primary, var(--primary));
+  background: color-mix(in srgb, var(--el-color-primary, var(--primary)) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--el-color-primary, var(--primary)) 22%, transparent);
+}
+
+/* 类型选择弹窗：加宽、去掉双重 padding 挤压 */
+.ingress-type-picker-dialog.el-dialog,
+.el-dialog.ingress-type-picker-dialog {
+  width: min(920px, 94vw) !important;
+  max-width: 94vw;
+}
+.ingress-type-picker-dialog .el-dialog__header {
+  padding: 18px 24px 12px;
+}
+.ingress-type-picker-dialog .el-dialog__body {
+  padding: 8px 24px 16px;
+  overflow: visible;
+}
+.ingress-type-picker-dialog .el-dialog__footer {
+  padding: 12px 24px 18px;
+}
+.type-picker-head h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--el-text-color-primary, var(--heading));
+}
+.type-picker-head p {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary, var(--muted));
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 52em;
+}
+@media (max-width: 720px) {
+  .ds-type-pick-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Tone 渐变 */

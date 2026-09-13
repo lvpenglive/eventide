@@ -130,21 +130,21 @@ function _unimpl(name: string): never {
   throw new Error(`[API shim] 模块未实现：${name}，请等待并行任务创建对应 api/*.ts`)
 }
 const _shimIam: IamApiShim = {
-  listDepartments: () => Promise.resolve([]),
+  listDepartments: () => Promise.reject(_unimpl('listDepartments')),
   createDepartment: () => Promise.reject(_unimpl('createDepartment')),
   updateDepartment: () => Promise.reject(_unimpl('updateDepartment')),
   deleteDepartment: () => Promise.reject(_unimpl('deleteDepartment')),
-  listRoles: () => Promise.resolve([]),
+  listRoles: () => Promise.reject(_unimpl('listRoles')),
   createRole: () => Promise.reject(_unimpl('createRole')),
   updateRole: () => Promise.reject(_unimpl('updateRole')),
   deleteRole: () => Promise.reject(_unimpl('deleteRole')),
-  listPermissions: () => Promise.resolve([]),
-  listUsers: () => Promise.resolve([]),
+  listPermissions: () => Promise.reject(_unimpl('listPermissions')),
+  listUsers: () => Promise.reject(_unimpl('listUsers')),
   createUser: () => Promise.reject(_unimpl('createUser')),
   updateUser: () => Promise.reject(_unimpl('updateUser')),
   deleteUser: () => Promise.reject(_unimpl('deleteUser')),
   resetUserPassword: () => Promise.reject(_unimpl('resetUserPassword')),
-  listAuditLogs: () => Promise.resolve([]),
+  listAuditLogs: () => Promise.reject(_unimpl('listAuditLogs')),
 }
 // @ts-ignore 若 @/api/iam 模块尚未创建则忽略解析错误
 import * as _rawIam from '@/api/iam'
@@ -1335,14 +1335,14 @@ onMounted(async () => {
         <ElTableColumn label="方法 + 路径" min-width="220">
           <template #default="{ row: raw }">
             <span>
-              <ElTag size="small" type="info">{{ (raw as AuditLog).method || '-' }}</ElTag>
+              <ElTag size="small" type="info" effect="dark">{{ (raw as AuditLog).method || '-' }}</ElTag>
               <span style="margin-left: 6px; word-break: break-all">{{ (raw as AuditLog).path || '' }}</span>
             </span>
           </template>
         </ElTableColumn>
         <ElTableColumn label="状态码" width="110" align="center">
           <template #default="{ row: raw }">
-            <ElTag v-if="(raw as AuditLog).status_code != null" :type="statusTagType((raw as AuditLog).status_code)">
+            <ElTag v-if="(raw as AuditLog).status_code != null" effect="dark" :type="statusTagType((raw as AuditLog).status_code)">
               {{ (raw as AuditLog).status_code }}
             </ElTag>
             <span v-else>-</span>
@@ -1397,11 +1397,11 @@ onMounted(async () => {
           {{ auditDetailRow.client_ip || '-' }}
         </ElDescriptionsItem>
         <ElDescriptionsItem label="方法 / 路径">
-          <ElTag size="small" type="info">{{ auditDetailRow.method || '-' }}</ElTag>
+          <ElTag size="small" type="info" effect="dark">{{ auditDetailRow.method || '-' }}</ElTag>
           <span style="margin-left: 6px">{{ auditDetailRow.path || '' }}</span>
         </ElDescriptionsItem>
         <ElDescriptionsItem label="状态码">
-          <ElTag v-if="auditDetailRow.status_code != null" :type="statusTagType(auditDetailRow.status_code)">
+          <ElTag v-if="auditDetailRow.status_code != null" effect="dark" :type="statusTagType(auditDetailRow.status_code)">
             {{ auditDetailRow.status_code }}
           </ElTag>
           <span v-else>-</span>

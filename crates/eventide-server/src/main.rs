@@ -118,12 +118,6 @@ fn read_cgroup_cpu_quota() -> Option<usize> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "eventide.toml".to_string());

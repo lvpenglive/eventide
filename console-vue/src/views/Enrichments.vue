@@ -72,8 +72,8 @@ const _shimEnrich: EnrichmentsApiShim = {
   updateEnrich: () => Promise.reject(_unimpl('updateEnrich')),
   deleteEnrich: () => Promise.reject(_unimpl('deleteEnrich')),
   previewEnrich: () => Promise.reject(_unimpl('previewEnrich')),
-  listLookups: () => Promise.resolve([]),
-  listIngresses: () => Promise.resolve([]),
+  listLookups: () => Promise.reject(_unimpl('listLookups')),
+  listIngresses: () => Promise.reject(_unimpl('listIngresses')),
 }
 // @ts-ignore
 import * as _rawEnrich from '@/api/enrichments'

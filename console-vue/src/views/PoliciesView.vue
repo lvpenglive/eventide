@@ -871,10 +871,10 @@ onMounted(() => { void loadAll() })
     </el-dialog>
 
     <!-- 导入 Dialog -->
-    <el-dialog v-model="importDlgVisible" title="导入策略 Excel" width="560px">
-      <el-form label-width="120px">
+    <el-dialog v-model="importDlgVisible" title="导入策略 Excel" width="680px" class="pol-import-dialog">
+      <el-form label-width="100px">
         <el-form-item label="导入模式">
-          <el-radio-group v-model="importMode">
+          <el-radio-group v-model="importMode" class="dlg-radio-stack">
             <el-radio label="merge">合并（插入/更新同名策略）</el-radio>
             <el-radio label="replace">替换（删除未在 Excel 中的策略）</el-radio>
             <el-radio label="keep">保留（仅插入不存在的）</el-radio>
@@ -933,6 +933,20 @@ onMounted(() => { void loadAll() })
 </template>
 
 <style scoped>
+.dlg-radio-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.dlg-radio-stack :deep(.el-radio) {
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  align-items: flex-start;
+  line-height: 1.45;
+}
+
 /* === 分页条 === */
 .pol-pager {
   display: flex;

@@ -3,7 +3,7 @@ import { request } from './request'
 import type {
   Department, DepartmentInput,
   Role, RoleInput,
-  UserAccount, UserInput, UserUpdateInput, ResetPasswordResp, AuditLog,
+  UserAccount, UserInput, UserUpdateInput, ResetPasswordResp, AuditLog, AuditQuery,
 } from './types'
 
 // ============== Departments ==============
@@ -100,8 +100,14 @@ export function resetUserPassword(id: string): Promise<ResetPasswordResp> {
   })
 }
 
-// ============== Audit Logs (backend /api/audit-logs not yet wired; safe stub) ==============
+// ============== Audit Logs ==============
 
-export function listAuditLogs(_query?: Record<string, unknown>): Promise<AuditLog[]> {
-  return Promise.resolve([])
+export function listAuditLogs(query?: AuditQuery): Promise<AuditLog[]> {
+  const q: Record<string, string | number | boolean | undefined | null> = {}
+  if (query?.actor) q.actor = query.actor
+  if (query?.action) q.action = query.action
+  if (query?.resource_type) q.resource_type = query.resource_type
+  if (query?.q) q.q = query.q
+  if (query?.limit != null) q.limit = query.limit
+  return request<AuditLog[]>('/api/audit-logs', { method: 'GET', query: q })
 }
