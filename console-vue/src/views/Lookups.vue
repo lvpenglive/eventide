@@ -6,7 +6,7 @@ import {
   ElAlert, ElTag, ElRadio, ElRadioGroup, ElTabs, ElTabPane, ElDrawer, ElPagination,
 } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { Delete, Edit, Plus, Refresh, UploadFilled, Document, Picture, Search } from '@element-plus/icons-vue'
+import { Delete, Edit, Plus, Refresh, UploadFilled, Document, Picture, Search, CopyDocument } from '@element-plus/icons-vue'
 import type { LookupTable, LookupInput } from '@/api/types'
 import {
   listLookups, getLookup, createLookup, updateLookup, deleteLookup,
@@ -43,6 +43,31 @@ function asLookup(r: unknown): LookupTable { return r as LookupTable }
 function formatTime(s: string | null | undefined): string {
   if (!s) return '—'
   return s.replace('T', ' ').slice(0, 19)
+}
+function shortId(id: string | undefined): string {
+  if (!id) return '—'
+  if (id.length <= 12) return id
+  return `${id.slice(0, 8)}…${id.slice(-4)}`
+}
+async function copyLookupId(id: string) {
+  if (!id) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(id)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = id
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success('lookup_id 已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动选中')
+  }
 }
 function rowsCount(r: Record<string, Record<string, string>> | undefined): number {
   if (!r) return 0
@@ -323,6 +348,16 @@ async function onDelete(row: LookupTable) {
           </ElTooltip>
         </template>
       </ElTableColumn>
+      <ElTableColumn label="lookup_id" min-width="200">
+        <template #default="{ row }">
+          <ElTooltip :content="asLookup(row).id + '（点击复制）'" placement="top">
+            <button type="button" class="id-copy" @click="copyLookupId(asLookup(row).id)">
+              <code class="mono">{{ shortId(asLookup(row).id) }}</code>
+              <el-icon :size="14"><CopyDocument /></el-icon>
+            </button>
+          </ElTooltip>
+        </template>
+      </ElTableColumn>
       <ElTableColumn label="描述" min-width="240" show-overflow-tooltip>
         <template #default="{ row }">
           <span v-if="asLookup(row).description">{{ asLookup(row).description }}</span>
@@ -423,6 +458,13 @@ async function onDelete(row: LookupTable) {
             <input ref="hiddenInputRef" type="file" accept=".lookup,.txt,.tsv,.csv" style="display:none" @change="onFileSelected" />
           </ElCol>
         </ElRow>
+        <ElAlert v-if="dlg.mode === 'edit' && dlg.id" type="info" :closable="false" show-icon style="margin-bottom:12px">
+          <template #title>
+            <span>lookup_id：</span>
+            <code class="mono">{{ dlg.id }}</code>
+            <ElButton size="small" link type="primary" style="margin-left:8px" @click="copyLookupId(dlg.id)">复制</ElButton>
+          </template>
+        </ElAlert>
         <ElAlert v-if="dlg.external_sync" type="info" :closable="false" show-icon style="margin-bottom:12px"
           title="已开启外部同步：MeridianOps 可用 sync token 调用 PUT /api/lookups/{id}/rows 覆盖本表 rows（建议勿手工改行数据）。" />
         <ElFormItem label="描述">
@@ -477,6 +519,17 @@ async function onDelete(row: LookupTable) {
 .name-link {
   color: var(--el-color-primary, #409eff); cursor: pointer; font-weight: 600;
 }
+.id-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  color: var(--el-text-color-regular, #606266);
+}
+.id-copy:hover { color: var(--el-color-primary, #409eff); }
 .empty-tip { color: var(--el-text-color-secondary, #c0c4cc); }
 .mono {
   font-family: 'SFMono-Regular', Consolas, Menlo, monospace;
