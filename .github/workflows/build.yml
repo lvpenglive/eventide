@@ -162,7 +162,7 @@ jobs:
           $name = 'eventide-windows-x86_64'
           $out = "dist\$name"
           $bin = 'target\release'
-          New-Item -ItemType Directory -Force -Path "$out\static", "$out\console-vue\dist", "$out\keys" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$out\static", "$out\keys" | Out-Null
 
           Copy-Item "$bin\eventide.exe" $out
           Copy-Item "$bin\eventide-trap.exe" $out
@@ -170,6 +170,7 @@ jobs:
           Copy-Item -Recurse static\* "$out\static\"
           # 新版 Vue3 影子前端产物（若存在则一并打包，缺失不影响旧版可用）
           if (Test-Path "console-vue\dist") {
+            New-Item -ItemType Directory -Force -Path "$out\console-vue" | Out-Null
             Copy-Item -Recurse "console-vue\dist" "$out\console-vue\"
           }
           Copy-Item eventide.toml.example $out
@@ -210,13 +211,18 @@ jobs:
 
   release:
     name: GitHub Release
+    # Windows 不阻塞发版：Ubuntu + 麒麟成功即可挂 Release
     needs: [linux-x86_64, kylin-v10-sp3-x86_64, windows-x86_64]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: |
+      always() &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs['linux-x86_64'].result == 'success' &&
+      needs['kylin-v10-sp3-x86_64'].result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all build artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -231,5 +237,6 @@ jobs:
         with:
           files: release-assets/*
           generate_release_notes: true
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

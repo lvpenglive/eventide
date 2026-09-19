@@ -1292,7 +1292,7 @@ GitHub Actions：[`.github/workflows/build.yml`](.github/workflows/build.yml)
 每个包含：`eventide` / `eventide-trap` / `eventide-license`、控制台 `static/`、示例配置 `*.toml.example`。Linux / Windows artifact 同时含 Vue3 影子前端 `console-vue/dist/`（CI 自动 `npm ci && npm run build`）；麒麟容器离线无 Node，仅含 `static/`。
 
 - **push / PR / 手动**：上传 Actions Artifacts（保留 30 天）
-- **打 tag（`v*`）**：汇总进 GitHub Release，例如 `git tag v0.1.0 && git push origin v0.1.0`
+- **打 tag（`v*`）**：Ubuntu + 麒麟成功即汇总进 GitHub Release（Windows 失败不阻塞发版；若 Windows 也成功会一并挂上 zip）
 
 本地也可对照示例配置：
 
