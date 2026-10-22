@@ -11,6 +11,7 @@ mod iam;
 mod ingress_api;
 mod kafka_ingress;
 mod kafka_groups;
+mod instance_registry;
 mod leader;
 mod license;
 mod login_limit;
@@ -326,6 +327,7 @@ async fn async_main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         db,
         config: config.clone(),
+        redis: redis_client.clone(),
         notifier: eventide_notify::Notifier::new(),
         throttle,
         aggregate,
@@ -356,6 +358,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
     crate::storm_sync::spawn_storm_config_pubsub(state.clone());
     crate::notify_pipeline::spawn_notify_workers(state.clone(), notify_rx);
+    crate::instance_registry::spawn_server_heartbeat(state.clone(), redis_client.clone(), 5);
 
     spawn_scheduler(state.clone());
     crate::kafka_ingress::spawn_kafka_ingress(state.clone());

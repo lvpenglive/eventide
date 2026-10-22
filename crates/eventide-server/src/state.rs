@@ -20,6 +20,8 @@ pub const STORM_CONFIG_KEY: &str = "storm_config";
 pub struct AppState {
     pub db: Db,
     pub config: AppConfig,
+    /// Shared Redis client (leader election, server instance registry, …).
+    pub redis: redis::Client,
     pub notifier: Notifier,
     pub throttle: RedisThrottleGate,
     pub aggregate: RedisAggregateBuffer,

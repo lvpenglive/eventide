@@ -74,6 +74,17 @@ fn v(x: impl Into<Value>) -> Value {
     x.into()
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct OverviewMetaCounts {
+    pub rules: usize,
+    pub enabled_rules: usize,
+    pub datasources: usize,
+    pub channels: usize,
+    pub ingress_routes: usize,
+    pub active_silences: usize,
+    pub active_maintenance: usize,
+}
+
 impl Db {
     // ---------- datasources ----------
 
@@ -405,6 +416,40 @@ impl Db {
         Ok(n as usize)
     }
 
+    /// Overview meta counts in one round-trip (avoids N remote MySQL RTTs).
+    pub fn overview_meta_counts(&self, now: DateTime<Utc>) -> Result<OverviewMetaCounts> {
+        let mut conn = self.conn()?;
+        let now_s = fmt_dt(now);
+        let row: Row = conn
+            .exec_first(
+                "SELECT
+                    (SELECT COUNT(*) FROM rules) AS rules,
+                    (SELECT COUNT(*) FROM rules WHERE enabled=1) AS enabled_rules,
+                    (SELECT COUNT(*) FROM datasources) AS datasources,
+                    (SELECT COUNT(*) FROM notify_channels) AS channels,
+                    (SELECT COUNT(*) FROM ingress_routes) AS ingress_routes,
+                    (SELECT COUNT(*) FROM silences WHERE starts_at <= ? AND ends_at > ?) AS active_silences,
+                    (SELECT COUNT(*) FROM maintenance_windows
+                     WHERE enabled=1 AND starts_at <= ? AND ends_at > ?) AS active_maintenance",
+                positional(vec![
+                    v(now_s.clone()),
+                    v(now_s.clone()),
+                    v(now_s.clone()),
+                    v(now_s),
+                ]),
+            )?
+            .ok_or_else(|| anyhow!("overview_meta_counts: empty row"))?;
+        Ok(OverviewMetaCounts {
+            rules: col_i64(&row, 0) as usize,
+            enabled_rules: col_i64(&row, 1) as usize,
+            datasources: col_i64(&row, 2) as usize,
+            channels: col_i64(&row, 3) as usize,
+            ingress_routes: col_i64(&row, 4) as usize,
+            active_silences: col_i64(&row, 5) as usize,
+            active_maintenance: col_i64(&row, 6) as usize,
+        })
+    }
+
     pub fn list_recent_notify_skips(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
         let mut conn = self.conn()?;
         let lim = limit.max(1) as i64;
@@ -637,6 +682,18 @@ impl Db {
             .collect())
     }
 
+    /// Lightweight count for overview (avoids loading full silence rows).
+    pub fn count_active_silences(&self, now: DateTime<Utc>) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let n: i64 = conn
+            .exec_first(
+                "SELECT COUNT(*) FROM silences WHERE starts_at <= ? AND ends_at > ?",
+                positional(vec![v(fmt_dt(now)), v(fmt_dt(now))]),
+            )?
+            .unwrap_or(0);
+        Ok(n as usize)
+    }
+
     pub fn upsert_silence(&self, s: &Silence) -> Result<()> {
         let mut conn = self.conn()?;
         conn.exec_drop(
@@ -698,6 +755,19 @@ impl Db {
             .into_iter()
             .filter(|w| w.enabled && now >= w.starts_at && now < w.ends_at)
             .collect())
+    }
+
+    /// Lightweight count for overview (avoids loading full maintenance rows).
+    pub fn count_active_maintenance_windows(&self, now: DateTime<Utc>) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let n: i64 = conn
+            .exec_first(
+                "SELECT COUNT(*) FROM maintenance_windows
+                 WHERE enabled=1 AND starts_at <= ? AND ends_at > ?",
+                positional(vec![v(fmt_dt(now)), v(fmt_dt(now))]),
+            )?
+            .unwrap_or(0);
+        Ok(n as usize)
     }
 
     pub fn upsert_maintenance_window(&self, w: &MaintenanceWindow) -> Result<()> {

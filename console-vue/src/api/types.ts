@@ -67,12 +67,6 @@ export interface IngressBrief {
   enabled: boolean
 }
 
-export interface NotifySkipItem {
-  error: string
-  transition: string
-  created_at: string | null
-}
-
 export interface RuntimeMetrics {
   notify_success: number
   notify_failure: number
@@ -101,15 +95,47 @@ export interface OverviewResp {
   active_silences: number
   active_maintenance_windows: number
   recent_alerts: AlertRecentItem[]
-  ingress: IngressBrief[]
-  notify_skips: NotifySkipItem[]
-  pressure_inflight: number
-  ingress_max_inflight: number
+  ingress?: IngressBrief[]
+  pressure_inflight?: number
+  ingress_max_inflight?: number
   is_leader: boolean
   leader_holder_id: string
   cluster_enabled: boolean
+  cluster?: ClusterInstancesResp
   metrics?: RuntimeMetrics
   metrics_endpoint?: string
+}
+
+/** Redis 心跳登记的 Server / Trap 实例 */
+export interface ServerInstanceInfo {
+  instance_id: string
+  listen: string
+  hostname?: string
+  is_leader: boolean
+  cluster_enabled?: boolean
+  version?: string
+  started_at?: string
+  updated_at: string
+}
+
+export interface TrapInstanceInfo {
+  instance_id: string
+  listen_udp: string
+  listen_http: string
+  ha_vip?: string
+  kafka_topic?: string
+  received?: number
+  parsed_ok?: number
+  updated_at: string
+}
+
+export interface ClusterInstancesResp {
+  redis: boolean
+  trap_redis?: boolean
+  servers: ServerInstanceInfo[]
+  traps: TrapInstanceInfo[]
+  server_count: number
+  trap_count: number
 }
 
 export interface UiBetaToggleResp {

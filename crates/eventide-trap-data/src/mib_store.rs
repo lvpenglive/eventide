@@ -288,9 +288,19 @@ impl MibStore {
                 Err(_) => true,
             };
             if need {
-                let bytes = self.s3.get_object(&r.object_key).await?;
-                std::fs::write(&path, &bytes)
-                    .with_context(|| format!("write cache {}", path.display()))?;
+                match self.s3.get_object(&r.object_key).await {
+                    Ok(bytes) => {
+                        std::fs::write(&path, &bytes)
+                            .with_context(|| format!("write cache {}", path.display()))?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            object_key = %r.object_key,
+                            error = %e,
+                            "MIB S3 fetch failed; skipping cache fill (Trap can still receive)"
+                        );
+                    }
+                }
             }
         }
         // Remove cache files not in DB

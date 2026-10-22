@@ -182,6 +182,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(license_api::get_license_request),
         )
         .route("/api/trap/instances", get(list_trap_instances))
+        .route("/api/cluster/instances", get(list_cluster_instances))
         .merge(mib_admin::routes())
         .merge(policy_admin::routes())
         .merge(snmp_get::routes())
@@ -270,6 +271,13 @@ async fn list_trap_instances(
         "redis": true,
         "count": items.len(),
     })))
+}
+
+/// Combined Server + Trap live instances (Redis heartbeats).
+async fn list_cluster_instances(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(crate::instance_registry::cluster_snapshot(&state)))
 }
 
 // ---- datasources ----

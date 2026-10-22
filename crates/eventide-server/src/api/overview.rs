@@ -3,34 +3,107 @@
 use crate::state::AppState;
 use axum::extract::State;
 use axum::Json;
+use chrono::Utc;
 use std::sync::Arc;
 
 pub async fn overview(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    let (firing, pending, resolved, total) =
-        state.db.alert_status_counts().map_err(internal)?;
-    let enabled_rules = state.db.count_enabled_rules().map_err(internal)?;
-    let rules = state.db.count_table("rules").map_err(internal)?;
-    let datasources = state.db.count_table("datasources").map_err(internal)?;
-    let channels = state.db.count_table("notify_channels").map_err(internal)?;
-    let ingress_routes = state.db.count_table("ingress_routes").map_err(internal)?;
-    let active_silences = state
-        .db
-        .active_silences(chrono::Utc::now())
-        .map_err(internal)?
-        .len();
-    let active_maintenance = state
-        .db
-        .active_maintenance_windows(chrono::Utc::now())
-        .map_err(internal)?
-        .len();
-    let recent_alerts = state
-        .db
-        .list_recent_alerts_overview(10)
-        .map_err(internal)?;
-    let ingress = state.db.list_ingress_routes().map_err(internal)?;
-    let ingress_brief: Vec<serde_json::Value> = ingress
+    let s_alerts = state.clone();
+    let s_meta = state.clone();
+    let s_cluster = state.clone();
+
+    // 远端 MySQL / Redis RTT 并行，避免串行叠加。
+    let (alerts_res, meta_res, cluster_res) = tokio::join!(
+        tokio::task::spawn_blocking(move || collect_alert_slice(&s_alerts)),
+        tokio::task::spawn_blocking(move || collect_meta_slice(&s_meta)),
+        tokio::task::spawn_blocking(move || crate::instance_registry::cluster_snapshot(&s_cluster)),
+    );
+
+    let alerts = alerts_res.map_err(|e| internal(e))?.map_err(internal)?;
+    let meta = meta_res.map_err(|e| internal(e))?.map_err(internal)?;
+    let cluster = cluster_res.map_err(|e| internal(e))?;
+
+    let mut health = if alerts.firing > 0 {
+        format!("{} 条正在告警", alerts.firing)
+    } else if alerts.pending > 0 {
+        format!("无 firing · {} 条等待中", alerts.pending)
+    } else {
+        "当前无正在告警".into()
+    };
+    if meta.active_silences > 0 {
+        health = format!("{health} · {} 条静默生效", meta.active_silences);
+    }
+    if meta.active_maintenance > 0 {
+        health = format!("{health} · {} 个维护窗生效", meta.active_maintenance);
+    }
+
+    Ok(Json(serde_json::json!({
+        "health": health,
+        "datasources": meta.datasources,
+        "rules": meta.rules,
+        "enabled_rules": meta.enabled_rules,
+        "channels": meta.channels,
+        "ingress_routes": meta.ingress_routes,
+        "alerts_total": alerts.total,
+        "alerts_firing": alerts.firing,
+        "alerts_pending": alerts.pending,
+        "alerts_resolved": alerts.resolved,
+        "active_silences": meta.active_silences,
+        "active_maintenance_windows": meta.active_maintenance,
+        "recent_alerts": alerts.recent_alerts,
+        "ingress": meta.ingress_brief,
+        "pressure_inflight": state.pressure.inflight(),
+        "ingress_max_inflight": state
+            .storm
+            .read()
+            .map(|s| s.ingress_max_inflight)
+            .unwrap_or(state.config.storm.ingress_max_inflight),
+        "is_leader": state.leader.is_leader(),
+        "leader_holder_id": state.leader.holder_id(),
+        "cluster_enabled": state.config.cluster.enabled,
+        "cluster": cluster,
+        "metrics": state.metrics.snapshot_json(&state),
+        "metrics_endpoint": "/metrics",
+    })))
+}
+
+struct AlertSlice {
+    firing: usize,
+    pending: usize,
+    resolved: usize,
+    total: usize,
+    recent_alerts: Vec<eventide_core::AlertEvent>,
+}
+
+struct MetaSlice {
+    enabled_rules: usize,
+    rules: usize,
+    datasources: usize,
+    channels: usize,
+    ingress_routes: usize,
+    active_silences: usize,
+    active_maintenance: usize,
+    ingress_brief: Vec<serde_json::Value>,
+}
+
+fn collect_alert_slice(state: &AppState) -> anyhow::Result<AlertSlice> {
+    let (firing, pending, resolved, total) = state.db.alert_status_counts()?;
+    let recent_alerts = state.db.list_recent_alerts_overview(10)?;
+    Ok(AlertSlice {
+        firing,
+        pending,
+        resolved,
+        total,
+        recent_alerts,
+    })
+}
+
+fn collect_meta_slice(state: &AppState) -> anyhow::Result<MetaSlice> {
+    let now = Utc::now();
+    let counts = state.db.overview_meta_counts(now)?;
+    let ingress = state.db.list_ingress_routes()?;
+    let ingress_brief = ingress
         .iter()
         .map(|r| {
             serde_json::json!({
@@ -41,67 +114,16 @@ pub async fn overview(
             })
         })
         .collect();
-    let notify_skips = state
-        .db
-        .list_recent_notify_skips(6)
-        .map_err(internal)?;
-    let notify_skips: Vec<serde_json::Value> = notify_skips
-        .into_iter()
-        .map(|(error, transition, created_at)| {
-            serde_json::json!({
-                "error": error,
-                "transition": transition,
-                "created_at": created_at,
-            })
-        })
-        .collect();
-
-    let health = if firing > 0 {
-        format!("{firing} 条正在告警")
-    } else if pending > 0 {
-        format!("无 firing · {pending} 条等待中")
-    } else {
-        "当前无正在告警".into()
-    };
-    let health = if active_silences > 0 {
-        format!("{health} · {active_silences} 条静默生效")
-    } else {
-        health
-    };
-    let health = if active_maintenance > 0 {
-        format!("{health} · {active_maintenance} 个维护窗生效")
-    } else {
-        health
-    };
-
-    Ok(Json(serde_json::json!({
-        "health": health,
-        "datasources": datasources,
-        "rules": rules,
-        "enabled_rules": enabled_rules,
-        "channels": channels,
-        "ingress_routes": ingress_routes,
-        "alerts_total": total,
-        "alerts_firing": firing,
-        "alerts_pending": pending,
-        "alerts_resolved": resolved,
-        "active_silences": active_silences,
-        "active_maintenance_windows": active_maintenance,
-        "recent_alerts": recent_alerts,
-        "ingress": ingress_brief,
-        "notify_skips": notify_skips,
-        "pressure_inflight": state.pressure.inflight(),
-        "ingress_max_inflight": state
-            .storm
-            .read()
-            .map(|s| s.ingress_max_inflight)
-            .unwrap_or(state.config.storm.ingress_max_inflight),
-        "is_leader": state.leader.is_leader(),
-        "leader_holder_id": state.leader.holder_id(),
-        "cluster_enabled": state.config.cluster.enabled,
-        "metrics": state.metrics.snapshot_json(&state),
-        "metrics_endpoint": "/metrics",
-    })))
+    Ok(MetaSlice {
+        enabled_rules: counts.enabled_rules,
+        rules: counts.rules,
+        datasources: counts.datasources,
+        channels: counts.channels,
+        ingress_routes: counts.ingress_routes,
+        active_silences: counts.active_silences,
+        active_maintenance: counts.active_maintenance,
+        ingress_brief,
+    })
 }
 
 fn internal(e: impl std::fmt::Display) -> (axum::http::StatusCode, Json<serde_json::Value>) {

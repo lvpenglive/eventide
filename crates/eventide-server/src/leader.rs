@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -66,19 +66,22 @@ pub struct LeaderElection {
     key: String,
     holder_id: String,
     lease_seconds: u64,
-    conn: Mutex<redis::Connection>,
+    client: redis::Client,
     is_leader: AtomicBool,
 }
 
 impl LeaderElection {
     pub fn new(client: &redis::Client, cfg: &ClusterConfig) -> redis::RedisResult<Self> {
         let holder_id = Uuid::new_v4().to_string();
+        // Validate connectivity once at boot.
+        let mut conn = client.get_connection()?;
+        let _: String = redis::cmd("PING").query(&mut conn)?;
         Ok(Self {
             enabled: cfg.enabled,
             key: cfg.leader_key.clone(),
             holder_id,
             lease_seconds: cfg.lease_seconds.max(3),
-            conn: Mutex::new(client.get_connection()?),
+            client: client.clone(),
             is_leader: AtomicBool::new(!cfg.enabled),
         })
     }
@@ -94,43 +97,72 @@ impl LeaderElection {
         self.is_leader.load(Ordering::Acquire)
     }
 
+    fn with_conn<T>(&self, f: impl FnOnce(&mut redis::Connection) -> redis::RedisResult<T>) -> redis::RedisResult<T> {
+        let mut conn = self.client.get_connection()?;
+        f(&mut conn)
+    }
+
     /// Try to become leader or renew the lease if we already hold it.
     pub fn tick(&self) -> bool {
         if !self.enabled {
             self.is_leader.store(true, Ordering::Release);
             return true;
         }
-        let mut conn = match self.conn.lock() {
-            Ok(c) => c,
-            Err(_) => return self.is_leader(),
+
+        let was = self.is_leader.load(Ordering::Acquire);
+        let became = match self.contend(was) {
+            Ok(v) => v,
+            Err(e) => {
+                // Transient Redis errors must not demote a healthy leader, and must not
+                // leave a follower stuck while our own lease key is still alive.
+                tracing::warn!(error = %e, holder = %self.holder_id, key = %self.key, "leader election tick failed");
+                return was;
+            }
         };
 
-        let became = if self.is_leader.load(Ordering::Acquire) {
-            let ok: i32 = redis::Script::new(RENEW_LUA)
-                .key(&self.key)
-                .arg(&self.holder_id)
-                .arg(self.lease_seconds)
-                .invoke(&mut *conn)
-                .unwrap_or(0);
-            ok == 1
-        } else {
-            let r: Result<Option<String>, _> = redis::cmd("SET")
+        let prev = self.is_leader.swap(became, Ordering::AcqRel);
+        if became && !prev {
+            tracing::info!(holder = %self.holder_id, key = %self.key, "became cluster leader");
+        } else if !became && prev {
+            tracing::warn!(holder = %self.holder_id, key = %self.key, "lost cluster leadership");
+        }
+        became
+    }
+
+    fn contend(&self, currently_leader: bool) -> redis::RedisResult<bool> {
+        self.with_conn(|conn| {
+            if currently_leader {
+                let ok: i32 = redis::Script::new(RENEW_LUA)
+                    .key(&self.key)
+                    .arg(&self.holder_id)
+                    .arg(self.lease_seconds.to_string())
+                    .invoke(conn)?;
+                return Ok(ok == 1);
+            }
+
+            // Acquire, or reclaim if we still own the key (e.g. after a failed renew demotion).
+            let acquired: Option<String> = redis::cmd("SET")
                 .arg(&self.key)
                 .arg(&self.holder_id)
                 .arg("NX")
                 .arg("EX")
                 .arg(self.lease_seconds)
-                .query(&mut *conn);
-            matches!(r, Ok(Some(_)))
-        };
+                .query(conn)?;
+            if acquired.is_some() {
+                return Ok(true);
+            }
 
-        let was = self.is_leader.swap(became, Ordering::AcqRel);
-        if became && !was {
-            tracing::info!(holder = %self.holder_id, key = %self.key, "became cluster leader");
-        } else if !became && was {
-            tracing::warn!(holder = %self.holder_id, key = %self.key, "lost cluster leadership");
-        }
-        became
+            let cur: Option<String> = redis::cmd("GET").arg(&self.key).query(conn)?;
+            if cur.as_deref() == Some(self.holder_id.as_str()) {
+                let ok: i32 = redis::Script::new(RENEW_LUA)
+                    .key(&self.key)
+                    .arg(&self.holder_id)
+                    .arg(self.lease_seconds.to_string())
+                    .invoke(conn)?;
+                return Ok(ok == 1);
+            }
+            Ok(false)
+        })
     }
 
     pub fn renew_interval(&self) -> Duration {
@@ -142,9 +174,15 @@ impl LeaderElection {
 /// Background loop: renew / contend for leadership.
 pub fn spawn_leader_loop(leader: Arc<LeaderElection>) {
     tokio::spawn(async move {
-        leader.tick();
+        let _ = tokio::task::spawn_blocking({
+            let leader = leader.clone();
+            move || leader.tick()
+        })
+        .await;
         let mut interval = tokio::time::interval(leader.renew_interval());
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Consume the immediate first tick so we don't renew in the same instant as acquire.
+        interval.tick().await;
         loop {
             interval.tick().await;
             let leader = leader.clone();

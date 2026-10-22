@@ -231,23 +231,27 @@ impl PolicyRedis {
 
     pub fn list_instances(&self) -> Result<Vec<TrapInstanceHeartbeat>> {
         let pattern = format!("{TRAP_INSTANCE_KEY_PREFIX}*");
-        let keys: Vec<String> = self.with_conn(|conn| {
-            conn.keys(&pattern).context("redis KEYS trap instances")
-        })?;
-        let mut out = Vec::with_capacity(keys.len());
-        for key in keys {
-            let raw: Option<String> = self.with_conn(|conn| {
-                conn.get(&key).context("redis GET trap instance")
-            })?;
-            let Some(raw) = raw.filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            match serde_json::from_str::<TrapInstanceHeartbeat>(&raw) {
-                Ok(hb) => out.push(hb),
-                Err(e) => tracing::warn!(%key, error = %e, "skip bad trap instance heartbeat"),
+        self.with_conn(|conn| {
+            let keys: Vec<String> = conn.keys(&pattern).context("redis KEYS trap instances")?;
+            if keys.is_empty() {
+                return Ok(Vec::new());
             }
-        }
-        out.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
-        Ok(out)
+            let values: Vec<Option<String>> = redis::cmd("MGET")
+                .arg(&keys)
+                .query(conn)
+                .context("redis MGET trap instances")?;
+            let mut out = Vec::with_capacity(values.len());
+            for (key, raw) in keys.into_iter().zip(values) {
+                let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                match serde_json::from_str::<TrapInstanceHeartbeat>(&raw) {
+                    Ok(hb) => out.push(hb),
+                    Err(e) => tracing::warn!(%key, error = %e, "skip bad trap instance heartbeat"),
+                }
+            }
+            out.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+            Ok(out)
+        })
     }
 }

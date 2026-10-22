@@ -267,6 +267,9 @@ pub fn route_permission(method: &str, path: &str) -> Option<&'static str> {
     {
         return Some(if write { "trap:write" } else { "trap:read" });
     }
+    if path.starts_with("/api/cluster") {
+        return Some("overview:read");
+    }
     // Unknown protected route: require login only
     None
 }

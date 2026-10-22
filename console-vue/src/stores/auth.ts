@@ -1,7 +1,30 @@
 import { defineStore } from 'pinia'
 import { login as apiLogin, me as apiMe, changePassword as apiChangePassword } from '@/api/overviewAuthLoginAndMore'
-import type { PasswordStatus } from '@/api/types'
+import type { MeResp, PasswordStatus } from '@/api/types'
 import { can as rawCan } from '@/perms'
+
+/** 从 mysql://… 解析展示用信息（不展示密码） */
+function parseDatabaseFromMe(
+  mysqlUrl?: string,
+  redisUrl?: string,
+): AuthState['database'] | undefined {
+  if (!mysqlUrl && !redisUrl) return undefined
+  const out: NonNullable<AuthState['database']> = {
+    redis_url: redisUrl || undefined,
+  }
+  if (mysqlUrl) {
+    out.db_type = 'mysql'
+    try {
+      const u = new URL(mysqlUrl.replace(/^mysql:\/\//i, 'http://'))
+      out.host = u.hostname || undefined
+      out.port = u.port ? Number(u.port) : 3306
+      out.name = u.pathname.replace(/^\//, '') || undefined
+    } catch {
+      out.host = '(mysql)'
+    }
+  }
+  return out
+}
 
 export interface AuthUser {
   id?: string
@@ -87,9 +110,13 @@ export const useAuthStore = defineStore('auth', {
     async me(): Promise<void> {
       if (!this.token) return
       try {
-        const resp = await apiMe()
+        const resp = await apiMe() as MeResp & {
+          mysql_url?: string
+          redis_url?: string
+          uid?: string
+        }
         const user: AuthUser = {
-          id: resp.id,
+          id: resp.id || resp.uid,
           username: resp.username,
           display_name: resp.display_name || resp.username,
           permissions: resp.permissions || [],
@@ -97,7 +124,8 @@ export const useAuthStore = defineStore('auth', {
           token_ttl_hours: resp.token_ttl_hours,
         }
         this.user = user
-        this.database = resp.database
+        // 后端 /api/auth/me 返回扁平 mysql_url/redis_url；兼容可选 database 对象
+        this.database = resp.database || parseDatabaseFromMe(resp.mysql_url, resp.redis_url)
         this.meLoaded = true
         localStorage.setItem(USER_KEY, JSON.stringify(user))
       } catch (e) {

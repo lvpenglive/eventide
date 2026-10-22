@@ -51,7 +51,15 @@ impl S3Store {
             http,
             bucket_name,
         });
-        store.ensure_bucket().await?;
+        // MIB CRUD needs S3, but Trap receive/Kafka/heartbeat should still boot if S3 is down.
+        if let Err(e) = store.ensure_bucket().await {
+            tracing::warn!(
+                error = %e,
+                endpoint,
+                bucket,
+                "S3 ensure_bucket failed; continuing (MIB upload may fail until S3 is reachable)"
+            );
+        }
         Ok(store)
     }
 

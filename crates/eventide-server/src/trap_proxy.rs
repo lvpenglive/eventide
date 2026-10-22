@@ -64,7 +64,22 @@ async fn forward_inner(state: Arc<AppState>, path: String, req: Request) -> Resp
         }
     };
 
-    let client = reqwest::Client::new();
+    // Trap is an internal/local service; never send via HTTP(S)_PROXY (common on
+    // developer machines and would make 127.0.0.1:8081 look "unreachable").
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": format!("http client: {e}") })),
+            )
+                .into_response();
+        }
+    };
     let mut builder = client.request(method, &url);
     for (k, v) in headers.iter() {
         let name = k.as_str();
