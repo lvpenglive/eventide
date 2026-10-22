@@ -449,7 +449,7 @@ async function loadUiBeta(force = false): Promise<void> {
     const resp = await getUiBetaToggle()
     Object.assign(uiBeta, resp)
   } catch (e) {
-    ElMessage.error(errMsgOf(e, '加载 UI Beta 开关失败'))
+    ElMessage.error(errMsgOf(e, '加载控制台版本设置失败'))
   } finally {
     uiBetaLoading.value = false
   }
@@ -460,10 +460,10 @@ async function saveUiBeta(): Promise<boolean> {
   try {
     const resp = await putUiBetaToggle({ enabled: !!uiBeta.enabled })
     Object.assign(uiBeta, resp)
-    ElMessage.success('UI Beta 开关已保存')
+    ElMessage.success('控制台版本已保存')
     return true
   } catch (e) {
-    ElMessage.error(errMsgOf(e, '保存 UI Beta 开关失败'))
+    ElMessage.error(errMsgOf(e, '保存控制台版本失败'))
     return false
   } finally {
     uiBetaSaving.value = false
@@ -644,7 +644,7 @@ onMounted(() => {
 <template>
   <div class="system-settings-page">
     <h2 class="page-title">系统设置</h2>
-    <p class="page-subtitle">历史事件 / Trap Token / 抗告警风暴 / UI Beta / 产品许可</p>
+    <p class="page-subtitle">历史事件 / Trap Token / 抗告警风暴 / 控制台版本 / 产品许可</p>
 
     <ElAffix :offset="0" class="toolbar-affix">
       <div class="toolbar-bar">
@@ -1031,7 +1031,7 @@ onMounted(() => {
       </div>
     </ElCard>
 
-    <!-- d) UI Beta 开关 -->
+    <!-- d) 控制台版本（Vue 默认） -->
     <ElCard shadow="never" class="section-card" v-loading="uiBetaLoading">
       <template #header>
         <div class="card-header" @click="toggleSection('uiBeta')">
@@ -1039,7 +1039,7 @@ onMounted(() => {
             <span class="collapse-icon" :class="{ 'is-collapsed': sectionCollapsed.uiBeta }">
               <el-icon :size="14"><ArrowDown v-if="!sectionCollapsed.uiBeta" /><ArrowRight v-else /></el-icon>
             </span>
-            <span class="card-title">d) UI Beta 开关</span>
+            <span class="card-title">d) 控制台版本</span>
           </div>
           <ElButton type="primary" :icon="UploadFilled" :loading="uiBetaSaving" @click.stop="saveUiBeta">保存</ElButton>
         </div>
@@ -1047,15 +1047,16 @@ onMounted(() => {
 
       <div v-show="!sectionCollapsed.uiBeta">
       <ElDescriptions :column="1" border>
-        <ElDescriptionsItem label="启用 v2 影子前端">
+        <ElDescriptionsItem label="使用 Vue 控制台（默认）">
           <ElSwitch v-model="uiBeta.enabled" />
           <span v-if="uiBeta.v2_available === false" style="margin-left: 12px; color: var(--el-color-warning)">
-            （当前后端未启用 v2 影子前端资源，v2_available=false）
+            （未找到 console-vue/dist，仅能使用旧版）
           </span>
         </ElDescriptionsItem>
         <ElDescriptionsItem label="说明">
           <div class="beta-note">
-            启用后后端会写 Cookie <code class="mono">eventide_use_v2=1</code>，下次访问自动进入 v2 影子前端。
+            Vue 控制台为默认交付壳。关闭后写入 Cookie <code class="mono">eventide_use_v2=0</code>，回退旧版 static 控制台。
+            也可直接打开 <a href="/v2/" target="_blank" rel="noopener">/v2/</a>。
           </div>
         </ElDescriptionsItem>
       </ElDescriptions>

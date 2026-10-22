@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, onMounted, reactive, ref } from 'vue'
+import { computed, markRaw, reactive, ref, watch } from 'vue'
 import {
   ElBadge,
   ElButton,
@@ -118,7 +118,10 @@ interface KafkaProduceResult {
 }
 
 interface KafkaApiShim {
-  probeKafkaCluster(body: { brokers: string; topic?: string }): Promise<KafkaClusterProbe>
+  probeKafkaCluster(
+    body: { brokers: string; topic?: string },
+    opts?: { signal?: AbortSignal },
+  ): Promise<KafkaClusterProbe>
   listKafkaGroups(body: { brokers: string }): Promise<{ groups: KafkaGroupListed[] }>
   describeKafkaGroup(body: { brokers: string; group_id: string; topic?: string }): Promise<KafkaGroupState>
   describeKafkaTopic(body: { brokers: string; topic: string }): Promise<KafkaTopicDescribe>
@@ -137,13 +140,16 @@ interface KafkaApiShim {
     key?: string
     value: string
   }): Promise<KafkaProduceResult>
-  createKafkaTopic(body: {
-    brokers: string
-    topic: string
-    partitions?: number
-    replication_factor?: number
-    configs?: Record<string, string>
-  }): Promise<{ ok: true; topic: string }>
+  createKafkaTopic(
+    body: {
+      brokers: string
+      topic: string
+      partitions?: number
+      replication_factor?: number
+      configs?: Record<string, string>
+    },
+    opts?: { signal?: AbortSignal },
+  ): Promise<{ ok: true; topic: string }>
   deleteKafkaTopic(body: { brokers: string; topic: string }): Promise<{ ok: true }>
 }
 
@@ -231,6 +237,19 @@ const focusTopic = ref(localStorage.getItem(LS_FOCUS) || '')
 
 const connecting = ref(false)
 const probeResult = ref<KafkaClusterProbe | null>(null)
+const CONNECT_TIMEOUT_MS = 10_000
+let connectAbort: AbortController | null = null
+
+watch(brokers, (v) => localStorage.setItem(LS_BROKERS, v.trim()))
+watch(defaultTopic, (v) => {
+  const t = v.trim()
+  if (t) localStorage.setItem(LS_TOPIC, t)
+  else localStorage.removeItem(LS_TOPIC)
+})
+
+function cancelConnect() {
+  connectAbort?.abort()
+}
 
 async function handleConnect() {
   const b = brokers.value.trim()
@@ -240,18 +259,34 @@ async function handleConnect() {
   }
   localStorage.setItem(LS_BROKERS, b)
   if (defaultTopic.value.trim()) localStorage.setItem(LS_TOPIC, defaultTopic.value.trim())
+
+  connectAbort?.abort()
+  const ac = new AbortController()
+  connectAbort = ac
+  const timer = window.setTimeout(() => ac.abort(), CONNECT_TIMEOUT_MS)
   connecting.value = true
   try {
-    probeResult.value = await probeKafkaCluster({ brokers: b, topic: defaultTopic.value.trim() || undefined })
+    probeResult.value = await probeKafkaCluster(
+      { brokers: b, topic: defaultTopic.value.trim() || undefined },
+      { signal: ac.signal },
+    )
     ElMessage.success(`探测成功：${probeResult.value.topic_count} 个 Topic，耗时 ${probeResult.value.latency_ms}ms`)
     if (focusTopic.value && !probeResult.value.topics.some(t => t.name === focusTopic.value)) {
       focusTopic.value = ''
     }
   } catch (e) {
-    ElMessage.error(errMsg(e, '连接 Kafka 失败'))
+    if (ac.signal.aborted) {
+      ElMessage.warning('连接已取消或超时，可修改 Brokers 后重试')
+    } else {
+      ElMessage.error(errMsg(e, '连接 Kafka 失败'))
+    }
     probeResult.value = null
   } finally {
-    connecting.value = false
+    window.clearTimeout(timer)
+    if (connectAbort === ac) {
+      connectAbort = null
+      connecting.value = false
+    }
   }
 }
 
@@ -440,39 +475,60 @@ const createFormRules: FormRules = {
   partitions: [{ required: true, message: '请输入分区数', trigger: 'blur' }],
 }
 function openCreateDlg() {
+  if (!brokers.value.trim()) {
+    ElMessage.warning('请先填写 Brokers，再创建 Topic')
+    return
+  }
   createForm.topic = ''
   createForm.partitions = 3
   createForm.replication_factor = 1
   createDlgVisible.value = true
 }
+
+const creating = ref(false)
+let createAbort: AbortController | null = null
+
 async function handleCreateSubmit() {
   if (!createFormRef.value) return
   try { await createFormRef.value.validate() } catch { return }
-  if (!brokers.value.trim()) {
+  const b = brokers.value.trim()
+  if (!b) {
     ElMessage.warning('请先填写 brokers')
     return
   }
+  createAbort?.abort()
+  const ac = new AbortController()
+  createAbort = ac
+  const timer = window.setTimeout(() => ac.abort(), CONNECT_TIMEOUT_MS)
+  creating.value = true
   try {
-    await createKafkaTopic({
-      brokers: brokers.value.trim(),
-      topic: createForm.topic,
-      partitions: createForm.partitions,
-      replication_factor: createForm.replication_factor,
-    })
+    await createKafkaTopic(
+      {
+        brokers: b,
+        topic: createForm.topic,
+        partitions: createForm.partitions,
+        replication_factor: createForm.replication_factor,
+      },
+      { signal: ac.signal },
+    )
     ElMessage.success(`Topic ${createForm.topic} 已创建`)
     createDlgVisible.value = false
     void handleConnect()
   } catch (e) {
-    ElMessage.error(errMsg(e, '创建 Topic 失败'))
+    if (ac.signal.aborted) {
+      ElMessage.error('创建超时或已取消，请检查 Brokers 是否可达')
+    } else {
+      ElMessage.error(errMsg(e, '创建 Topic 失败'))
+    }
+  } finally {
+    window.clearTimeout(timer)
+    if (createAbort === ac) {
+      createAbort = null
+      creating.value = false
+    }
   }
 }
 
-onMounted(() => {
-  if (brokers.value.trim()) {
-    // 自动连接（若 localStorage 已有值）
-    void handleConnect()
-  }
-})
 </script>
 
 <template>
@@ -505,7 +561,10 @@ onMounted(() => {
           <el-button type="primary" :icon="Refresh" :loading="connecting" @click="handleConnect">
             连接并列出 Topic
           </el-button>
-          <el-button :icon="Document" :loading="loadingGroups" @click="handleListGroups">
+          <el-button v-if="connecting" @click="cancelConnect">
+            取消
+          </el-button>
+          <el-button :icon="Document" :loading="loadingGroups" :disabled="connecting" @click="handleListGroups">
             列出消费组
           </el-button>
           <el-button
@@ -836,8 +895,8 @@ onMounted(() => {
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="createDlgVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleCreateSubmit">创建</el-button>
+        <el-button :disabled="creating" @click="createDlgVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="handleCreateSubmit">创建</el-button>
       </template>
     </el-dialog>
   </div>

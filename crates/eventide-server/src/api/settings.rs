@@ -400,18 +400,18 @@ fn storm_view(state: &AppState) -> StormSettingsView {
     }
 }
 
-/// v2 Console Beta toggle
+/// Console shell preference (Vue default; legacy opt-out).
 #[derive(Debug, Serialize)]
 pub struct UiBetaToggleView {
-    /// Whether v2 console dist is present and served on this backend
+    /// Whether Vue console dist is present and served on this backend
     pub v2_available: bool,
-    /// Current user-facing preference (1 = on, 0 = off)
+    /// Prefer Vue console (default true when available and Cookie not explicitly 0)
     pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UiBetaToggleUpdate {
-    /// true = use v2 console; false = legacy console
+    /// true = Vue console (default); false = legacy static console
     pub enabled: bool,
     /// Optional max-age seconds override
     #[serde(default)]
@@ -427,23 +427,35 @@ pub(crate) fn v2_available(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
+fn cookie_prefers_v2(req: &axum::extract::Request) -> Option<bool> {
+    for v in req.headers().get_all(axum::http::header::COOKIE) {
+        let Ok(s) = v.to_str() else { continue };
+        for part in s.split(';') {
+            let kv = part.trim();
+            if let Some(val) = kv.strip_prefix("eventide_use_v2=") {
+                if val == "0" || val.starts_with("0&") || val.starts_with("0;") {
+                    return Some(false);
+                }
+                if val == "1" || val.starts_with("1&") || val.starts_with("1;") {
+                    return Some(true);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub async fn get_ui_beta_toggle(
     State(state): State<Arc<AppState>>,
     req: axum::extract::Request,
 ) -> Json<UiBetaToggleView> {
-    let enabled = req
-        .headers()
-        .get_all(axum::http::header::COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|s| s.split(';'))
-        .map(|p| p.trim())
-        .any(|kv| match kv.strip_prefix("eventide_use_v2=") {
-            Some(v) => v == "1" || v.starts_with("1&") || v.starts_with("1;"),
-            None => false,
-        });
+    let available = v2_available(&state);
+    let enabled = match cookie_prefers_v2(&req) {
+        Some(v) => v,
+        None => available, // no cookie → Vue is default when dist exists
+    };
     Json(UiBetaToggleView {
-        v2_available: v2_available(&state),
+        v2_available: available,
         enabled,
     })
 }

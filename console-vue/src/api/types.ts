@@ -73,6 +73,20 @@ export interface NotifySkipItem {
   created_at: string | null
 }
 
+export interface RuntimeMetrics {
+  notify_success: number
+  notify_failure: number
+  notify_throttled: number
+  notify_degraded: number
+  ingress_accepted: number
+  ingress_rejected_429: number
+  escalation_sent: number
+  pressure_inflight: number
+  ingress_max_inflight: number
+  is_leader: boolean
+  cluster_enabled: boolean
+}
+
 export interface OverviewResp {
   health: 'ok' | 'degraded' | 'error' | string
   datasources: number
@@ -94,6 +108,8 @@ export interface OverviewResp {
   is_leader: boolean
   leader_holder_id: string
   cluster_enabled: boolean
+  metrics?: RuntimeMetrics
+  metrics_endpoint?: string
 }
 
 export interface UiBetaToggleResp {

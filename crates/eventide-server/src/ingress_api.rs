@@ -56,6 +56,7 @@ pub async fn receive_auto(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let Some(_permit) = state.pressure.try_enter() else {
+        state.metrics.inc_ingress_rejected_429();
         return too_many_requests();
     };
     let id = match Uuid::parse_str(&id) {
@@ -136,6 +137,7 @@ where
     F: FnOnce(IngressRoute) -> Result<(IngressRoute, Vec<eventide_core::IngressAlert>), String>,
 {
     let Some(_permit) = state.pressure.try_enter() else {
+        state.metrics.inc_ingress_rejected_429();
         return Err(too_many_requests());
     };
     let id = Uuid::parse_str(id).map_err(|_| {
@@ -283,5 +285,6 @@ pub(crate) async fn ingest_list(
         .map_err(|e| e.to_string())?;
         n += 1;
     }
+    state.metrics.add_ingress_accepted(n as u64);
     Ok(n)
 }

@@ -14,6 +14,7 @@ mod kafka_groups;
 mod leader;
 mod license;
 mod login_limit;
+mod metrics;
 mod notify_pipeline;
 mod password;
 mod scheduler;
@@ -25,7 +26,7 @@ mod lookup_sync;
 mod storm_sync;
 
 use anyhow::Context;
-use axum::{middleware, response::IntoResponse, Router};
+use axum::{response::IntoResponse, Router};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -342,6 +343,7 @@ async fn async_main() -> anyhow::Result<()> {
         lookup_sync: Arc::new(std::sync::RwLock::new(lookup_sync_runtime)),
         license,
         login_limiter,
+        metrics: crate::metrics::Metrics::new(),
     });
     // Seed Redis snapshot so Trap instances can boot without waiting for a CRUD.
     state.sync_policies_to_redis().await;
@@ -379,58 +381,75 @@ async fn async_main() -> anyhow::Result<()> {
     // A. API router — 与之前 merge(api::router(state.clone())) 完全等价
     let api_router = api::router(state.clone());
 
-    // B. v2 router — /v2/* 前缀路由 + 根路径智能分发中间件（Cookie eventide_use_v2=1）
+    // B. v2 静态：/v2/*；根路径单独路由（route_layer 挂在 nest 上碰不到 GET /）
     let v2_router = match &v2_static_dir {
-        Some(dir) => {
-            let v2_index = PathBuf::from(dir).join("index.html");
-            // 根路径智能分发：若 GET / 且 Cookie eventide_use_v2=1 命中 → 直接返回 v2 index.html；
-            // 否则交给 fallback_service（老版 static 目录，即 NFR-7 兜底）。
-            Router::new()
-                .nest_service("/v2", ServeDir::new(dir.clone()))
-                .route_layer(middleware::from_fn(
-                    move |req: axum::extract::Request, next: middleware::Next| {
-                        let v2_index = v2_index.clone();
-                        async move {
-                        if req.method() == axum::http::Method::GET
-                            && req.uri().path() == "/"
-                        {
-                            let cookie_hit = req
-                                .headers()
-                                .get_all(axum::http::header::COOKIE)
-                                .iter()
-                                .filter_map(|v| v.to_str().ok())
-                                .flat_map(|s| s.split(';'))
-                                .map(|p| p.trim())
-                                .any(|kv| {
-                                    // 严格匹配 eventide_use_v2=1；容忍后续 & 或空串
-                                    match kv.strip_prefix("eventide_use_v2=") {
-                                        Some(v) => v == "1" || v.starts_with("1&") || v.starts_with("1;"),
-                                        None => false,
-                                    }
-                                });
-                            if cookie_hit {
-                                return match tokio::fs::read_to_string(&v2_index).await {
-                                    Ok(body) => axum::response::Html(body).into_response(),
-                                    Err(e) => (
-                                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                        format!("v2 index read error: {e}"),
-                                    )
-                                        .into_response(),
-                                };
-                            }
-                        }
-                        next.run(req).await
-                    }
-                }
-                ))
-        }
+        Some(dir) => Router::new().nest_service("/v2", ServeDir::new(dir.clone())),
         None => Router::new(),
     };
 
-    // C. fallback 仍然是老版 static 目录，保证非 API / 非 v2 请求全部回落到旧版（NFR-7）
+    let root_v2_index = v2_static_dir
+        .as_ref()
+        .map(|d| PathBuf::from(d).join("index.html"));
+    let root_legacy_index = PathBuf::from(&static_dir).join("index.html");
+
+    // C. fallback：旧版 static（Cookie=0 时根路径也会读 legacy index）
     let fallback_svc = ServeDir::new(&static_dir);
 
+    let metrics_state = state.clone();
     let app = Router::new()
+        .route(
+            "/",
+            axum::routing::get({
+                let v2_index = root_v2_index.clone();
+                let legacy_index = root_legacy_index.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let v2_index = v2_index.clone();
+                    let legacy_index = legacy_index.clone();
+                    async move {
+                        let prefer_legacy = headers
+                            .get_all(axum::http::header::COOKIE)
+                            .iter()
+                            .filter_map(|v| v.to_str().ok())
+                            .flat_map(|s| s.split(';'))
+                            .map(|p| p.trim())
+                            .any(|kv| match kv.strip_prefix("eventide_use_v2=") {
+                                Some(v) => {
+                                    v == "0" || v.starts_with("0&") || v.starts_with("0;")
+                                }
+                                None => false,
+                            });
+                        let path = if prefer_legacy {
+                            legacy_index
+                        } else {
+                            v2_index.unwrap_or(legacy_index)
+                        };
+                        match tokio::fs::read_to_string(&path).await {
+                            Ok(body) => axum::response::Html(body).into_response(),
+                            Err(e) => (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("console index read error: {e}"),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/metrics",
+            axum::routing::get(move || {
+                let state = metrics_state.clone();
+                async move {
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        )],
+                        state.metrics.render_prometheus(&state),
+                    )
+                }
+            }),
+        )
         .merge(api_router)
         .merge(v2_router)
         .fallback_service(fallback_svc)
@@ -439,10 +458,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = config.listen.parse().context("parse listen addr")?;
     tracing::info!("eventide listening on http://{addr}");
-    tracing::info!("static console from {static_dir}");
-    match &config.v2_static_dir {
-        Some(dir) => tracing::info!("v2 console available at /v2/ (dir={dir})"),
-        None => tracing::info!("v2 console skipped (dist directory missing)"),
+    tracing::info!("static console from {static_dir} (legacy fallback)");
+    match &v2_static_dir {
+        Some(dir) => tracing::info!(
+            "vue console is default at / (also /v2/); dir={dir}; set Cookie eventide_use_v2=0 for legacy"
+        ),
+        None => tracing::info!("vue console skipped (dist directory missing); serving legacy only"),
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

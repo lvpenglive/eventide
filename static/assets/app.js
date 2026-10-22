@@ -480,20 +480,17 @@ const V2_ROUTE_MAP = {
 };
 
 (function redirectV2IfNeeded() {
-  // 检测 Beta Cookie eventide_use_v2=1
-  const cookieHit = document.cookie.split(";").map(s => s.trim()).some(kv => {
+  // Vue 为默认：仅当明确 Cookie eventide_use_v2=0 时留在旧版
+  const preferLegacy = document.cookie.split(";").map(s => s.trim()).some(kv => {
     const m = kv.match(/^eventide_use_v2=(.+)/);
-    return m && (m[1] === "1" || m[1].startsWith("1&") || m[1].startsWith("1;"));
+    return m && (m[1] === "0" || m[1].startsWith("0&") || m[1].startsWith("0;"));
   });
-  if (!cookieHit) return;
+  if (preferLegacy) return;
 
-  // 旧版 hash page → 新版 /v2/#/path
   const hashPage = location.hash.slice(1);
   const v2Path = (hashPage && V2_ROUTE_MAP[hashPage]) || "overview";
-  // 避免重复跳转
-  if (location.pathname === "/v2/") return;
-  const target = "/v2/#/" + v2Path;
-  location.replace(target);
+  if (location.pathname === "/v2/" || location.pathname.startsWith("/v2/")) return;
+  location.replace("/v2/#/" + v2Path);
 })();
 
 // hashchange 监听：浏览器前进/后退按钮同步页面
@@ -3810,10 +3807,10 @@ const pages = {
         <div id="settings-theme"></div>
       </div>
       <div class="panel" style="max-width:720px;margin-bottom:16px">
-        <h3 style="margin:0 0 0.75rem;font-size:1rem">新版控制台 (Beta)</h3>
+        <h3 style="margin:0 0 0.75rem;font-size:1rem">控制台版本</h3>
         <p class="hint" style="margin:0 0 12px">
-          开启后会写入本机 Cookie <code>eventide_use_v2=1</code>，刷新页面即进入新版 Vue3 控制台。
-          任何时候不喜欢，回到这里关闭即可一键回退（NFR-6 保证）。
+          Vue 控制台为默认。关闭会写入 Cookie <code>eventide_use_v2=0</code> 留在本页旧版；
+          开启（或清除 Cookie）后刷新进入 Vue 控制台。
         </p>
         <div id="settings-betatoggle"><p class="hint">读取中...</p></div>
       </div>
@@ -3993,12 +3990,12 @@ const pages = {
       betaHost.innerHTML = `
         <label class="check-row" style="margin:0">
           <input type="checkbox" id="beta-toggle-on" ${view.enabled ? "checked" : ""} ${dis} />
-          <span>启用新版控制台 (Beta) · 刷新后生效</span>
+          <span>使用 Vue 控制台（默认）· 刷新后生效</span>
         </label>
         <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
           <button class="primary" id="beta-save" ${dis}>保存并刷新</button>
-          <button id="beta-open-v2">直接打开 /v2/ (新窗口)</button>
-          <p class="hint" style="margin:0;flex-basis:100%">Cookie 有效期 30 天；关闭则立即返回旧版。</p>
+          <button id="beta-open-v2">打开 /v2/ (新窗口)</button>
+          <p class="hint" style="margin:0;flex-basis:100%">取消勾选写入 Cookie=0 留在旧版；勾选或清除 Cookie 后走 Vue 默认壳。</p>
         </div>`;
       const sw = document.getElementById("beta-toggle-on");
       const saveBtn = document.getElementById("beta-save");
@@ -4008,7 +4005,7 @@ const pages = {
         try {
           const enabled = !!sw?.checked;
           await api("/api/settings/ui-betatoggle", { method: "PUT", body: JSON.stringify({ enabled }) });
-          toast(enabled ? "已切换到新版控制台，刷新生效" : "已切回旧版控制台，刷新生效");
+          toast(enabled ? "已切换到 Vue 控制台，刷新生效" : "已切回旧版控制台，刷新生效");
           setTimeout(() => location.reload(), 400);
         } catch (e) {
           toast(e.message, true);

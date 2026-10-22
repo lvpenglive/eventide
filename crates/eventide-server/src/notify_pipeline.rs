@@ -71,6 +71,12 @@ fn write_log(
     body: String,
     now: DateTime<Utc>,
 ) {
+    match (success, error.as_deref()) {
+        (true, _) => state.metrics.inc_notify_success(),
+        (false, Some("throttled")) => state.metrics.inc_notify_throttled(),
+        (false, Some("degraded")) => state.metrics.inc_notify_degraded(),
+        (false, _) => state.metrics.inc_notify_failure(),
+    }
     let _ = state.db.insert_notify_log(&NotifyLog {
         id: Uuid::new_v4(),
         alert_id,
@@ -599,6 +605,7 @@ pub async fn escalate_alert_notify(
         event.escalated_at = Some(now);
         state.db.upsert_alert(&event)?;
         maybe_index_alert(state, &event);
+        state.metrics.inc_escalation_sent();
         return Ok(());
     }
 
@@ -607,5 +614,6 @@ pub async fn escalate_alert_notify(
     event.escalated_at = Some(now);
     state.db.upsert_alert(&event)?;
     maybe_index_alert(state, &event);
+    state.metrics.inc_escalation_sent();
     Ok(())
 }

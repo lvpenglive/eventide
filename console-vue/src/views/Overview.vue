@@ -662,6 +662,39 @@ const inflightStatus = computed<'' | 'success' | 'warning' | 'exception'>(() => 
           </el-card>
         </el-col>
       </el-row>
+
+      <el-card class="panel panel-runtime" shadow="never" style="margin-top: 16px">
+        <template #header>
+          <div class="panel-head">
+            <span class="panel-title">自监控（本进程）</span>
+            <a class="hi-sub" href="/metrics" target="_blank" rel="noopener">Prometheus /metrics</a>
+          </div>
+        </template>
+        <div class="stats-row stats-meta">
+          <div class="stat-card">
+            <el-statistic title="通知成功" :value="Number(data?.metrics?.notify_success ?? 0)" />
+          </div>
+          <div class="stat-card">
+            <el-statistic title="通知失败" :value="Number(data?.metrics?.notify_failure ?? 0)" />
+          </div>
+          <div class="stat-card">
+            <el-statistic title="节流跳过" :value="Number(data?.metrics?.notify_throttled ?? 0)" />
+          </div>
+          <div class="stat-card">
+            <el-statistic title="降级跳过" :value="Number(data?.metrics?.notify_degraded ?? 0)" />
+          </div>
+          <div class="stat-card">
+            <el-statistic title="接入受理" :value="Number(data?.metrics?.ingress_accepted ?? 0)" />
+          </div>
+          <div class="stat-card">
+            <el-statistic title="接入 429" :value="Number(data?.metrics?.ingress_rejected_429 ?? 0)" />
+          </div>
+          <div class="stat-card">
+            <el-statistic title="升级发送" :value="Number(data?.metrics?.escalation_sent ?? 0)" />
+          </div>
+        </div>
+        <p class="pressure-note">计数自进程启动累计；抓取端点 {{ data?.metrics_endpoint || '/metrics' }}（无需登录）。</p>
+      </el-card>
     </template>
 
     <!-- ====== 告警详情弹窗 ====== -->

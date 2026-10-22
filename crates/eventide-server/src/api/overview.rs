@@ -99,6 +99,8 @@ pub async fn overview(
         "is_leader": state.leader.is_leader(),
         "leader_holder_id": state.leader.holder_id(),
         "cluster_enabled": state.config.cluster.enabled,
+        "metrics": state.metrics.snapshot_json(&state),
+        "metrics_endpoint": "/metrics",
     })))
 }
 

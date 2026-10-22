@@ -30,28 +30,35 @@ export function probeKafkaPartitions(
 /**
  * 探测 Kafka 集群连通性+列 Topic：POST /api/ingress/kafka/probe
  */
-export function probeKafkaCluster(body: {
-  brokers: string
-  topic?: string
-}): Promise<B4KafkaClusterProbe> {
+export function probeKafkaCluster(
+  body: {
+    brokers: string
+    topic?: string
+  },
+  opts?: { signal?: AbortSignal },
+): Promise<B4KafkaClusterProbe> {
   const payload: { brokers: string; topic?: string } = { brokers: body?.brokers ?? '' }
   if (body?.topic !== undefined && body.topic !== '') payload.topic = body.topic
   return request<B4KafkaClusterProbe>('/api/ingress/kafka/probe', {
     method: 'POST',
     body: JSON.stringify(payload),
+    signal: opts?.signal,
   })
 }
 
 /**
  * 创建 Kafka Topic：POST /api/ingress/kafka/topics
  */
-export function createKafkaTopic(body: {
-  brokers: string
-  topic: string
-  partitions?: number
-  replication_factor?: number
-  configs?: Record<string, string>
-}): Promise<{ ok: true; topic: string }> {
+export function createKafkaTopic(
+  body: {
+    brokers: string
+    topic: string
+    partitions?: number
+    replication_factor?: number
+    configs?: Record<string, string>
+  },
+  opts?: { signal?: AbortSignal },
+): Promise<{ ok: true; topic: string }> {
   const payload: {
     brokers: string
     topic: string
@@ -68,6 +75,7 @@ export function createKafkaTopic(body: {
   return request<{ ok: true; topic: string }>('/api/ingress/kafka/topics', {
     method: 'POST',
     body: JSON.stringify(payload),
+    signal: opts?.signal,
   })
 }
 

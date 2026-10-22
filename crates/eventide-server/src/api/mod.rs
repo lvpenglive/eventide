@@ -2312,14 +2312,21 @@ async fn probe_kafka_cluster(
         return Err(ApiError::bad("brokers required"));
     }
     let started = std::time::Instant::now();
-    let client = state
-        .kafka_pool
-        .get(&brokers)
+    let probe = async {
+        let client = state
+            .kafka_pool
+            .get(&brokers)
+            .await
+            .map_err(|e| ApiError::bad(format!("connect failed: {e}")))?;
+        let topics = eventide_sources::list_topics(client.as_ref())
+            .await
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+        Ok::<_, ApiError>(topics)
+    };
+    let topics = tokio::time::timeout(std::time::Duration::from_secs(8), probe)
         .await
-        .map_err(|e| ApiError::bad(format!("connect failed: {e}")))?;
-    let topics = eventide_sources::list_topics(client.as_ref())
-        .await
-        .map_err(|e| ApiError::bad(e.to_string()))?;
+        .map_err(|_| ApiError::bad("connect timeout (8s)"))?
+        ?;
     let latency_ms = started.elapsed().as_millis() as u64;
     let topic = input.topic.trim();
     let mut body = serde_json::json!({
@@ -2378,46 +2385,53 @@ async fn create_kafka_topic(
     if brokers.is_empty() {
         return Err(ApiError::bad("brokers required"));
     }
-    let topic = input.topic.trim();
+    let topic = input.topic.trim().to_string();
     if topic.is_empty() {
         return Err(ApiError::bad("topic required"));
     }
     if input.partitions <= 0 {
         return Err(ApiError::bad("partitions must be > 0"));
     }
-    let client = state
-        .kafka_pool
-        .get(&brokers)
+    let partitions = input.partitions;
+    let replication_factor = input.replication_factor;
+    let create = async {
+        let client = state
+            .kafka_pool
+            .get(&brokers)
+            .await
+            .map_err(|e| ApiError::bad(e.to_string()))?;
+        if let Ok(n) = eventide_sources::topic_partition_count(client.as_ref(), &topic).await {
+            return Ok(Json(serde_json::json!({
+                "ok": true,
+                "created": false,
+                "topic": topic,
+                "partitions": n,
+                "message": "topic already exists",
+            })));
+        }
+        eventide_sources::create_topic(
+            client.as_ref(),
+            &topic,
+            partitions,
+            replication_factor,
+        )
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?;
-    if let Ok(n) = eventide_sources::topic_partition_count(client.as_ref(), topic).await {
-        return Ok(Json(serde_json::json!({
+        // Metadata may lag briefly after create.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let n = eventide_sources::topic_partition_count(client.as_ref(), &topic)
+            .await
+            .unwrap_or(partitions);
+        Ok(Json(serde_json::json!({
             "ok": true,
-            "created": false,
+            "created": true,
             "topic": topic,
             "partitions": n,
-            "message": "topic already exists",
-        })));
-    }
-    eventide_sources::create_topic(
-        client.as_ref(),
-        topic,
-        input.partitions,
-        input.replication_factor,
-    )
-    .await
-    .map_err(|e| ApiError::bad(e.to_string()))?;
-    // Metadata may lag briefly after create.
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    let n = eventide_sources::topic_partition_count(client.as_ref(), topic)
+        })))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(12), create)
         .await
-        .unwrap_or(input.partitions);
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "created": true,
-        "topic": topic,
-        "partitions": n,
-    })))
+        .map_err(|_| ApiError::bad("create topic timeout (12s); check brokers"))?
 }
 
 fn parse_brokers(raw: &str) -> ApiResult<Vec<String>> {

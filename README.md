@@ -373,6 +373,7 @@ SQLite 单机版快照标签：`sqlite-baseline`（迁移前保留）。
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
+| GET | `/metrics` | Prometheus 自监控（进程计数，无需登录） |
 | POST | `/api/auth/login` | 登录，返回 JWT |
 | POST | `/api/ingress/{id}/alertmanager` | Alertmanager Webhook |
 | POST | `/api/ingress/{id}/generic` | 通用告警 Webhook |
@@ -450,10 +451,9 @@ cargo run -p eventide-server -- eventide.toml
 ```
 
 启用后：
-- 浏览器首次访问 `http://127.0.0.1:8080` 仍走旧版控制台
-- 登录后到 **系统设置 → UI Beta**，勾选「启用新版控制台」并刷新
-- Cookie 写入后浏览器被自动重定向到 `/v2/` 前缀的新版控制台
-- 取消勾选或清除 Cookie 即可回退到旧版
+- 浏览器访问 `http://127.0.0.1:8080` **默认进入 Vue 控制台**（`/` 与 `/v2/`）
+- 需要旧版时：系统设置 → **控制台版本** 关闭，写入 Cookie `eventide_use_v2=0`
+- 自监控：Prometheus 文本指标见 `GET /metrics`（无需登录）；总览页也有本进程计数
 
 > CI 已在 Linux / Windows job 内自动执行 `npm ci && npm run build`，release tar.gz / zip 内同时包含 `static/` 与 `console-vue/dist/`，**解压即可启用**。麒麟容器常离线无 Node，其 artifact 不含 `console-vue/dist/`，需要时请从 Linux artifact 复制。
 
@@ -1307,7 +1307,7 @@ cp eventide-trap.toml.example eventide-trap.toml
 
 #### 现状（影子前端模式）
 
-仓库已落 **旧版 `static/` + 新版 `console-vue/`** 双前端，旧版仍为默认、新版为影子（按需启用），并已覆盖 18/19 个页面。详见 [§14.3 构建影子前端（Vue3）](#143-构建影子前端vue3)。
+仓库已落 **Vue `console-vue/`（默认交付壳）+ 旧版 `static/`（Cookie 回退）** 双前端，页面覆盖齐全。详见 [§14.3](#143-构建影子前端vue3)。
 
 | 项 | 说明 |
 |----|------|
@@ -1315,9 +1315,9 @@ cp eventide-trap.toml.example eventide-trap.toml
 | 旧版入口 | `index.html` → `type="module"` 加载 `assets/app.js` |
 | 旧版已拆模块 | `assets/js/api.js`（鉴权请求）、`ui.js`（toast / modal / esc 等）、`pages/alerts.js`（告警列表与详情） |
 | 旧版其余页面 | 仍集中在 `app.js`（路由 + Trap / 规则 / 丰富 / IAM 等） |
-| 新版形态 | `console-vue/` Vue3 + Vite + TS + Pinia + Element Plus；`v2_static_dir = "console-vue/dist"` 启用 |
-| 新版入口 | 服务按 Cookie 自动分发到 `/`（旧）或 `/v2/`（新）；前端路由 hash 模式以兼容旧链接 |
-| 双版切换 | 登录后 **系统设置 → UI Beta** 切换；旧版 hash 路由 `#page` → 新版 `/#/page` 自动桥接 |
+| 默认形态 | `console-vue/` Vue3 + Vite + TS + Pinia + Element Plus；`v2_static_dir = "console-vue/dist"` |
+| 默认入口 | 构建 dist 后 `/` 默认 Vue；`/v2/` 同壳；Cookie `eventide_use_v2=0` 回退旧版 |
+| 切换 | **系统设置 → 控制台版本**；旧版 hash `#page` → `/v2/#/page` 自动桥接 |
 
 内嵌静态页**够用**（配置、查看、操作都能完成）；新版 Vue3 已覆盖 B1–B4（告警 / 接入 / 规则 / 静默 / 维护 / 数据源 / Kafka / Trap / MIB / 策略 / 丰富 / IAM / 设置 / 通知）共 18 页，对照商业控制台短板从「体验一致性」转为「打磨 + 收尾」。
 
@@ -1357,16 +1357,17 @@ static/
 新版 Vue3 影子前端已按下列形态落地：
 
 - 单独 `console-vue/` 工程，`npm run build` → 产物写到 `console-vue/dist/`（**不**覆盖 `static/`）  
-- 服务端 `main.rs` 双 `ServeDir`：`static_dir`（默认） + `v2_static_dir`（可选）；缺失自动回退  
-- 浏览器侧靠 Cookie 智能分发：旧版默认 → 用户在系统设置开启 Beta → 后端 Set-Cookie + 旧版 app.js 注入 Beta 开关 → 重定向 `/v2/`  
-- 旧版 hash 路由（`#alerts` 等）自动桥接为新版 `/#/alerts`，避免迁移期链接断裂  
+- 服务端 `main.rs`：`v2_static_dir` 存在时 **`/` 默认 Vue**；`static_dir` 作 Cookie=0 回退  
+- Cookie：`eventide_use_v2=0` 强制旧版；缺省或 `=1` 走 Vue  
+- 旧版 hash 路由（`#alerts` 等）自动桥接为 `/v2/#/alerts`  
 - 详见 [§14.3](#143-构建影子前端vue3) 构建命令与常见问题
 
 #### 阶段 3 — 更后可演进
 
-出现以下信号再考虑把 Vue3 升为默认：
+Vue 已是默认交付壳。后续可考虑：
 
-- 新版在生产稳定运行一段周期、客户反馈无重大回归  
+- 旧版 `static/` 仅保留紧急回退，逐步停更  
+
 - 2 人以上长期改前端  
 - 客户明确要求弃用旧版
 
